@@ -423,7 +423,7 @@ class ReadsCensusTest(unittest.TestCase):
         self.assertNotEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, PREVIOUS_ARG_CONTRACT_HASH)
         self.assertIn('SERVER_ARG_CONTRACT_HASH = "3b800b7c7ee0674c"', self.source)
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', messages)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', messages)
 
     def test_a_stale_server_census_names_the_missing_tool(self) -> None:
         registered = frozenset(
@@ -691,7 +691,11 @@ class NavPathEnforceTest(unittest.TestCase):
                 "!aiWorld.SampleNavmeshPosition(toPos, command.args.snap_radius, filter, toSnapped)",
                 "no_navmesh_at_to",
             ),
-            ("!found || !waypoints || waypoints.Count() == 0", "no_path"),
+            (
+                "!found || !waypoints || waypoints.Count() == 0 "
+                "|| vector.Distance(waypoints.Get(waypoints.Count() - 1), toSnapped) > NAV_END_MAX_DISTANCE_M",
+                "no_path",
+            ),
         ):
             with self.subTest(error=error):
                 body = _if_body(self.code, condition)
@@ -705,7 +709,8 @@ class NavPathEnforceTest(unittest.TestCase):
             self.code,
             (
                 "aiWorld = world.GetAIWorld();",
-                "filter = BuildNavWalkFilter();",
+                "m_NavWalkFilter = BuildNavWalkFilter();",
+                "filter = m_NavWalkFilter;",
                 "if (!aiWorld.SampleNavmeshPosition(fromPos,",
                 "if (!aiWorld.SampleNavmeshPosition(toPos,",
                 "waypoints = new TVectorArray();",
@@ -769,7 +774,7 @@ class NavPathEnforceTest(unittest.TestCase):
                 "return filter;",
             ),
         )
-        self.assertIsNone(re.search(r"PGPolyFlags\.\w+\s*\|", self.source))
+        self.assertIsNone(re.search(r"<<\s*\(?\s*PGPolyFlags\.", self.source))
 
     def test_the_reply_members(self) -> None:
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
@@ -1208,7 +1213,11 @@ class ReadsToolTest(unittest.IsolatedAsyncioTestCase):
                 "SampleNavmeshPosition",
                 "FindPath",
                 "both ends included",
-                "its masks are wrong",
+                "WALK|DOOR|INSIDE = 13",
+                "DISABLED|SWIM|SWIM_SEA = 50",
+                "more than 0.5 m from to_snapped answers no_path",
+                "calls no longer leak one each",
+                "the RPT still reports the shared one once",
                 "no_navmesh_at_to",
                 "no navmesh the filter admits within snap_radius",
                 "no_path",

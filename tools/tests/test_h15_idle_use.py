@@ -36,7 +36,8 @@ _H15_CRITERION = (
 _H15_STATE = (
     "[verify] offline ✓; pase A en verde; pase B vuelta 1 en verde "
     "(aviso visto, cierre `idle_timeout` `orderly`); falta el rescate "
-    "moviendo el ratón durante el aviso; el vigilante sigue apagado"
+    "moviendo el ratón durante el aviso; el vigilante viene encendido "
+    'salvo con `{"enabled": false}`'
 )
 _H13_CRITERION = "Diagnóstico seguro de lifecycle y runs compartidos"
 _LEASE_CLEANUP = (

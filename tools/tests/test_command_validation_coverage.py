@@ -248,12 +248,31 @@ def _minimal_args(cmd: str) -> dict:
         return {"view": "third"}
     if cmd == "actor_emote":
         return {"emote": "greeting", "wait_s": 10.0}
+    if cmd == "ai_emote":
+        return {"object_id": 1, "emote": "greeting", "wait_s": 10.0}
     if cmd == "survivor_drive":
         return {"object_id": 1, "mode": "release"}
     if cmd == "survivor_drive_release":
         return {"command_id": 1, "object_id": 1}
     if cmd == "camera_path_release":
         return {"command_id": 1}
+    if cmd == "ai_group_spawn":
+        return {
+            "faction": "West",
+            "count": 1,
+            "pos": [0.0, 0.0, 0.0],
+            "loadout": "",
+            "formation": "Vee",
+            "behaviour": "HOLD",
+            "waypoints": [],
+            "spawn_token": "0" * 32,
+        }
+    if cmd == "ai_group_release":
+        return {"spawn_token": "0" * 32}
+    if cmd == "ai_group_order":
+        return {"group_id": 1, "behaviour": "HOLD"}
+    if cmd == "ai_group_state":
+        return {"group_id": 1}
     if cmd == "action_cursor_ids":
         return {"net_low": [1], "net_high": [2], "run_token": "run"}
     if cmd == "server_perf":

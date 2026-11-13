@@ -86,11 +86,11 @@ modded class MissionGameplay
 		}
 	}
 
-	// Expose vanilla's protected m_PauseQueued (missiongameplay.c:45) so
-	// MCPClientBridge can cancel a pause queued by ui_pause when the menu did
-	// not open: Pause() sets it before its loading, respawning and menu
-	// visibility guards (:1306, :1308-1326), OnUpdate retries it (:308-311),
-	// only opening MENU_INGAME clears it (:1331), and Continue() leaves it
+	// §2.6 C14 (lease close): the pause ui_pause queued, for the client
+	// bridge. Vanilla keeps it in the protected m_PauseQueued
+	// (missiongameplay.c:45): Pause() sets it before its loading and
+	// respawning guards (:1306, :1308-1317), OnUpdate retries it (:308-311),
+	// only opening the menu clears it (:1331), and Continue() leaves it
 	// (:1334-1348).
 	bool MCP_IsPauseQueued()
 	{

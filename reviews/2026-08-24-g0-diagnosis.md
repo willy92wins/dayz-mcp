@@ -20,7 +20,7 @@ Sólo se usan los campos enumerados aquí; no se atribuye semántica a los campo
 | `vehicle_fixture_ready` | `true` | `true` | `evidence/_tramoA-gate-clientonly.json:11`, `evidence/_tramoA-gate-clientonly.json:29` |
 | `is_owner` | `1` | `1` | `evidence/_tramoA-gate-clientonly.json:12`, `evidence/_tramoA-gate-clientonly.json:30` |
 | `is_authority_owner` | `0` | `0` | `evidence/_tramoA-gate-clientonly.json:13`, `evidence/_tramoA-gate-clientonly.json:31` |
-| `owner_identity` | `"76561198141021937"` | `"76561198141021937"` | `evidence/_tramoA-gate-clientonly.json:14`, `evidence/_tramoA-gate-clientonly.json:32` |
+| `owner_identity` | `"76561198000000101"` | `"76561198000000101"` | `evidence/_tramoA-gate-clientonly.json:14`, `evidence/_tramoA-gate-clientonly.json:32` |
 | `net_strategy` | `2` | `2` | `evidence/_tramoA-gate-clientonly.json:15`, `evidence/_tramoA-gate-clientonly.json:33` |
 | `net_id` | `[23, 0]` | `[23, 0]` | `evidence/_tramoA-gate-clientonly.json:16`, `evidence/_tramoA-gate-clientonly.json:34` |
 | `error` | `""` | `""` | `evidence/_tramoA-gate-clientonly.json:20`, `evidence/_tramoA-gate-clientonly.json:38` |
@@ -37,10 +37,10 @@ El artefacto de verbos contiene un control positivo que no debe omitirse del dia
 | Campo | Valor exacto | Fuente |
 |---|---:|---|
 | `get_in.seated` / `seat` / `vehicle_fixture_ready` | `1` / `"driver"` / `1` | `evidence/_tramoA_verbs_verdict.json:15`, `evidence/_tramoA_verbs_verdict.json:16`, `evidence/_tramoA_verbs_verdict.json:18` |
-| ownership al sentarse | `net_strategy=2`, `is_owner=1`, `owner_identity="76561198141021937"`, `net_id=[23,0]`, `is_authority_owner=0` | `evidence/_tramoA_verbs_verdict.json:23`, `evidence/_tramoA_verbs_verdict.json:24`, `evidence/_tramoA_verbs_verdict.json:25`, `evidence/_tramoA_verbs_verdict.json:26`, `evidence/_tramoA_verbs_verdict.json:27`, `evidence/_tramoA_verbs_verdict.json:28` |
+| ownership al sentarse | `net_strategy=2`, `is_owner=1`, `owner_identity="76561198000000101"`, `net_id=[23,0]`, `is_authority_owner=0` | `evidence/_tramoA_verbs_verdict.json:23`, `evidence/_tramoA_verbs_verdict.json:24`, `evidence/_tramoA_verbs_verdict.json:25`, `evidence/_tramoA_verbs_verdict.json:26`, `evidence/_tramoA_verbs_verdict.json:27`, `evidence/_tramoA_verbs_verdict.json:28` |
 | telemetría inicial | `pos=[6063.013671875,5.880380630493164,1972.0299072265625]`, `engine_on_server=1`, `speedo_max=1.3316757678985596`, `gear=1` | `evidence/_tramoA_verbs_verdict.json:79`, `evidence/_tramoA_verbs_verdict.json:89`, `evidence/_tramoA_verbs_verdict.json:90`, `evidence/_tramoA_verbs_verdict.json:92` |
 | telemetría final | `pos=[6062.75634765625,4.244087219238281,2007.4820556640625]`, `engine_on_server=1`, `speedo_max=39.821712493896484`, `gear=5` | `evidence/_tramoA_verbs_verdict.json:149`, `evidence/_tramoA_verbs_verdict.json:159`, `evidence/_tramoA_verbs_verdict.json:160`, `evidence/_tramoA_verbs_verdict.json:162` |
-| ownership final | `net_strategy=2`, `is_owner=1`, `owner_identity="76561198141021937"`, `net_id=[23,0]`, `is_authority_owner=0` | `evidence/_tramoA_verbs_verdict.json:163`, `evidence/_tramoA_verbs_verdict.json:164`, `evidence/_tramoA_verbs_verdict.json:165`, `evidence/_tramoA_verbs_verdict.json:166`, `evidence/_tramoA_verbs_verdict.json:167`, `evidence/_tramoA_verbs_verdict.json:168` |
+| ownership final | `net_strategy=2`, `is_owner=1`, `owner_identity="76561198000000101"`, `net_id=[23,0]`, `is_authority_owner=0` | `evidence/_tramoA_verbs_verdict.json:163`, `evidence/_tramoA_verbs_verdict.json:164`, `evidence/_tramoA_verbs_verdict.json:165`, `evidence/_tramoA_verbs_verdict.json:166`, `evidence/_tramoA_verbs_verdict.json:167`, `evidence/_tramoA_verbs_verdict.json:168` |
 | veredicto del control | `pos_delta=35.49082276752407`, `telemetry_speedo=39.821712493896484`, `seated=true`, `is_owner=1`, `PASS=true` | `evidence/_tramoA_verbs_verdict.json:225`, `evidence/_tramoA_verbs_verdict.json:226`, `evidence/_tramoA_verbs_verdict.json:227`, `evidence/_tramoA_verbs_verdict.json:228`, `evidence/_tramoA_verbs_verdict.json:229` |
 
 ### 1.3 Comparación diferencial, sin presuponer que sólo cambió la posición
@@ -48,7 +48,7 @@ El artefacto de verbos contiene un control positivo que no debe omitirse del dia
 | Dimensión | Estado |
 |---|---|
 | Classname | `[VERIFIED]` `CivilianSedan` en el rojo. `[UNCHECKED]` en el control: su JSON no guarda classname; `car_pos` no lo demuestra. `evidence/_tramoA-gate-clientonly.json:2`, `evidence/_tramoA_verbs_verdict.json:210` |
-| Ownership observable | `[VERIFIED]` mismos valores publicados: `is_owner=1`, `is_authority_owner=0`, `owner_identity="76561198141021937"`, `net_strategy=2`, net id numérico `[23,0]`. Las citas están en las dos tablas anteriores. |
+| Ownership observable | `[VERIFIED]` mismos valores publicados: `is_owner=1`, `is_authority_owner=0`, `owner_identity="76561198000000101"`, `net_strategy=2`, net id numérico `[23,0]`. Las citas están en las dos tablas anteriores. |
 | Resultado físico | `[VERIFIED]` rojo `0.115–0.126 m` y `0.0 km/h`; control `35.49082276752407 m` y `39.821712493896484 km/h`. Las citas están en las dos tablas anteriores. |
 | Posición | `[VERIFIED]` el rojo parte de z=`1931.7137451171875`; el control parte de z=`1972.0299072265625`, unos 40 m más al norte. `evidence/_tramoA-gate-clientonly.json:42`, `evidence/_tramoA_verbs_verdict.json:79` |
 | Camino de mando | `[VERIFIED]` el rojo sólo publica etiquetas `client mode=...`; no guarda el nombre del command. El control publica un resultado `control` entre `telemetry0` y `telemetry1`; el JSON tampoco guarda el nombre del command. `evidence/_tramoA-gate-clientonly.json:6`, `evidence/_tramoA_verbs_verdict.json:69`, `evidence/_tramoA_verbs_verdict.json:106`, `evidence/_tramoA_verbs_verdict.json:139` |

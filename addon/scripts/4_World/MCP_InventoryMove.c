@@ -98,9 +98,21 @@ modded class PlayerBase
 		Print("[DayZ_MCP] inventory_move dropped reason=" + reason);
 	}
 
+	// Set when a predictive call was issued for the RPC being applied, and
+	// reset at the top of each apply. A refusal is only meaningful (and only
+	// liquidates the server's RPC register, §2.7 step 5) when nothing was
+	// emitted yet, so MCPRefuseInventoryMove stays silent after an emit.
+	protected bool m_MCPInventoryMoveEmitted;
+
 	// The id was read, so the server can match this refusal to the job.
 	protected void MCPRefuseInventoryMove(int jobId, string reason)
 	{
+		if (m_MCPInventoryMoveEmitted)
+		{
+			MCPDropInventoryMove("refuse_after_emit");
+			return;
+		}
+
 		MCPDropInventoryMove(reason);
 		ScriptRPC rpc = new ScriptRPC();
 		if (!rpc.Write(jobId))
@@ -226,6 +238,7 @@ modded class PlayerBase
 
 	protected void MCPApplyInventoryMoveRpc(ParamsReadContext ctx)
 	{
+		m_MCPInventoryMoveEmitted = false;
 		int jobId = 0;
 		int itemLow = 0;
 		int itemHigh = 0;
@@ -315,6 +328,12 @@ modded class PlayerBase
 		if (refusal != "")
 		{
 			MCPRefuseInventoryMove(jobId, refusal);
+		}
+		else
+		{
+			// The predictive call was issued: no refusal of this RPC may
+			// liquidate anything from here on (§2.7 step 5).
+			m_MCPInventoryMoveEmitted = true;
 		}
 	}
 

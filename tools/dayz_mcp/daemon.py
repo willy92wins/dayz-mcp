@@ -60,6 +60,7 @@ from dayz_mcp.idle_warden import (
 from dayz_mcp.process_lifecycle import (
     ProcessLifecycle,
     RunManifestStore,
+    restart_debt_pairs,
 )
 from dayz_mcp.native_process_guard import NativeProcessGuard
 from dayz_mcp.session_coordination import CleanupDisposition, SessionCoordinator
@@ -118,6 +119,87 @@ def cleanup_begin(
     for key, value in result.items():
         disposition.terminal_result.setdefault(key, value)
     return disposition
+
+
+def idle_hold_probe(
+    state: ServerState | None,
+    lifecycle: ProcessLifecycle | None,
+    session_id: str,
+    lease_id: str,
+    window_s: float,
+) -> bool:
+    if (
+        state is None
+        or lifecycle is None
+        or not isinstance(session_id, str)
+        or not session_id
+        or not isinstance(lease_id, str)
+        or not lease_id
+        or isinstance(window_s, bool)
+        or not isinstance(window_s, (int, float))
+        or not math.isfinite(float(window_s))
+        or float(window_s) < 0.0
+    ):
+        return False
+    try:
+        manifest = getattr(lifecycle, "manifest", None)
+        has_bound = getattr(state, "run_has_bound_binding", None)
+        human_fn = getattr(lifecycle, "human_input_at", None)
+        uncertain_fn = getattr(lifecycle, "uncertain_input_at", None)
+        signal_fn = getattr(lifecycle, "input_signal_good_since", None)
+        if (
+            manifest is None
+            or not callable(has_bound)
+            or not callable(human_fn)
+            or not callable(uncertain_fn)
+            or not callable(signal_fn)
+        ):
+            return False
+        owned: list[str] = []
+        for run in manifest.list_runs():
+            if (
+                getattr(run, "owner_session_id", None) == session_id
+                and getattr(run, "owner_lease_id", None) == lease_id
+                and getattr(run, "state", None) == "RUNNING"
+            ):
+                run_id = getattr(run, "run_id", None)
+                if not isinstance(run_id, str) or not run_id:
+                    return False
+                owned.append(run_id)
+        if not owned:
+            return False
+        for run_id in owned:
+            if has_bound(run_id) is not True:
+                return False
+        now = time.time()
+        window = float(window_s)
+        # Missing stamps prove nothing while input is not observed: the signal
+        # must have been good, without a gap, for the whole window (the use
+        # projection reads an absent or stale signal as unknown).
+        good_since = signal_fn(now)
+        if (
+            good_since is None
+            or isinstance(good_since, bool)
+            or not isinstance(good_since, (int, float))
+            or not math.isfinite(float(good_since))
+            or now - float(good_since) < window
+        ):
+            return False
+        for run_id in owned:
+            for stamp in (human_fn(run_id), uncertain_fn(run_id)):
+                if stamp is None:
+                    continue
+                if (
+                    isinstance(stamp, bool)
+                    or not isinstance(stamp, (int, float))
+                    or not math.isfinite(float(stamp))
+                ):
+                    return False
+                if now - float(stamp) < window:
+                    return False
+        return True
+    except Exception:
+        return False
 
 
 def recover_unacknowledged_before_listen(
@@ -567,11 +649,23 @@ def _activate_server_coordination(
             return False
         return False
 
+    def lease_idle_hold_probe(
+        session_id: str, lease_id: str, window_s: float
+    ) -> bool:
+        return idle_hold_probe(
+            state,
+            lifecycle_holder.get("service"),
+            session_id,
+            lease_id,
+            window_s,
+        )
+
     coordinator = bounded_io(
         SessionCoordinator,
         audit=audit_writer.write,
         cleanup=cleanup,
         attached_run_probe=attached_run_probe,
+        idle_hold_probe=lease_idle_hold_probe,
         recovered_audit_fault=recovered_audit_fault,
         recovered_lifecycle_fault=recovered_lifecycle_fault,
         daemon_generation=daemon_generation,
@@ -673,6 +767,14 @@ def _activate_server_coordination(
             on_pending=arm_lifecycle_recovery_fault,
         )
         runs = bounded_io(manifest.list_runs)
+        # §2.12: every live run of the startup listing owes a close from the
+        # previous daemon (daemon_restart). Seeded on the coordinator before
+        # it is attached to the state below; the relaunch of each run clears
+        # it through note_processes_gone. With a recovered lifecycle fault
+        # the listing is deferred to the repair paths in loopback.py.
+        restart_pairs = restart_debt_pairs(runs)
+        if restart_pairs:
+            bounded_io(coordinator.seed_restart_debt, restart_pairs)
     else:
         runs = []
     restart_owned = [

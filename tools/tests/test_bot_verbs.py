@@ -1,4 +1,4 @@
-"""bot_start / bot_stop (inbox 120f): allowlist, admission, compile guards."""
+"""bot_start / bot_stop (inbox 120f, 6b52): allowlist, admission, compile guards."""
 
 from __future__ import annotations
 
@@ -23,6 +23,20 @@ from tests.fence_helpers import INST_SERVER, PID_SERVER, bound_queue
 BRIDGE = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 BOT = addon_root() / "scripts" / "5_Mission" / "MCP_BotControl.c"
 ACTION = "PLAYER_BOT_RANDOMIZE_MOVEMENT"
+ALLOWED_ACTIONS = (
+    "PLAYER_BOT_RANDOMIZE_STANCE",
+    "PLAYER_BOT_RANDOMIZE_MOVEMENT",
+    "PLAYER_BOT_SPAM_USER_ACTIONS",
+    "PLAYER_BOT_TEST_SPAWN_OPEN",
+    "PLAYER_BOT_TEST_SPAWN_OPEN_DESTROY",
+    "PLAYER_BOT_TEST_SPAWN_OPEN_EAT",
+)
+REFUSED_INVENTORY_ACTIONS = (
+    "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE",
+    "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH",
+    "PLAYER_BOT_TEST_SWAP_G2H",
+    "PLAYER_BOT_TEST_SWAP_INTERNAL",
+)
 
 
 def _tool_error_text(exc: BaseException) -> str:
@@ -83,10 +97,62 @@ class BotSchemaTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(stop.parameters["properties"]), {"object_id", "timeout_s"})
         self.assertEqual(stop.parameters.get("required"), ["object_id"])
         self.assertIs(stop.parameters.get("additionalProperties"), False)
-        self.assertEqual(loopback.BOT_START_ACTIONS, tuple(sorted(loopback.BOT_START_ACTIONS)) if False else loopback.BOT_START_ACTIONS)
+        self.assertEqual(loopback.BOT_START_ACTIONS, ALLOWED_ACTIONS)
+        self.assertEqual(loopback.BOT_START_INVENTORY_ACTIONS, REFUSED_INVENTORY_ACTIONS)
         self.assertNotIn("PLAYER_BOT_STOP_CURRENT", loopback.BOT_START_ACTIONS)
         self.assertNotIn("PLAYER_BOT_TEST_SWAP_C2H", loopback.BOT_START_ACTIONS)
-        self.assertEqual(len(loopback.BOT_START_ACTIONS), 10)
+        self.assertEqual(len(loopback.BOT_START_ACTIONS), 6)
+
+    async def test_inventory_actions_refused_with_script_exception_reason_and_six_forwarded(self) -> None:
+        description = self.tools["bot_start"].description
+        actions_clause = description.split(
+            "action is one of the 1.30 debug transitions (", 1
+        )[1].split(").", 1)[0]
+        for action in ALLOWED_ACTIONS:
+            with self.subTest(action=action):
+                self.assertIn(action, loopback.BOT_START_ACTIONS, action)
+                self.assertIn(action, actions_clause, action)
+                self.assertEqual(
+                    await self._forwarded("bot_start", {"object_id": 4, "action": action}),
+                    ("bot_start", {"object_id": 4, "action": action, "bot_ttl_s": 5.0}, "server", 15.0),
+                )
+        for action in REFUSED_INVENTORY_ACTIONS:
+            with self.subTest(action=action):
+                self.assertNotIn(
+                    action,
+                    loopback.BOT_START_ACTIONS,
+                    f"{action} must stay out of BOT_START_ACTIONS",
+                )
+                self.assertNotIn(
+                    action,
+                    actions_clause,
+                    f"{action} must stay out of the bot_start action list",
+                )
+                error = await self._refused("bot_start", {"object_id": 4, "action": action})
+                self.assertIn(
+                    f"bad_args: action {action!r} must not be one of the vanilla bot inventory actions: "
+                    "they raise vanilla script exceptions on a server dummy",
+                    error,
+                    action,
+                )
+                self.assertNotIn("local player", error, action)
+                self.assertNotIn("be one of the debug-bot action names", error, action)
+        for unknown in ("PLAYER_BOT_STOP_CURRENT", "PLAYER_BOT_TEST_SWAP_C2H", "NOT_A_BOT_ACTION"):
+            with self.subTest(unknown=unknown):
+                error = await self._refused("bot_start", {"object_id": 4, "action": unknown})
+                self.assertIn(
+                    f"bad_args: action {unknown!r} must be one of the debug-bot action names",
+                    error,
+                )
+                self.assertNotIn("vanilla bot inventory actions", error)
+                self.assertNotIn("vanilla script exceptions", error)
+        self.assertIn(
+            "omitted and refused with bad_args because they raise vanilla "
+            "script exceptions on a server dummy.",
+            description,
+        )
+        self.assertNotIn("local player", description)
+        self.assertIn("PLAYER_BOT_RANDOMIZE_MOVEMENT only moves forward", description)
 
     async def test_wire_and_malformed_arguments(self) -> None:
         self.assertEqual(
@@ -112,6 +178,47 @@ class BotSchemaTest(unittest.IsolatedAsyncioTestCase):
 
 
 class BotAdmissionTest(unittest.TestCase):
+    def test_enqueue_refuses_inventory_actions_and_admits_remaining_six(self) -> None:
+        for action in REFUSED_INVENTORY_ACTIONS:
+            with self.subTest(action=action):
+                state = _bound_state()
+                _announce(state)
+                before = state._next_id
+                args = {"object_id": 4, "action": action, "bot_ttl_s": 5.0}
+                status, body = state.enqueue_command("bot_start", args, peer="server")
+                self.assertEqual(
+                    (status, body),
+                    (400, {"error": "bad_args"}),
+                    f"{action} must be refused at /enqueue",
+                )
+                self.assertEqual(state._next_id, before, action)
+                self.assertEqual(bound_queue(state, "server"), [], action)
+                self.assertEqual(
+                    loopback.validate_command_args("bot_start", args),
+                    (False, "bad_args"),
+                    f"{action} must fail validate_command_args",
+                )
+        for action in ALLOWED_ACTIONS:
+            with self.subTest(action=action):
+                state = _bound_state()
+                _announce(state)
+                before = state._next_id
+                args = {"object_id": 4, "action": action, "bot_ttl_s": 5.0}
+                self.assertEqual(
+                    loopback.validate_command_args("bot_start", args),
+                    (True, None),
+                    action,
+                )
+                status, body = state.enqueue_command("bot_start", args, peer="server")
+                self.assertEqual(status, 200, f"{action}: {body}")
+                self.assertEqual(state._next_id, before + 1, action)
+                queued = bound_queue(state, "server")
+                self.assertEqual(
+                    [(row["id"], row["cmd"], row["args"]) for row in queued],
+                    [(before, "bot_start", args)],
+                    action,
+                )
+
     def test_older_census_does_not_queue_either_verb(self) -> None:
         for cmd, args in (
             ("bot_start", {"object_id": 4, "action": ACTION, "bot_ttl_s": 5.0}),
@@ -184,7 +291,10 @@ class BotAdmissionTest(unittest.TestCase):
         )
         status, released = coordinator.release(client, active["lease_token"])
         self.assertEqual(status, 200, released)
-        self.assertEqual(released["cleanup"].get("bot_stop_enqueued"), 1)
+        # §2.14 (plan §5.4): with a lease-end round open, the aggregated
+        # close replaces the per-lease bot_stop.
+        self.assertNotIn("bot_stop_enqueued", released["cleanup"])
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
         self.assertFalse(released.get("cleanup_degraded"))
         status, polled = state.record_poll(
             "server",
@@ -196,10 +306,11 @@ class BotAdmissionTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(polled["bind"], "BOUND")
-        self.assertEqual(
-            polled["commands"],
-            [{"id": body["id"] + 1, "cmd": "bot_stop", "args": {"object_id": 9}}],
-        )
+        self.assertEqual(len(polled["commands"]), 1)
+        close_cmd = polled["commands"][0]
+        self.assertEqual(close_cmd["id"], body["id"] + 1)
+        self.assertEqual(close_cmd["cmd"], "lease_close")
+        self.assertEqual(close_cmd["args"]["close_lease_id"], "bot-lease")
         self.assertIsNone(state.take_result(body["id"] + 1))
         source = Path(_TOOLS_DIR / "dayz_mcp" / "loopback.py").read_text(encoding="utf-8")
         self.assertIn("enqueue_bot_stops_for_lease(lease_id)", source)
@@ -299,6 +410,8 @@ class BotSourceTest(unittest.TestCase):
         self.assertIn('Release(bridge, objectId, "shutdown")', BOT.read_text(encoding="utf-8"))
         self.assertIn('Release(bridge, objectId, "death")', BOT.read_text(encoding="utf-8"))
         self.assertIn('Release(bridge, objectId, "deleted")', BOT.read_text(encoding="utf-8"))
+        for name in (*ALLOWED_ACTIONS, *REFUSED_INVENTORY_ACTIONS):
+            self.assertIn(f'action == "{name}"', source)
         for name in loopback.BOT_START_ACTIONS:
             self.assertIn(f'action == "{name}"', source)
         self.assertNotIn("PLAYER_BOT_STOP_CURRENT", source)

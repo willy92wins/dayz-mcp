@@ -22,7 +22,8 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from dayz_mcp import loopback, session_coordination
+from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
+from dayz_mcp import core, loopback, session_coordination
 from dayz_mcp.session_coordination import (
     LEASE_END_BOUND_S,
     SESSION_TTL_S,
@@ -47,6 +48,7 @@ def _floor(
     conn_gen: object,
     move_id: int,
     weapon_id: int,
+    look_id: object = 0,
 ) -> dict[str, object]:
     return {
         "net_low": net_low,
@@ -54,6 +56,7 @@ def _floor(
         "conn_gen": conn_gen,
         "move_id": move_id,
         "weapon_id": weapon_id,
+        "look_id": look_id,
     }
 
 
@@ -2022,8 +2025,16 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
     def test_k17_conn_gen_and_missing_player(self) -> None:
         carried = _floor(10, 20, conn_gen="g", move_id=7, weapon_id=4)
         no_gen = _floor(10, 20, conn_gen=None, move_id=7, weapon_id=4)
-        conn_gen = ["player_move_conn_gen_unapplied", "weapon_conn_gen_unapplied"]
-        floors = ["player_move_floor_unapplied", "weapon_floor_unapplied"]
+        conn_gen = [
+            "player_move_conn_gen_unapplied",
+            "weapon_conn_gen_unapplied",
+            "look_conn_gen_unapplied",
+        ]
+        floors = [
+            "player_move_floor_unapplied",
+            "weapon_floor_unapplied",
+            "look_floor_unapplied",
+        ]
         cases = (
             (
                 "reported_other_gen",
@@ -2195,6 +2206,91 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
                 else:
                     self.assertNotIn("lease_end", self.coordinator.status(self.a))
 
+    def test_residue_floor_settled_by_server_at_same_floor(self) -> None:
+        # B' round: a residue client still gives its floor (L=10, W=46);
+        # the server close carries none, so its row is owed both gaps. A
+        # server clean reporting exactly that floor settles its row; one
+        # look id short stays owed for the look gap.
+        client_floor = _floor(10, 20, conn_gen=1, move_id=0, weapon_id=46, look_id=10)
+        cases = (
+            ("at_floor", 10, None),
+            ("one_look_short", 9, ["look_floor_unapplied"]),
+        )
+        for name, server_look, expected_server_reasons in cases:
+            with self.subTest(name):
+                self.coordinator = self._make_coordinator()
+                round_id, ids = self._published_round([])
+                client = self.coordinator.note_close_outcomes(
+                    [
+                        self._close_outcome(
+                            round_id,
+                            "run-1",
+                            "client",
+                            ids["client"],
+                            "residue",
+                            reasons=["action_input_in_flight"],
+                            floor=dict(client_floor),
+                        )
+                    ]
+                )
+                self.assertEqual(client, ["applied"])
+                self.assertEqual(
+                    self._owed(),
+                    [
+                        ("client", ["action_input_in_flight"]),
+                        ("server", ["weapon_floor_unapplied", "look_floor_unapplied"]),
+                    ],
+                )
+                server = self.coordinator.note_close_outcomes(
+                    [
+                        self._close_outcome(
+                            round_id,
+                            "run-1",
+                            "server",
+                            ids["server"],
+                            "clean",
+                            reported_floors=[
+                                _floor(
+                                    10,
+                                    20,
+                                    conn_gen=1,
+                                    move_id=0,
+                                    weapon_id=46,
+                                    look_id=server_look,
+                                )
+                            ],
+                        )
+                    ]
+                )
+                self.assertEqual(server, ["applied"])
+                if expected_server_reasons is None:
+                    self.assertEqual(
+                        self._owed(), [("client", ["action_input_in_flight"])]
+                    )
+                    late_client = self.coordinator.note_close_outcomes(
+                        [
+                            self._close_outcome(
+                                round_id,
+                                "run-1",
+                                "client",
+                                ids["client"],
+                                "clean",
+                                floor=dict(client_floor),
+                            )
+                        ]
+                    )
+                    self.assertEqual(late_client, ["applied"])
+                    self.assertEqual(self._owed(), [])
+                    self.assertNotIn(
+                        "lease_end", self.coordinator.status(self.a)
+                    )
+                else:
+                    owed = dict(self._owed())
+                    self.assertEqual(
+                        owed.get("client"), ["action_input_in_flight"]
+                    )
+                    self.assertIn("look_floor_unapplied", owed.get("server", []))
+
     def test_k17_weapon_floor_unapplied(self) -> None:
         self._bind()
         lease = self._commit_work(self.a)
@@ -2271,6 +2367,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         conn_reasons = [
             "player_move_conn_gen_unapplied",
             "weapon_conn_gen_unapplied",
+            "look_conn_gen_unapplied",
         ]
         carried = _floor(10, 20, conn_gen=1, move_id=7, weapon_id=4)
         client_other = _floor(10, 20, conn_gen=2, move_id=7, weapon_id=4)
@@ -2367,8 +2464,13 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         conn_reasons = [
             "player_move_conn_gen_unapplied",
             "weapon_conn_gen_unapplied",
+            "look_conn_gen_unapplied",
         ]
-        floor_reasons = ["player_move_floor_unapplied", "weapon_floor_unapplied"]
+        floor_reasons = [
+            "player_move_floor_unapplied",
+            "weapon_floor_unapplied",
+            "look_floor_unapplied",
+        ]
         cases = (
             (
                 "other_gen",
@@ -2945,11 +3047,20 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
             self.assertEqual(self._poll(peer), [])
 
     def _poll(
-        self, peer: str, *, pid: int | None = None, version: str = "12~1.29"
+        self, peer: str, *, pid: int | None = None, version: str = f"{EXPECTED_BRIDGE_VERSION}~1.29"
     ) -> list[dict]:
         query = poll_census_query(peer)
+        # v13: the census table already announces the close name. A
+        # close_supported=False poll simulates a v12 bridge, so it must drop
+        # the name; adding it twice would make parse_poll_caps reject the
+        # census as duplicate.
+        names = [name for name in query["caps"].split(",") if name]
         if self.close_supported:
-            query["caps"] += "," + _CLOSE_NAMES[peer]
+            if _CLOSE_NAMES[peer] not in names:
+                names.append(_CLOSE_NAMES[peer])
+        else:
+            names = [name for name in names if name != _CLOSE_NAMES[peer]]
+        query["caps"] = ",".join(names)
         status, body = self.state.record_poll(
             peer,
             version,
@@ -3042,6 +3153,7 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
                 entries=[{"name": "action", "state": "clean"}],
                 move_floor=7,
                 weapon_floor=4,
+                look_floor=3,
                 net_low=10,
                 net_high=20,
                 conn_gen=1,
@@ -3049,7 +3161,7 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         else:
             census.update(
                 entries=[{"name": "bots", "state": "clean"}],
-                floors=[_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4)],
+                floors=[_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4, look_id=3)],
             )
         census.update(fields)
         return {key: value for key, value in census.items() if value is not _DROP}
@@ -3281,9 +3393,11 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
                 server_close = self._deliver_close("server")
                 self.assertEqual(
                     server_close["args"]["close_floors"],
-                    [_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4)],
+                    [_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4, look_id=3)],
                 )
-                floors = [_floor(10, 20, conn_gen=1, move_id=reported, weapon_id=4)]
+                floors = [
+                    _floor(10, 20, conn_gen=1, move_id=reported, weapon_id=4, look_id=3)
+                ]
                 self._accepted(self._settle("server", server_close, floors=floors))
                 self.assertEqual(self._owed(), owed)
                 grant = self._acquire(self.b)
@@ -3424,7 +3538,7 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self._accepted(self._settle("client", close))
         self.assertEqual(
             self._deliver_close("server")["args"]["close_floors"],
-            [_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4)],
+            [_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4, look_id=3)],
         )
 
     def test_k18_discarded_client_close_lets_the_server_close_go(self) -> None:
@@ -3468,7 +3582,7 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.clock.advance(SESSION_TTL_S + 1.0)
         query = poll_census_query("client")
-        query["caps"] += ",lease_close_client"
+        # v13: poll_census_query already announces lease_close_client.
         answers: list[tuple[int, dict]] = []
         answered = threading.Event()
 
@@ -3476,7 +3590,7 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
             answers.append(
                 self.state.record_poll(
                     "client",
-                    "12~1.29",
+                    f"{EXPECTED_BRIDGE_VERSION}~1.29",
                     instance=INST_CLIENT,
                     source_pid=PID_CLIENT,
                     caps=query["caps"],
@@ -3500,22 +3614,44 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self._accepted(self._settle("client", commands[0]))
         self.assertEqual(self._queued("server"), ["lease_close"])
 
-    def test_k32_neg_v12_census_keeps_lease_close_inert(self) -> None:
-        self.close_supported = False
+    def test_k32_neg_v13_census_without_close_name_keeps_lease_close_inert(self) -> None:
+        """A v13 census lacking the close command name keeps lease close inert; full v13 publishes."""
+        repo_root = _TOOLS_DIR.parent
+        for doc_name in ("CLAUDE.md", "dayz-mcp-architecture.md"):
+            doc_text = (repo_root / doc_name).read_text(encoding="utf-8")
+            self.assertIn(f'MCP_BRIDGE_VERSION = "{EXPECTED_BRIDGE_VERSION}"', doc_text)
+            self.assertNotIn('MCP_BRIDGE_VERSION = "12"', doc_text)
+        validator = lambda version: core.version_state_for(
+            version, require_version=False, expected_game_version=None
+        )[0]
+        self.close_supported = True
+        self._build(version_validator=validator)
         lease, _ = self._work()
         for peer, filename, constant in (
             ("server", "MCPBridge.c", "SERVER_CAPABILITIES"),
             ("client", "MCPClientBridge.c", "CLIENT_POLL_CAPS"),
         ):
-            source = (_TOOLS_DIR.parent / "addon/scripts/5_Mission" / filename).read_text()
+            source = (repo_root / "addon/scripts/5_Mission" / filename).read_text(
+                encoding="utf-8"
+            )
             declaration = re.search(r"\b" + constant + r"\s*=\s*([^;]+);", source)
             self.assertIsNotNone(declaration)
             caps = "".join(re.findall(r'"([^"\n]*)"', declaration.group(1)))
-            self.assertNotIn(_CLOSE_NAMES[peer], caps.split(","))
+            # v13 (§2.16): the bridge announces the close name. Stripping it on
+            # an EXPECTED_BRIDGE_VERSION poll isolates the capability exemption
+            # from version_mismatch blocking.
+            self.assertIn(_CLOSE_NAMES[peer], caps.split(","))
+            caps = ",".join(
+                name for name in caps.split(",") if name != _CLOSE_NAMES[peer]
+            )
             query = poll_census_query(peer)
             status, body = self.state.record_poll(
-                peer, "12~1.29", instance=self.instances[peer],
-                source_pid=self.pids[peer], caps=caps, ach=query.get("ach"),
+                peer,
+                f"{EXPECTED_BRIDGE_VERSION}~1.29",
+                instance=self.instances[peer],
+                source_pid=self.pids[peer],
+                caps=caps,
+                ach=query.get("ach"),
             )
             self.assertEqual(status, 200, body)
         self._release(self.a, lease)
@@ -3526,6 +3662,147 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         grant = self._acquire(self.b)
         self.assertNotIn("lease_end_unconfirmed", grant.get("cleanup_degraded", []))
 
+        # Positive counterpart under the same production validator: a v13 census
+        # carrying the close command name publishes and settles both closes.
+        self.close_supported = True
+        self._build(version_validator=validator)
+        self._ended_lease()
+        self.assertEqual(self._queued("client"), ["lease_close_client"])
+        self._accepted(self._settle("client", self._deliver_close("client")))
+        self.assertEqual(self._queued("server"), ["lease_close"])
+        self._accepted(self._settle("server", self._deliver_close("server")))
+        self.assertEqual(self._owed(), {})
+
+    def test_k32_neg_v12_poll_with_production_validator_owes_version_blocked(self) -> None:
+        """With the production validator (daemon.py), a v12 poll is version_mismatch and owes version_blocked."""
+        validator = lambda version: core.version_state_for(
+            version, require_version=False, expected_game_version=None
+        )[0]
+        self.assertEqual(validator("12~1.29"), "version_mismatch")
+        self.assertEqual(validator(f"{EXPECTED_BRIDGE_VERSION}~1.29"), "ok")
+        self.close_supported = True
+        self._build(version_validator=validator)
+        lease, _ = self._work()
+        queued_status, queued_body = self._enqueue(
+            self.a, lease, "object_delete", {"object_id": 99}, "server"
+        )
+        self.assertEqual(queued_status, 200, queued_body)
+        for peer in ("server", "client"):
+            query = poll_census_query(peer)
+            stripped_caps = ",".join(
+                name
+                for name in query["caps"].split(",")
+                if name and name != _CLOSE_NAMES[peer]
+            )
+            status, body = self.state.record_poll(
+                peer,
+                "12~1.29",
+                instance=self.instances[peer],
+                source_pid=self.pids[peer],
+                caps=stripped_caps,
+                ach=query.get("ach"),
+            )
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body["commands"], [])
+            peer_status = core._peer_status(
+                self.state.status_snapshot(),
+                peer,
+                require_version=False,
+                expected_game_version=None,
+                expected_bridge_version=EXPECTED_BRIDGE_VERSION,
+            )
+            self.assertEqual(peer_status["version_state"], "version_mismatch")
+        enq_status, enq_body = self._enqueue(
+            self.a, lease, "object_delete", {"object_id": 2}, "server"
+        )
+        self.assertEqual(enq_status, 409, enq_body)
+        self.assertEqual(
+            enq_body,
+            {
+                "error": "version_blocked",
+                "state": "version_mismatch",
+                "expected": EXPECTED_BRIDGE_VERSION,
+                "got": "12",
+                "detail": f"bridge_version '12' != '{EXPECTED_BRIDGE_VERSION}'",
+            },
+        )
+        query = poll_census_query("server")
+        status, body = self.state.record_poll(
+            "server",
+            "12~1.29",
+            instance=self.instances["server"],
+            source_pid=self.pids["server"],
+            caps=query["caps"],
+            ach=query.get("ach"),
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["commands"], [])
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(self._queued("server"), [])
+        self.assertEqual(
+            self._owed(),
+            {"client": ["version_blocked"], "server": ["version_blocked"]},
+        )
+        self.assertEqual(self._photo().get("outstanding", 0), 0)
+        grant = self._acquire(self.b)
+        self.assertEqual(grant["cleanup_degraded"], ["lease_end_unconfirmed"])
+        self.assertEqual(
+            grant["lease_end"],
+            {
+                "round": 1,
+                "settled": [],
+                "unconfirmed": [
+                    {
+                        "run_id": "test-run",
+                        "peer": "client",
+                        "reasons": ["version_blocked"],
+                        "since_s": 0.0,
+                    },
+                    {
+                        "run_id": "test-run",
+                        "peer": "server",
+                        "reasons": ["version_blocked"],
+                        "since_s": 0.0,
+                    },
+                ],
+            },
+        )
+
+        # Positive counterpart under the same production validator: v13 with
+        # close capability receives work and settles both closes cleanly.
+        self.close_supported = True
+        self._build(version_validator=validator)
+        self._ended_lease()
+        self.assertEqual(self._queued("client"), ["lease_close_client"])
+        client_close = self._deliver_close("client")
+        self._accepted(self._settle("client", client_close))
+        self.assertEqual(self._queued("server"), ["lease_close"])
+        server_close = self._deliver_close("server")
+        self._accepted(self._settle("server", server_close))
+        self.assertEqual(self._owed(), {})
+        clean_grant = self._acquire(self.b)
+        self.assertNotIn("lease_end_unconfirmed", clean_grant.get("cleanup_degraded", []))
+        self.assertEqual(
+            clean_grant["lease_end"],
+            {
+                "round": 1,
+                "settled": [
+                    {
+                        "run_id": "test-run",
+                        "peer": "client",
+                        "close_id": str(client_close["id"]),
+                    },
+                    {
+                        "run_id": "test-run",
+                        "peer": "server",
+                        "close_id": str(server_close["id"]),
+                    },
+                ],
+                "unconfirmed": [],
+            },
+        )
+
     def test_k32_positive_announced_close_is_published(self) -> None:
         self._ended_lease()
         self.assertEqual(self._queued("client"), ["lease_close_client"])
@@ -3533,6 +3810,162 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self.assertEqual(self._queued("server"), ["lease_close"])
         self._accepted(self._settle("server", self._deliver_close("server")))
         self.assertEqual(self._owed(), {})
+
+    # --- F1 split (#331): only a fresh accredited parsed census of the
+    # bound instance/generation lacking the name grants close_not_supported.
+
+    def _set_census(self, peer, commands, *, instance=None, generation=None, announced_at=None):
+        self.state._peer_caps[peer] = {
+            "generation": self.state.daemon_generation if generation is None else generation,
+            "commands": commands,
+            "reason": "ok" if commands is not None else "absent",
+            "arg_contract_hash": None,
+            "announced_at": self.broker_clock.value if announced_at is None else announced_at,
+            "instance": self.instances[peer] if instance is None else instance,
+        }
+
+    def _poll_raw(self, peer, caps):
+        query = poll_census_query(peer)
+        status, body = self.state.record_poll(
+            peer, f"{EXPECTED_BRIDGE_VERSION}~1.29",
+            instance=self.instances[peer], source_pid=self.pids[peer],
+            caps=caps, ach=query.get("ach"),
+        )
+        self.assertEqual(status, 200, body)
+        return body
+
+    def _poll_unattributed(self, peer):
+        query = poll_census_query(peer)
+        status, body = self.state.record_poll(
+            peer, f"{EXPECTED_BRIDGE_VERSION}~1.29",
+            instance=self.instances[peer], source_pid=None,
+            caps=query["caps"], ach=query.get("ach"),
+        )
+        self.assertEqual(status, 200, body)
+        return body
+
+    def test_f1_absent_census_owes_at_hook(self) -> None:
+        lease, _ = self._work()
+        for peer in ("server", "client"):
+            self.state._peer_caps.pop(peer, None)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(self._queued("server"), [])
+        self.assertEqual(self._owed(), {"client": ["close_support_unknown"], "server": ["close_support_unknown"]})
+
+    def test_f1_attribution_lost_before_hook_owes(self) -> None:
+        lease, _ = self._work()
+        for peer in ("server", "client"):
+            self._poll_unattributed(peer)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(self._owed(), {"client": ["close_support_unknown"], "server": ["close_support_unknown"]})
+
+    def test_f1_unparsed_census_owes_at_hook(self) -> None:
+        causes = {
+            "oversized": "a" * 5000,
+            "too_many": ",".join(f"n{i}" for i in range(65)),
+            "malformed": "not a name",
+            "duplicate": None,  # per-peer below
+        }
+        for cause, caps in causes.items():
+            with self.subTest(cause=cause):
+                self._build()
+                lease, _ = self._work()
+                for peer in ("server", "client"):
+                    raw = caps if caps is not None else f"{_CLOSE_NAMES[peer]},{_CLOSE_NAMES[peer]}"
+                    self._poll_raw(peer, raw)
+                self._release(self.a, lease)
+                self.assertEqual(self._queued("client"), [])
+                self.assertEqual(self._owed(), {"client": ["close_support_unknown"], "server": ["close_support_unknown"]})
+
+    def test_f1_other_instance_or_generation_owes_at_hook(self) -> None:
+        for variant in ("instance", "generation"):
+            with self.subTest(variant=variant):
+                self._build()
+                lease, _ = self._work()
+                for peer in ("server", "client"):
+                    names = tuple(n for n in poll_census_query(peer)["caps"].split(",") if n and n != _CLOSE_NAMES[peer])
+                    if variant == "instance":
+                        self._set_census(peer, names, instance="other-instance")
+                    else:
+                        self._set_census(peer, names, generation="other-generation")
+                self._release(self.a, lease)
+                self.assertEqual(self._owed(), {"client": ["close_support_unknown"], "server": ["close_support_unknown"]})
+
+    def test_f1_stale_census_without_name_owes_at_hook(self) -> None:
+        lease, _ = self._work()
+        stale = self.broker_clock.value - loopback.PEER_STALE_S
+        for peer in ("server", "client"):
+            names = tuple(n for n in poll_census_query(peer)["caps"].split(",") if n and n != _CLOSE_NAMES[peer])
+            self._set_census(peer, names, announced_at=stale)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(self._queued("server"), [])
+        self.assertEqual(self._owed(), {"client": ["close_support_unknown"], "server": ["close_support_unknown"]})
+
+    def test_f1_stale_census_with_name_still_publishes(self) -> None:
+        lease, _ = self._work()
+        stale = self.broker_clock.value - loopback.PEER_STALE_S
+        for peer in ("server", "client"):
+            names = [n for n in poll_census_query(peer)["caps"].split(",") if n and n != _CLOSE_NAMES[peer]]
+            names.append(_CLOSE_NAMES[peer])
+            self._set_census(peer, tuple(names), announced_at=stale)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), ["lease_close_client"])
+
+    def test_f1_peers_with_different_support(self) -> None:
+        # Server lacks the name (fresh bridge 12), client announces it.
+        lease, _ = self._work()
+        names = tuple(n for n in poll_census_query("server")["caps"].split(",") if n and n != "lease_close")
+        self._set_census("server", names)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), ["lease_close_client"])
+        self._accepted(self._settle("client", self._deliver_close("client")))
+        self.assertEqual(self._queued("server"), [])
+        self.assertEqual(self._owed(), {})
+
+    def test_f1_client_not_supported_server_published(self) -> None:
+        lease, _ = self._work()
+        names = tuple(n for n in poll_census_query("client")["caps"].split(",") if n and n != "lease_close_client")
+        self._set_census("client", names)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(self._queued("server"), ["lease_close"])
+        self._accepted(self._settle("server", self._deliver_close("server")))
+        self.assertEqual(self._owed(), {})
+
+    def test_f1_attribution_lost_during_server_deferral_owes(self) -> None:
+        self._ended_lease()
+        client_close = self._deliver_close("client")
+        self._poll_unattributed("server")
+        self._accepted(self._settle("client", client_close))
+        self.assertEqual(self._queued("server"), [])
+        self.assertEqual(self._owed(), {"server": ["close_support_unknown"]})
+
+    def test_f1_deferred_bridge12_still_clears(self) -> None:
+        self._ended_lease()
+        client_close = self._deliver_close("client")
+        names = tuple(n for n in poll_census_query("server")["caps"].split(",") if n and n != "lease_close")
+        self._set_census("server", names)
+        self._accepted(self._settle("client", client_close))
+        self.assertEqual(self._queued("server"), [])
+        self.assertEqual(self._owed(), {})
+
+    def test_f1_owed_row_from_earlier_lease_cleared_by_fresh_bridge12(self) -> None:
+        lease, _ = self._work()
+        for peer in ("server", "client"):
+            self.state._peer_caps.pop(peer, None)
+        self._release(self.a, lease)
+        self.assertEqual(self._owed(), {"client": ["close_support_unknown"], "server": ["close_support_unknown"]})
+        grant = self._acquire(self.b)
+        for peer in ("server", "client"):
+            names = tuple(n for n in poll_census_query(peer)["caps"].split(",") if n and n != _CLOSE_NAMES[peer])
+            self._set_census(peer, names)
+        self._release(self.b, grant)
+        self.assertEqual(self._owed(), {})
+        grant2 = self._acquire(self.b)
+        self.assertNotIn("lease_end_unconfirmed", grant2.get("cleanup_degraded", []))
 
     def test_k32_close_names_are_internal_only(self) -> None:
         lease = self._acquire(self.a)
@@ -3697,7 +4130,13 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         )
         # A residue still gives the coordinator its floor, which the server
         # close does not carry, so the server row owes it.
-        server_owed = {"residue": ["player_move_floor_unapplied", "weapon_floor_unapplied"]}
+        server_owed = {
+            "residue": [
+                "player_move_floor_unapplied",
+                "weapon_floor_unapplied",
+                "look_floor_unapplied",
+            ]
+        }
         for name, ok, error, census, owed in cases:
             with self.subTest(name):
                 self._build()
@@ -3736,7 +4175,7 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self.assertEqual(self._owed(), {})
         self.assertEqual(
             self._deliver_close("server")["args"]["close_floors"],
-            [_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4)],
+            [_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4, look_id=3)],
         )
 
     def test_result_of_an_undelivered_close_is_ignored(self) -> None:
@@ -3750,3 +4189,199 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self.assertEqual(close["id"], queued["id"])
         self._accepted(self._settle("client", close))
         self.assertEqual(self._queued("server"), ["lease_close"])
+
+    def test_close_result_ok_accepts_true_and_int_one_only(self) -> None:
+        # POS: Enforce serializes bool ok as 0/1; both True and int 1 settle
+        # clean and carry the client's floors to the deferred server close.
+        carried_by_ok: dict[str, list[dict[str, object]]] = {}
+        for label, ok_value in (("True", True), ("1", 1)):
+            with self.subTest(ok=label):
+                self._build()
+                self._ended_lease()
+                client_close = self._deliver_close("client")
+                self._accepted(
+                    self.state.store_result(
+                        {
+                            "id": client_close["id"],
+                            "ok": ok_value,
+                            "lease_close": self._census("client", client_close),
+                        },
+                        instance=INST_CLIENT,
+                    )
+                )
+                self.assertEqual(self._owed(), {})
+                server_close = self._deliver_close("server")
+                carried = list(server_close["args"]["close_floors"])
+                self.assertEqual(len(carried), 1)
+                self.assertEqual(carried[0]["conn_gen"], 1)
+                self.assertEqual(carried[0]["move_id"], 7)
+                self.assertEqual(carried[0]["weapon_id"], 4)
+                carried_by_ok[label] = carried
+                self._accepted(
+                    self.state.store_result(
+                        {
+                            "id": server_close["id"],
+                            "ok": ok_value,
+                            "lease_close": self._census("server", server_close),
+                        },
+                        instance=INST_SERVER,
+                    )
+                )
+                self.assertEqual(self._owed(), {})
+                grant = self._acquire(self.b)
+                self.assertNotIn(
+                    "lease_end_unconfirmed", grant.get("cleanup_degraded", [])
+                )
+        self.assertEqual(carried_by_ok["1"], carried_by_ok["True"])
+
+        # NEG: False, 0, 2, "1" and None are rejected as close_failed and drop floors.
+        for label, bad_ok in (
+            ("False", False),
+            ("0", 0),
+            ("2", 2),
+            ("str_1", "1"),
+            ("None", None),
+        ):
+            with self.subTest(bad_ok=label):
+                self._build()
+                self._ended_lease()
+                client_close = self._deliver_close("client")
+                self._accepted(
+                    self.state.store_result(
+                        {
+                            "id": client_close["id"],
+                            "ok": bad_ok,
+                            "lease_close": self._census("client", client_close),
+                        },
+                        instance=INST_CLIENT,
+                    )
+                )
+                self.assertEqual(
+                    self._owed(), {"client": ["close_rejected:close_failed"]}
+                )
+                server_close = self._deliver_close("server")
+                self.assertEqual(server_close["args"]["close_floors"], [])
+                self._accepted(
+                    self.state.store_result(
+                        {
+                            "id": server_close["id"],
+                            "ok": bad_ok,
+                            "lease_close": self._census("server", server_close),
+                        },
+                        instance=INST_SERVER,
+                    )
+                )
+                self.assertEqual(
+                    self._owed(),
+                    {
+                        "client": ["close_rejected:close_failed"],
+                        "server": ["close_rejected:close_failed"],
+                    },
+                )
+
+    def test_look_floor_and_conn_gen_gaps_owe_server_row(self) -> None:
+        # POS: server look_id equal to or above the client's look_floor on the
+        # same conn_gen settles clean without look residue.
+        for server_look in (5, 8):
+            with self.subTest(pos_server_look=server_look):
+                self._build()
+                self._ended_lease()
+                client_close = self._deliver_close("client")
+                self._accepted(
+                    self._settle("client", client_close, look_floor=5)
+                )
+                server_close = self._deliver_close("server")
+                self.assertEqual(
+                    server_close["args"]["close_floors"],
+                    [_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4, look_id=5)],
+                )
+                floors = [
+                    _floor(
+                        10,
+                        20,
+                        conn_gen=1,
+                        move_id=7,
+                        weapon_id=4,
+                        look_id=server_look,
+                    )
+                ]
+                self._accepted(self._settle("server", server_close, floors=floors))
+                self.assertEqual(self._owed(), {})
+                grant = self._acquire(self.b)
+                self.assertIn(str(server_close["id"]), self._settled_ids(grant))
+                self.assertNotIn(
+                    "lease_end_unconfirmed", grant.get("cleanup_degraded", [])
+                )
+
+        # NEG 1: server look_id below client look_floor owes look_floor_unapplied,
+        # both when carried on the server close and when the server settled early
+        # after the 10 s deferral window.
+        self._build()
+        self._ended_lease()
+        self._accepted(
+            self._settle("client", self._deliver_close("client"), look_floor=5)
+        )
+        server_close = self._deliver_close("server")
+        low_floors = [_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4, look_id=4)]
+        self._accepted(self._settle("server", server_close, floors=low_floors))
+        self.assertEqual(self._owed(), {"server": ["look_floor_unapplied"]})
+        grant = self._acquire(self.b)
+        self.assertIn("lease_end_unconfirmed", grant.get("cleanup_degraded", []))
+
+        self._build()
+        self._ended_lease()
+        client_close = self._deliver_close("client")
+        self.broker_clock.value = 10.0
+        early_server = self._deliver_close("server")
+        self.assertEqual(early_server["args"]["close_floors"], [])
+        self._accepted(
+            self._settle(
+                "server",
+                early_server,
+                floors=[_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4, look_id=2)],
+            )
+        )
+        self.assertEqual(self._owed(), {})
+        self._accepted(self._settle("client", client_close, look_floor=5))
+        self.assertEqual(self._owed(), {"server": ["look_floor_unapplied"]})
+
+        # NEG 2: conn_gen mismatch includes look_conn_gen_unapplied alongside move
+        # and weapon; non-int look_floor / look_id is census_malformed.
+        self._build()
+        self._ended_lease()
+        self._accepted(
+            self._settle("client", self._deliver_close("client"), look_floor=5)
+        )
+        server_close = self._deliver_close("server")
+        other_gen = [_floor(10, 20, conn_gen=2, move_id=7, weapon_id=4, look_id=5)]
+        self._accepted(self._settle("server", server_close, floors=other_gen))
+        self.assertEqual(
+            self._owed(),
+            {
+                "server": [
+                    "player_move_conn_gen_unapplied",
+                    "weapon_conn_gen_unapplied",
+                    "look_conn_gen_unapplied",
+                ]
+            },
+        )
+
+        self._build()
+        self._ended_lease()
+        self._accepted(
+            self._settle("client", self._deliver_close("client"), look_floor=True)
+        )
+        self.assertEqual(self._owed(), {"client": ["census_malformed"]})
+        self._accepted(
+            self._settle(
+                "server",
+                self._deliver_close("server"),
+                floors=[
+                    _floor(10, 20, conn_gen=1, move_id=7, weapon_id=4, look_id=True)
+                ],
+            )
+        )
+        self.assertEqual(
+            self._owed(),
+            {"client": ["census_malformed"], "server": ["census_malformed"]},
+        )
