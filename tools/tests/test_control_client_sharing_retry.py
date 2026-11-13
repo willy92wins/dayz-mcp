@@ -140,6 +140,53 @@ class SharingRetryFakePolicyTests(unittest.TestCase):
         self.assertIn("could not be validated", error.hint)
         self.assertNotIn("If the tool list includes server_reload", error.hint)
 
+    def test_slow_attempt_is_not_retried_once_budget_is_spent(self) -> None:
+        # Each attempt itself takes 0.49 s of the 0.5 s budget: the first
+        # failure leaves only the remaining 0.01 s to wait, and no second
+        # attempt may start at or past the deadline, even though it would
+        # pass. Without the deadline check before retrying, the second
+        # attempt runs, passes at 0.99 s and the request is sent.
+        attempts = 0
+        clock = _FakeClock()
+
+        def hook() -> None:
+            nonlocal attempts
+            attempts += 1
+            clock.now += 0.49
+            if attempts == 1:
+                raise host_config.HostConfigError(
+                    "daemon_provenance_conflict", winerror=32
+                )
+
+        client, temporary = _client_with_hook(hook)
+        try:
+            with (
+                patch.object(
+                    client._credential_provider,
+                    "request_with_refresh",
+                    return_value=(200, b'{"status":"ok"}'),
+                ) as send,
+                patch.object(control_client, "_monotonic", clock.monotonic),
+                patch.object(control_client, "_revalidation_sleep", clock.sleep),
+            ):
+                with self.assertRaises(
+                    control_client.ControlClientError
+                ) as raised:
+                    client._request_once("/session/status", {}, 5.0)
+        finally:
+            temporary.cleanup()
+        error = raised.exception
+        self.assertEqual(attempts, 1)
+        self.assertEqual(len(clock.sleeps), 1)
+        self.assertAlmostEqual(clock.sleeps[0], 0.01, places=6)
+        self.assertEqual(error.code, "client_policy_untrusted_open_new_session")
+        self.assertEqual(error.policy_cause, "HostConfigError:32")
+        self.assertEqual(error.request_stage, "pre_request")
+        self.assertEqual(error.http_bytes_sent, 0)
+        send.assert_not_called()
+        self.assertIn("could not be validated", error.hint)
+        self.assertNotIn("If the tool list includes server_reload", error.hint)
+
     def test_winerror_5_is_not_retried(self) -> None:
         attempts = 0
 

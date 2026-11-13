@@ -27,10 +27,11 @@ def _revalidation_sleep(seconds: float) -> None:
 
 
 # A pinned host config is opened with FILE_SHARE_READ only, so a writer that
-# holds it for a moment fails the open with ERROR_SHARING_VIOLATION (32). That
-# collision is usually a host tool rewriting its own config and is gone in
-# well under a second, so the revalidation is retried briefly before the
-# request is refused; every other failure stays fail-fast.
+# holds it for a moment fails the open with ERROR_SHARING_VIOLATION (32). The
+# likely holder is a host tool rewriting its own config, but that attribution
+# and the collision's duration are not measured, so the revalidation is
+# retried only briefly before the request is refused; every other failure
+# stays fail-fast.
 _REVALIDATION_RETRY_BUDGET_S = 0.5
 _REVALIDATION_RETRY_INTERVAL_S = 0.05
 
@@ -57,9 +58,14 @@ def _revalidate_with_sharing_retry(revalidate: Callable[[], None]) -> None:
             remaining = deadline - _monotonic()
             if remaining <= 0:
                 raise
-            _revalidation_sleep(
-                min(_REVALIDATION_RETRY_INTERVAL_S, remaining)
-            )
+            wait = min(_REVALIDATION_RETRY_INTERVAL_S, remaining)
+            _revalidation_sleep(wait)
+            # No new attempt starts once the budget is spent: a wait clamped
+            # to the remaining budget ends at the deadline, and a wait that
+            # overshoots it (a slow attempt or a long sleep) ends past it,
+            # however long the failed attempt itself took.
+            if wait >= remaining or _monotonic() >= deadline:
+                raise
 
 
 # The untrusted rejection hint crosses the MCP wire, so the registration stamp is
