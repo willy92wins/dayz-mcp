@@ -1,5 +1,5 @@
 --- /dev/fd/63	2026-09-06 22:05:35.000000000 +0200
-+++ /c/Users/guill/AppData/Local/Temp/claude/C--Users-guill-OneDrive-Documentos-DayZ-Projects/2adef081-e055-49c6-9d06-f5c167808be8/scratchpad/wt-f45d/tools/dayz_mcp/server.py	2026-09-06 22:04:44.694172200 +0200
++++ %USERPROFILE%/AppData/Local/Temp/claude/C--Users-<user>-OneDrive-Documentos-DayZ-Projects/2adef081-e055-49c6-9d06-f5c167808be8/scratchpad/wt-f45d/tools/dayz_mcp/server.py	2026-09-06 22:04:44.694172200 +0200
 @@ -205,7 +205,8 @@
  
  

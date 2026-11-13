@@ -20,7 +20,7 @@
 ## Artifacts
 
 ### JobDir
-`C:\Users\guill\AppData\Local\Temp\orq-dispatch\mcp-gcal-remeasure-20260925\`
+`%USERPROFILE%\AppData\Local\Temp\orq-dispatch\mcp-gcal-remeasure-20260925\`
 
 - `run_gcal_remeasure.py`, `gcal-summary.json`, `gcal-prescore.json`
 - `check-gcal.mjs`, `GATES.md` (copy), `GCAL-VERDICT.md`

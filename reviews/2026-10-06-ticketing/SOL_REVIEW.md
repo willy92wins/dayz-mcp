@@ -487,7 +487,7 @@ For the bridge batches, source assertions do not prove Enforce compilation, acti
 - External ticket artifacts—SimpleGroup PBO/logs, SecretRock component measurements/traces, delayed CE snapshots, historical load logs, and infected captures—were not independently inspected.
 - #195’s frozen diff and approved build-isolation plan are absent from this export.
 - The export’s declared Git provenance was supplied by the brief; this review anchored conclusions to file contents rather than independently attesting `origin/main`.
-- Vanilla API evidence used the local tree under `C:/Users/guill/OneDrive/Documentos/DayZ Projects/scripts/`; declaration and script usage do not establish native behavior in every DayZ build.
+- Vanilla API evidence used the local tree under `%USERPROFILE%/OneDrive/Documentos/DayZ Projects/scripts/`; declaration and script usage do not establish native behavior in every DayZ build.
 - Automatic non-displacing teleport settlement, the exact pause-menu ESC result, infected death causation, delayed CE rejection causation, and the effective AddonBuilder `-addon` root remain unverified.
 - Full H11 clearance of a pending reset notice requires an explicit definition of “new storage accredited.” Neither launch acknowledgement nor bridge readiness proves restored CE contents.
 - Prior memory was used only for review discipline; all reported code findings were re-anchored to this checkout.

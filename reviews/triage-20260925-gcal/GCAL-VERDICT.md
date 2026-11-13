@@ -23,7 +23,7 @@
 
 ## Gate-check
 
-- Tool: `C:\Users\guill\.claude\skills\gates-ledger\scripts\gate-check.mjs` (not under repo `tools/`; skill path is the real one)
+- Tool: `%USERPROFILE%\.claude\skills\gates-ledger\scripts\gate-check.mjs` (not under repo `tools/`; skill path is the real one)
 - `--approve` RC=0 → ALL MET
 - `--reverify` RC=0 → ALL MET (1 met, reran: 1, previously met reverified: 1)
 - Seal present on G-CAL EVIDENCE line

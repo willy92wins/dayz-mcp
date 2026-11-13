@@ -8,7 +8,7 @@ All paths below refer to this tree. Reproductions used real functions with files
 
 **F1 — P1 — Migration accredits a package that is not the executed target.**
 
-Anchors: [instance_context.py:86](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/instance_context.py:86), [identity_migration.py:726](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/identity_migration.py:726).
+Anchors: [instance_context.py:86](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/instance_context.py:86), [identity_migration.py:726](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/identity_migration.py:726).
 
 `accredited_package_dir` falls back to `candidates.append(Path(cwd) / "dayz_mcp")`, even for an explicit absolute script whose own package lacks accreditation.
 
@@ -24,7 +24,7 @@ Set its working directory to this tree’s `tools`. Scan for migration of token 
 
 **F2 — P1 — Runtime-state activation bypasses lifetime root exclusion.**
 
-Anchor: [daemon.py:392](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/daemon.py:392).
+Anchor: [daemon.py:392](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/daemon.py:392).
 
 `build_server_state(..., activate_coordination=True)` calls migration and `_activate_server_coordination` without acquiring or requiring `RootWriterLease`.
 
@@ -44,7 +44,7 @@ The settled receipt permits migration verification; activation then opens the sa
 
 **F3 — P2 — `--game-path` does not configure lifecycle executable authority.**
 
-Anchors: [daemon.py:595](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/daemon.py:595), [process_lifecycle.py:2909](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/process_lifecycle.py:2909).
+Anchors: [daemon.py:595](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/daemon.py:595), [process_lifecycle.py:2909](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/process_lifecycle.py:2909).
 
 Lifecycle construction still uses `os.environ.get("DAYZ_GAME_PATH", retail_default)`. It never consumes `config.game_path`.
 
@@ -54,7 +54,7 @@ Lifecycle construction still uses `os.environ.get("DAYZ_GAME_PATH", retail_defau
 
 **F4 — P2 — The packaged worker selects default profiles and modifies them before rejecting routing.**
 
-Anchors: [dayz_test_worker.py:296](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/dayz_test_worker.py:296), [launcher.cpp:600](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/native-launchers/dayz-test-v1/src/launcher.cpp:600), [process_lifecycle.py:2173](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/process_lifecycle.py:2173), [loopback.py:1739](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/loopback.py:1739).
+Anchors: [dayz_test_worker.py:296](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/dayz_test_worker.py:296), [launcher.cpp:600](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/native-launchers/dayz-test-v1/src/launcher.cpp:600), [process_lifecycle.py:2173](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/process_lifecycle.py:2173), [loopback.py:1739](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/loopback.py:1739).
 
 Profile selection uses `payload.get("instance_token", current_instance_token())`. The canonical request rejects `instance_token`, and the private worker receives neither selector argv nor selector context. Its argv is simply the packaged application.
 
@@ -64,7 +64,7 @@ Profile selection uses `payload.get("instance_token", current_instance_token())`
 
 **F5 — P2 — Recovery’s second quiescence check loses the selected instance.**
 
-Anchor: [identity_migration.py:1485](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/identity_migration.py:1485).
+Anchor: [identity_migration.py:1485](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/identity_migration.py:1485).
 
 The `_assert_quiescent` call after `_recover_backup_transaction` omits `state_token`.
 
@@ -74,7 +74,7 @@ The `_assert_quiescent` call after `_recover_backup_transaction` omits `state_to
 
 **F6 — P2 — Required installation and launch entry points cannot select a named instance.**
 
-Anchors: [install_mcp.py:764](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/install_mcp.py:764), [install_mcp.py:734](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/install_mcp.py:734), [install-mcp.ps1:743](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/install-mcp.ps1:743), [secure_launcher.py:249](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/secure_launcher.py:249), [stdio_bridge.py:430](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/stdio_bridge.py:430).
+Anchors: [install_mcp.py:764](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/install_mcp.py:764), [install_mcp.py:734](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/install_mcp.py:734), [install-mcp.ps1:743](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/install-mcp.ps1:743), [secure_launcher.py:249](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/secure_launcher.py:249), [stdio_bridge.py:430](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/stdio_bridge.py:430).
 
 Installer options omit the selector; registration commands remain hardcoded to `dayz-mcp`. Secure-launcher and stdio-bridge CLI parsers also omit it.
 
@@ -90,7 +90,7 @@ The first two parser failures were reproduced.
 
 **F7 — P2 — `p0s_gate.py` can operate on the wrong store without rejecting conflicting context.**
 
-Anchor: [p0s_gate.py:318](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/p0s_gate.py:318).
+Anchor: [p0s_gate.py:318](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/p0s_gate.py:318).
 
 It still calls `ensure_runs_v1_backup(RuntimePaths.from_env(), args.port)` without a selector or environment-conflict validation.
 
@@ -107,7 +107,7 @@ With an unsettled default store and no process blockers, this operates on `%LOCA
 
 **F8 — P1 — Shared build targets remain outside cross-instance exclusion.**
 
-Anchors: [dayz_test_worker.py:780](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/dayz_test_worker.py:780), [process_lifecycle.py:3558](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/process_lifecycle.py:3558), [build_native_launcher.py:258](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/build_native_launcher.py:258).
+Anchors: [dayz_test_worker.py:780](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/dayz_test_worker.py:780), [process_lifecycle.py:3558](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/process_lifecycle.py:3558), [build_native_launcher.py:258](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/build_native_launcher.py:258).
 
 The box interlock starts at lifecycle admission, after worker builds. Build requests retain common target/temp paths. Native launcher builders also retain one filename-keyed `.partial` cache path.
 
@@ -125,7 +125,7 @@ Both consumers can clear/write those shared locations before either acquires box
 
 **F9 — P2 — Named captures and frame state remain shared.**
 
-Anchors: [mcp_capture.py:561](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/mcp_capture.py:561), [mcp_capture.py:1460](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/mcp_capture.py:1460), [mcp_capture.py:1469](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/mcp_capture.py:1469).
+Anchors: [mcp_capture.py:561](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/mcp_capture.py:561), [mcp_capture.py:1460](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/mcp_capture.py:1460), [mcp_capture.py:1469](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/mcp_capture.py:1469).
 
 Neither default path resolver uses instance selection.
 
@@ -135,7 +135,7 @@ Neither default path resolver uses instance selection.
 
 **F10 — P2 — Global-skills ownership is not enforced for named installs.**
 
-Anchors: [knowledge_pack.py:190](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/knowledge_pack.py:190), [knowledge_pack.py:273](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/knowledge_pack.py:273).
+Anchors: [knowledge_pack.py:190](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/knowledge_pack.py:190), [knowledge_pack.py:273](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/knowledge_pack.py:273).
 
 `sync_skills` defaults to `owner="default"`; `install_knowledge_pack` never passes the bound owner.
 
@@ -202,7 +202,7 @@ The gate proves no additional failures in the selected suite. It does not prove 
 
 The new writer test exercises two lease objects and checks that `runs.json` remains absent; it never activates competing runtime states. The accreditation positive test creates only a marker file, so it does not prove which code Python executes. No new test crosses the packaged worker boundary or controls concurrent build/launch admission.
 
-Additionally, [test_install_mcp.py:1980](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/tests/test_install_mcp.py:1980) explicitly exempts the missing selector flags from parser-copy consistency checks. This allows a required omission to pass the gate.
+Additionally, [test_install_mcp.py:1980](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/tests/test_install_mcp.py:1980) explicitly exempts the missing selector flags from parser-copy consistency checks. This allows a required omission to pass the gate.
 
 ## PREMISE
 

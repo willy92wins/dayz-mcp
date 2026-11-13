@@ -18,6 +18,6 @@ Descripci?n ampliada en `tools/dayz_mcp/server.py:5000`. No se ha modificado com
 
 El s?mbolo que el brief llama `ActionBase.OnExecuteClient` se declara realmente en `AnimatedActionBase` (`animatedactionbase.c:179`), no en `ActionBase`. No est? rodeado de `#ifndef SERVER` en vanilla; la selecci?n de lado aqu? es en runtime. Un override del mod puede estar protegido por ese preprocesador.
 
-La checklist de conocimiento contradice la fuente: `C:/Users/guill/ObsidianVault/AI/20_Knowledge/dayz-mod-implementation-checklists.md:28` afirma que el servidor no reeval?a `Can`; `actionmanagerserver.c:142` demuestra que s?. Prevalece la fuente. Corregir la nota es FUERA DE MI ALCANCE.
+La checklist de conocimiento contradice la fuente: `%USERPROFILE%/ObsidianVault/AI/20_Knowledge/dayz-mod-implementation-checklists.md:28` afirma que el servidor no reeval?a `Can`; `actionmanagerserver.c:142` demuestra que s?. Prevalece la fuente. Corregir la nota es FUERA DE MI ALCANCE.
 
 La alcanzabilidad de los callbacks queda decidida por c?digo. No se puede asegurar que TODA acci?n o un mod concreto alcance su evento, mantenga condiciones, reciba ack o termine. El defecto de continuas se diagnostica en 3fc1 sin corregirlo. Gate de motor propuesto: acci?n m?nima con contadores observables distintos en cliente/servidor, confirmar ambos y el efecto real; requiere lanzamiento, prohibido por este brief.

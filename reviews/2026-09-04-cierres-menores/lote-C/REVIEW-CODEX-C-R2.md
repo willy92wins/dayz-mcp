@@ -5,7 +5,7 @@ Rama observada: `work/inbox-20260830-modules`.
 HEAD observado: `adc1c22f0b890f2132439541d6943ffed430c7d8`.
 
 Intérprete usado en todas las ejecuciones Python:
-`C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`.
+`%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`.
 
 Directorio de trabajo Python: `DayZ_MCP_dev\tools`, con `PYTHONPATH=.` y
 `PYTHONDONTWRITEBYTECODE=1`.
@@ -250,7 +250,7 @@ Repro [EXACT]:
 [EXACT]
 $env:PYTHONPATH='.'
 $env:PYTHONDONTWRITEBYTECODE='1'
-& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' `
+& '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' `
   -m unittest `
   tests.test_ui_error_diagnostics.BridgeErrorDiagnosticsTest.test_flat_scalars_do_not_enrich_non_ui_verbs `
   -v

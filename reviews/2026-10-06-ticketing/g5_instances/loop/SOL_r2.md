@@ -15,7 +15,7 @@ Anchors: `tools/dayz_mcp/identity_migration.py:750`, `tools/dayz_mcp/identity_mi
 **Executable scenario:** a legacy writer hardcoded to `DayZ_MCP_130`, with cwd `C:\fixture\legacy`, has this argv:
 
 ```text
-C:\Python314\python.exe -m dayz_mcp --daemon --keyfile C:\Users\guill\dzmcp_gauntlet\g5_instances\ws\tools\dayz_mcp\__main__.py
+C:\Python314\python.exe -m dayz_mcp --daemon --keyfile %USERPROFILE%\dzmcp_gauntlet\g5_instances\ws\tools\dayz_mcp\__main__.py
 ```
 
 The executed target is the module imported from the legacy cwd. The scanner instead accredits this workspace’s package through the **keyfile argument**. Using that exact metadata and the real workspace marker, I observed disposition `not_writer` and scanner output `()`, while migrating `130`.

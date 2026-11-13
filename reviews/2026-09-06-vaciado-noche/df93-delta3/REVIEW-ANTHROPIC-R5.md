@@ -3,10 +3,10 @@ DICTAMEN: SEGURO INTEGRAR — la ronda 5 implementa las reglas del contrato (bri
 Revisor: Anthropic (Claude), ciego respecto al implementador (Grok/Cursor, `run1/MODEL = cursor-grok-4.6-xhigh`). Fecha: 2026-09-06. Nada de ws ni del worktree fue modificado; todos los scripts y salidas viven en este directorio (`review-r5-anthropic/`). Hallazgos: 0 ALTA, 0 MEDIA, 2 BAJA.
 
 Rutas (abreviadas en el resto del documento):
-- `<ws>` = `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r5\ws`
-- `<wt>` = `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\e89adcdf-b230-4060-83b7-f733911e169a\scratchpad\wt-df93` (HEAD `180815efef0f98905a3b966bf5220a68a5b29ac6`, rama `work/df93-vpp-preflight`)
-- `<rev>` = `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-r5-anthropic`
-- `<py>` = `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe` (Python 3.14.3)
+- `<ws>` = `%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r5\ws`
+- `<wt>` = `%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\e89adcdf-b230-4060-83b7-f733911e169a\scratchpad\wt-df93` (HEAD `180815efef0f98905a3b966bf5220a68a5b29ac6`, rama `work/df93-vpp-preflight`)
+- `<rev>` = `%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-r5-anthropic`
+- `<py>` = `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe` (Python 3.14.3)
 
 # 1. Resumen de medidas (qué, cómo, resultado)
 

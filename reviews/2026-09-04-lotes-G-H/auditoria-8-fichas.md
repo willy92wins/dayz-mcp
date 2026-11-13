@@ -1,7 +1,7 @@
 # Auditoría de cierre — 8 fichas (2026-09-04)
 
-Auditor: sesión read-only sobre `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\`, rama `work/inbox-20260830-modules`.
-Intérprete de toda medición propia: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe` (Python 3.14.3), invocado desde `tools\` con `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1`.
+Auditor: sesión read-only sobre `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\`, rama `work/inbox-20260830-modules`.
+Intérprete de toda medición propia: `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe` (Python 3.14.3), invocado desde `tools\` con `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1`.
 No se corrió la suite completa. No se tocó git, MCP, ni procesos DayZ.
 
 ## Criterio de cierre aplicado

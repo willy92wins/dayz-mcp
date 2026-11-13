@@ -1,7 +1,7 @@
-& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' 'C:\Users\guill\DayZ-Modding-Knowledge-Pack\tools\dayz-script-validator\scripts\script_validator.py' 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\night-2026-09-09\b256\lint-before'
+& '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' '%USERPROFILE%\DayZ-Modding-Knowledge-Pack\tools\dayz-script-validator\scripts\script_validator.py' '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\night-2026-09-09\b256\lint-before'
 
 {
-  "addon_root": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\night-2026-09-09\\b256\\lint-before",
+  "addon_root": "%USERPROFILE%\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\night-2026-09-09\\b256\\lint-before",
   "status": "WARN",
   "errors": [],
   "warnings": [

@@ -7,14 +7,14 @@ This answers WHERE things are. Current state lives in `HANDOFF.md`; do not dupli
 
 | What | Path |
 |---|---|
-| Dev / docs | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev` |
-| Mod source | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP` |
-| Tools | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools` |
-| Plans | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\plans` |
-| Reviews | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews` |
-| Server logs (RPT + script.log) | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_server\profiles` |
-| Client logs (RPT + script.log) | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_client\profiles` |
-| Last PBO built | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\2026-08-19-lane-fence\DayZ_MCP_fence_DCC8730F.pbo` (200 KB, 2026-08-19) |
+| Dev / docs | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev` |
+| Mod source | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP` |
+| Tools | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools` |
+| Plans | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\plans` |
+| Reviews | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews` |
+| Server logs (RPT + script.log) | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_server\profiles` |
+| Client logs (RPT + script.log) | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_client\profiles` |
+| Last PBO built | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\2026-08-19-lane-fence\DayZ_MCP_fence_DCC8730F.pbo` (200 KB, 2026-08-19) |
 
 ## HANDOFF: cuánto leer
 
@@ -39,7 +39,7 @@ This answers WHERE things are. Current state lives in `HANDOFF.md`; do not dupli
 - `scripts\5_Mission\MissionGameplay.c` - 443 B
 - `scripts\5_Mission\MissionServer.c` - 409 B
 
-- **config.cpp** -> `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP\config.cpp` (536 B)
+- **config.cpp** -> `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP\config.cpp` (536 B)
 
 ## Build / test entry points
 
