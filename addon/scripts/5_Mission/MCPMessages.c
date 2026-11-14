@@ -1827,7 +1827,8 @@ class MCPJob
 	// ui_pause: carries menu_id_before across the job-runner read-back (726c).
 	ref MCPUiPause ui_pause;
 	// ui_menu_set: carries the reply and the requested state across the
-	// one-tick read-back (d4b4).
+	// read-back (d4b4): an open is read on the next tick, a close on
+	// every tick until the map is gone or its 5 s deadline passes.
 	ref MCPUiMenu ui_menu;
 	bool ui_menu_open;
 	// E1: what the close removed after CloseMapMenu, for its log line.

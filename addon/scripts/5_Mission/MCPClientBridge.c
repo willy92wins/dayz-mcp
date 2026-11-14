@@ -1351,9 +1351,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// Nor does an input_trigger click or hold, which waits on a key release,
 		// a player_move hold, which waits on its release, or an actor_emote,
 		// which only watches m_bEmoteIsPlaying. Nor do the ui_menu_set and
-		// ui_map_set one-tick read-backs (d4b4), which only re-read the menu
-		// and its MapWidget on the next tick, or a dev_free_camera_set read,
-		// which reads the free camera on the next tick.
+		// ui_map_set read-backs (d4b4), which only re-read the menu and its
+		// MapWidget: an open on the next tick, a close on every tick until
+		// the map is gone or its 5 s deadline passes, the ui_map_set one on
+		// the next tick. Nor does a dev_free_camera_set read, which reads
+		// the free camera on the next tick.
 		blocking = m_JobRunner.CountExcluding("ui_dialog");
 		weaponJobs = m_JobRunner.CountOfKind("weapon_action");
 		triggerJobs = m_JobRunner.CountOfKind("input_trigger");
@@ -9078,13 +9080,40 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return false;
 	}
 
+	// An open is done on the first tick after the dispatch, as before.
+	// A close is done only when the read sees the map closed: Close()
+	// is the "safe way to close window" (uiscriptedmenu.c:30-31) and
+	// may only take effect on a later frame, and IsMenuOpen is
+	// FindMenu(id) != null (uimanager.c:153-157). In game (run
+	// e781fd7b) 4 of 4 closes still read open right after CloseMapMenu
+	// and were gone by the next command, so a close re-reads every
+	// tick until the map is gone or the job's 5 s deadline posts it.
 	protected bool ProcessUiMenuJob(MCPJob job)
 	{
+		int menuId;
 		if (!job)
 		{
 			return false;
 		}
-		return m_JobRunner.GetElapsedS() > job.sample_start_s;
+		if (m_JobRunner.GetElapsedS() <= job.sample_start_s)
+		{
+			return false;
+		}
+		if (job.ui_menu_open)
+		{
+			return true;
+		}
+		if (!job.ui_menu)
+		{
+			return false;
+		}
+		menuId = -1;
+		if (!UiMenuId(job.ui_menu.menu, menuId))
+		{
+			return false;
+		}
+		FillUiMenuRead(job.ui_menu, menuId);
+		return !job.ui_menu.open_after;
 	}
 
 	protected void PostUiMenuJob(MCPJob job)

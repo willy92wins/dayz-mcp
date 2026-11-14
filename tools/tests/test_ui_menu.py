@@ -17,7 +17,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, PropertyMock, patch
+
+from mcp.shared.memory import create_connected_server_and_client_session
 
 from dayz_mcp import loopback, server
 from dayz_mcp.result_prune import PRUNABLE_FIELDS, prune_unfilled_fields
@@ -31,6 +33,7 @@ from dayz_mcp.server import (
 )
 from dayz_mcp.session_coordination import READ_ONLY_COMMANDS, command_requires_lease
 from tests._addon_paths import addon_root
+from tests._tiers import slow_test
 from tests.bridge_client_capabilities_helpers import announced_caps, dispatch_census
 from tests.enforce_subset_helpers import (
     EnforceArray,
@@ -54,6 +57,7 @@ MAP_COMMAND = "ui_map_set"
 MENU_MAP_ID = 22  # vanilla MENU_MAP
 SCRIPTS = addon_root() / "scripts"
 CLIENT_PATH = SCRIPTS / "5_Mission" / "MCPClientBridge.c"
+RUNNER_PATH = SCRIPTS / "5_Mission" / "MCPJobRunner.c"
 SERVER_BRIDGE_PATH = SCRIPTS / "5_Mission" / "MCPBridge.c"
 MESSAGES_PATH = SCRIPTS / "5_Mission" / "MCPMessages.c"
 CENSUS_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "bridge_capabilities_v1.json"
@@ -188,6 +192,88 @@ def _strip_comments(body: str) -> str:
     return "".join(out)
 
 
+_MEMBER_NAME = re.compile(r"(?<![\w.])(m_[A-Za-z0-9_]+)\b")
+_NEW_CALL = re.compile(r"\bnew\s+([A-Za-z_]\w*)\s*\(")
+_ENFORCE_LITERAL = re.compile(r'"(?:\\.|[^"\\])*"')
+
+
+def _free_method(source: str, signature: str) -> str:
+    """Turn `signature`'s class method into a free function for translate.
+
+    Copied from test_ui_pause.py (_free_method): test modules must not
+    import each other (test_suite_structure), so the copy lives here.
+    """
+
+    def rewrite(code: str) -> str:
+        return _NEW_CALL.sub(r"\1(", _MEMBER_NAME.sub(r"this.\1", code))
+
+    body = enforce_method_body(source, signature)
+    pieces: list[str] = []
+    last = 0
+    for match in _ENFORCE_LITERAL.finditer(body):
+        pieces += [rewrite(body[last : match.start()]), match.group(0)]
+        last = match.end()
+    pieces.append(rewrite(body[last:]))
+    return signature + "\n{" + "".join(pieces) + "}\n"
+
+
+def _menu_free_method(source: str, signature: str) -> str:
+    """_free_method plus the out-parameter adapters _standalone_exec uses."""
+    text = _free_method(source, signature)
+    text = text.replace(
+        "if (!command.args || !UiMenuId(command.args.menu, menuId))",
+        "menuId = UiMenuIdFromArgs(command.args); if (menuId == -1)",
+    )
+    text = text.replace(
+        "UiMenuId(reply.menu, menuId);", "menuId = UiMenuIdFromMenu(reply.menu);"
+    )
+    text = text.replace(
+        "if (!UiMenuId(job.ui_menu.menu, menuId))",
+        "menuId = UiMenuIdFromMenu(job.ui_menu.menu); if (menuId == -1)",
+    )
+    text = text.replace(
+        "UiMenuId(job.ui_menu.menu, menuId);",
+        "menuId = UiMenuIdFromMenu(job.ui_menu.menu);",
+    )
+    text = text.replace(
+        'UiMenuId("map", menuId);', 'menuId = UiMenuIdFromMenu("map");'
+    )
+    text = text.replace('{"map"}', "MAP_EXCLUDES")
+    return text
+
+
+class _JobMap:
+    """MCPJobRunner's map<int, ref MCPJob> in insertion order.
+
+    Copied from test_ui_pause.py (_JobMap) for the same reason as
+    _free_method above.
+    """
+
+    def __init__(self) -> None:
+        self.items: list[tuple[int, Any]] = []
+
+    def Insert(self, key: int, job: Any) -> None:
+        self.items.append((key, job))
+
+    def Count(self) -> int:
+        return len(self.items)
+
+    def GetKey(self, index: int) -> int:
+        return self.items[index][0]
+
+    def GetElement(self, index: int) -> Any:
+        return self.items[index][1]
+
+    def Get(self, key: int) -> Any:
+        for known, job in self.items:
+            if known == key:
+                return job
+        return None
+
+    def Remove(self, key: int) -> None:
+        self.items = [item for item in self.items if item[0] != key]
+
+
 def _no_forbidden_calls(*bodies: str) -> None:
     for body in bodies:
         code = _strip_comments(body)
@@ -314,9 +400,22 @@ def assert_ui_menu_contract(dispatch: str, process: str, post: str) -> None:
     if '" ok=0 error=" + job.error + " removed=" + removedPost' not in post:
         raise AssertionError("an aborted close must log what it removed")
     if "job.kind = \"ui_menu\";" not in dispatch or "return false;" not in dispatch:
-        raise AssertionError("ui_menu_set must queue its one-tick read-back job")
-    if "return m_JobRunner.GetElapsedS() > job.sample_start_s;" not in process:
-        raise AssertionError("ProcessUiMenuJob must read on the next tick")
+        raise AssertionError("ui_menu_set must queue its read-back job")
+    # An open keeps the one-tick rule; a close re-reads every tick until
+    # the map is gone (the ee3a89d single-return body must fail here).
+    if "return m_JobRunner.GetElapsedS() > job.sample_start_s;" in process:
+        raise AssertionError("ProcessUiMenuJob must not keep the one-tick-only body")
+    _in_order(
+        process,
+        "if (!job)",
+        "if (m_JobRunner.GetElapsedS() <= job.sample_start_s)",
+        "if (job.ui_menu_open)",
+        "return true;",
+        "if (!job.ui_menu)",
+        "UiMenuId(job.ui_menu.menu, menuId)",
+        "FillUiMenuRead(job.ui_menu, menuId);",
+        "return !job.ui_menu.open_after;",
+    )
     for token in ('result.error = "ui_menu_not_opened";', 'result.error = "ui_menu_not_closed";'):
         if token not in post:
             raise AssertionError(f"PostUiMenuJob is missing {token!r}")
@@ -1337,6 +1436,14 @@ class UiMenuToolTest(unittest.IsolatedAsyncioTestCase):
             "a map opened by the player or a mod stays open",
             "restore_gameplay does not close it",
             "ui_menu_busy",
+            "observed=",
+            "open_before, open_after, class_name (when the map is open), "
+            "menu_id_before and menu_id_after as the client read them",
+            "re-read on every client tick until the map is gone, for up to 5 s",
+            "a lease close answers it at once",
+            "only then answers ui_menu_not_closed",
+            "an open is read right after EnterScriptedMenu and, if needed, "
+            "once more on the next tick",
             "bridge_capability_missing",
             "Only MENU_MAP is covered",
             "a class a mod creates for MENU_MAP reports its own",
@@ -1360,6 +1467,14 @@ class UiMenuToolTest(unittest.IsolatedAsyncioTestCase):
             "ui_map_not_open",
             "ui_map_widget_missing",
             "ui_map_not_set",
+            "ui_map_not_set carries observed= with scale_before, "
+            "scale_after, center_before, center_after and class_name as "
+            "read back",
+            "ui_map_widget_missing carries observed=class_name=",
+            "The engine limits the centre when the map is zoomed out",
+            "asked [4000, 10000], scale 1.0 kept [7680, 9600], 0.6 kept "
+            "[6144, 10000], and 0.3 and 0.1 kept the asked centre",
+            "answers ui_map_not_set with the centre the map kept",
             "bridge_capability_missing",
             "Only MENU_MAP is covered",
             "the lease close closes a map ui_menu_set opened",
@@ -1523,6 +1638,14 @@ def _standalone_exec(source: str, signature: str) -> str:
     )
     body = body.replace(
         "UiMenuId(reply.menu, menuId);", "menuId = UiMenuIdFromMenu(reply.menu);"
+    )
+    body = body.replace(
+        "if (!UiMenuId(job.ui_menu.menu, menuId))",
+        "menuId = UiMenuIdFromMenu(job.ui_menu.menu); if (menuId == -1)",
+    )
+    body = body.replace(
+        "UiMenuId(job.ui_menu.menu, menuId);",
+        "menuId = UiMenuIdFromMenu(job.ui_menu.menu);",
     )
     body = body.replace(
         'UiMenuId("map", menuId);', 'menuId = UiMenuIdFromMenu("map");'
@@ -2878,6 +3001,674 @@ class UiMenuExecutedTest(unittest.TestCase):
         world.ns["m_MCPMapMenu"] = foreign
         world.ns["StopLeaseCloseMap"]()
         self.assertIs(world.ns["m_MCPMapMenu"], foreign)
+
+
+# --- Executed through the real job runner (d4b4fix-1114) ----------------
+# The model above stubs m_JobRunner (_ExecRunner). This one translates
+# the real MCPJobRunner (GetElapsedS, AddJob, Tick, ProcessJobs) and the
+# real owner hooks of MCPClientBridge, the way _UiPauseClientModel in
+# test_ui_pause.py does, so a post is the runner's doing, not the test's.
+
+PROCESS_HOOK = "override bool MCP_ProcessJob(MCPJob job)"
+READY_HOOK = "override bool MCP_IsJobReady(MCPJob job)"
+SUCCESS_HOOK = "override void MCP_PostJobSuccess(MCPJob job)"
+FAILURE_HOOK = "override void MCP_PostJobFailure(MCPJob job)"
+TIMEOUT_HOOK = "override void MCP_PostJobTimeout(MCPJob job)"
+CLEAR_HOOK = "override void MCP_ClearJobRefs(MCPJob job)"
+OWNER_HOOKS = (
+    PROCESS_HOOK, READY_HOOK, SUCCESS_HOOK, FAILURE_HOOK, TIMEOUT_HOOK, CLEAR_HOOK,
+)
+RUNNER_METHODS = (
+    "float GetElapsedS()",
+    "void AddJob(MCPJob job)",
+    "void Tick(float timeslice, MCPJobRunnerOwner owner)",
+    "protected void ProcessJobs(MCPJobRunnerOwner owner)",
+)
+_RUNNER_CLASS_TYPES = _EXEC_CLASS_TYPES + (
+    "MCPCommand", "PlayerBase", "HumanCommandVehicle", "Transport",
+    "DayZPlayerCamera", "array", "map",
+)
+
+
+class _UiMenuRunnerModel:
+    """Real Dispatch/Process/PostUiMenuJob plus the real runner and hooks."""
+
+    def __init__(
+        self,
+        client: str | None = None,
+        runner: str | None = None,
+        messages: str | None = None,
+    ) -> None:
+        client = _source(CLIENT_PATH) if client is None else client
+        runner = _source(RUNNER_PATH) if runner is None else runner
+        messages = _source(MESSAGES_PATH) if messages is None else messages
+        for signature in (
+            DISPATCH_UI_MENU, PROCESS_UI_MENU, POST_UI_MENU, *OWNER_HOOKS,
+        ):
+            if client.count(signature) != 1:
+                raise AssertionError(
+                    f"{signature!r} occurs {client.count(signature)} times; "
+                    "expected the single shape the runner model needs"
+                )
+        if "FillUiMenuRead" not in client or "UiMenuId" not in client:
+            raise AssertionError("the client source lacks the ui_menu read helpers")
+        self.game = _ExecGame()
+        self.mission = _ExecMission()
+        self.game.mission = self.mission
+        self.ui = _ExecUi()
+        self.game.ui = self.ui
+        self.game_present = True
+        self.posted: list[Any] = []
+        self.logs: list[str] = []
+
+        runner_state = SimpleNamespace(m_Jobs=_JobMap(), m_ElapsedS=0.0)
+        self.jobs = runner_state.m_Jobs
+        runner_ns: dict[str, Any] = {
+            "this": runner_state, "_S": _LogStr, "array": EnforceArray,
+        }
+        for signature in RUNNER_METHODS:
+            translate(
+                _free_method(runner, signature),
+                signature,
+                runner_ns,
+                class_types=_RUNNER_CLASS_TYPES,
+            )
+        self.runner = SimpleNamespace(
+            **{
+                signature[: signature.index("(")].split()[-1]: runner_ns[
+                    signature[: signature.index("(")].split()[-1]
+                ]
+                for signature in RUNNER_METHODS
+            }
+        )
+        self.state = SimpleNamespace(
+            m_JobRunner=self.runner, m_MCPMapMenu=None,
+            m_DialogJob=None, m_Dialog=None,
+        )
+        game = self.game
+        ns: dict[str, Any] = {
+            "this": self.state,
+            "_S": _LogStr,
+            "GetGame": lambda: game if self.game_present else None,
+            "MissionGameplay": SimpleNamespace(
+                Cast=lambda v: v if isinstance(v, _ExecMission) else None
+            ),
+            "MapMenu": SimpleNamespace(
+                Cast=lambda v: v if isinstance(v, _ExecMenu) else None
+            ),
+            "EInputRestrictors": SimpleNamespace(MAP=7),
+            "MENU_MAP": MENU_MAP_ID,
+            "MAP_EXCLUDES": EnforceArray([EnforceString.of("map")]),
+            "CAMERA_JOB_TIMEOUT_S": 5.0,
+            "MCP_ARG_FLOAT_UNSET": _FLOAT_UNSET,
+            "array": EnforceArray,
+            "Log": lambda line: self.logs.append(_txt(line)),
+            "PostResult": lambda result: self.posted.append(result),
+        }
+        self.ns = ns
+        for class_name in ("MCPUiMenu", "MCPResult", "MCPJob"):
+            fake_class(
+                messages, class_name, ns,
+                constants={"MCP_ARG_FLOAT_UNSET": _FLOAT_UNSET},
+            )
+
+        def _from_menu(menu: Any) -> int:
+            ok, menu_id = ns["UiMenuId"](menu)
+            return int(menu_id) if ok else -1
+
+        def _from_args(args: Any) -> int:
+            if args is None:
+                return -1
+            return _from_menu(args.menu)
+
+        ns["UiMenuIdFromMenu"] = _from_menu
+        ns["UiMenuIdFromArgs"] = _from_args
+        for signature in (
+            UI_MENU_ID_FN, FILL_MENU_READ_FN, DISPATCH_UI_MENU,
+            PROCESS_UI_MENU, POST_UI_MENU, *OWNER_HOOKS,
+        ):
+            translate(
+                _menu_free_method(client, signature),
+                signature,
+                ns,
+                class_types=_RUNNER_CLASS_TYPES,
+            )
+        hook_names = [
+            signature[: signature.index("(")].split()[-1] for signature in OWNER_HOOKS
+        ]
+        self.hook_calls: list[str] = []
+
+        def wrap_hook(name: str):
+            fn = ns[name]
+
+            def call(job: Any) -> Any:
+                self.hook_calls.append(name)
+                return fn(job)
+
+            return call
+
+        self.owner = SimpleNamespace(
+            **{name: wrap_hook(name) for name in hook_names}
+        )
+
+    def dispatch_menu(self, open_value: bool):
+        result = self.ns["MCPResult"]()
+        result.tick_poll_sent = 11
+        result.tick_poll_callback = 22
+        result.tick_dispatch = 33
+        args = SimpleNamespace(menu=_LogStr.of("map"), open=open_value)
+        command = SimpleNamespace(id=42, args=args)
+        returned = self.ns["DispatchUiMenuSet"](command, result)
+        return returned, result
+
+    def tick(self, timeslice: float = 0.05) -> None:
+        self.runner.Tick(timeslice, self.owner)
+
+
+class UiMenuRunnerExecutedTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.source = _source(CLIENT_PATH)
+        self.messages = _source(MESSAGES_PATH)
+
+    def _close_model(self, client: str | None = None):
+        model = _UiMenuRunnerModel(
+            client=client, messages=self.messages
+        )
+        menu = model.ui.install(
+            _ExecMenu(model.ui, MENU_MAP_ID, "MapMenu", close_mode="deferred")
+        )
+        model.mission.exclude_active = True
+        model.mission.restriction_active = True
+        model.state.m_MCPMapMenu = menu
+        returned, _result = model.dispatch_menu(False)
+        self.assertFalse(returned)
+        self.assertEqual(model.jobs.Count(), 1)
+        return model, menu
+
+    def test_close_lands_on_tick_3_through_the_runner(self) -> None:
+        # (a) The engine applies Close() three runner ticks after
+        # CloseMapMenu: nothing posts before that tick, one ok post on it.
+        model, _menu = self._close_model()
+        model.tick()
+        self.assertEqual(model.posted, [])
+        self.assertEqual(model.jobs.Count(), 1)
+        model.tick()
+        self.assertEqual(model.posted, [])
+        self.assertEqual(model.jobs.Count(), 1)
+        model.ui.complete_pending()
+        model.tick()
+        self.assertEqual(len(model.posted), 1)
+        posted = model.posted[0]
+        self.assertTrue(posted.ok)
+        self.assertEqual(_txt(posted.error), "")
+        self.assertTrue(posted.ui_menu.open_before)
+        self.assertFalse(posted.ui_menu.open_after)
+        self.assertEqual(_txt(posted.ui_menu.class_name), "")
+        self.assertEqual(posted.ui_menu.menu_id_before, MENU_MAP_ID)
+        self.assertEqual(posted.ui_menu.menu_id_after, -1)
+        self.assertEqual(
+            model.logs,
+            ["ui_menu_set menu=map before=22 after=-1 ok=1 "
+             "removed=map_exclude+map_restriction"],
+        )
+        self.assertEqual(model.jobs.Count(), 0)
+
+    def test_close_never_lands_posts_at_the_deadline(self) -> None:
+        # (b) Nothing while elapsed <= deadline_s; one post past it.
+        model, _menu = self._close_model()
+        job = model.jobs.GetElement(0)
+        ticks = 0
+        while model.runner.GetElapsedS() <= job.deadline_s:
+            model.tick()
+            ticks += 1
+            self.assertLess(ticks, 200)
+            if model.runner.GetElapsedS() <= job.deadline_s:
+                self.assertEqual(model.posted, [])
+            else:
+                # First tick past the deadline: the timeout post must
+                # land on this tick, not on any later one.
+                self.assertEqual(len(model.posted), 1)
+        self.assertGreater(model.runner.GetElapsedS(), job.deadline_s)
+        self.assertEqual(len(model.posted), 1)
+        posted = model.posted[0]
+        self.assertFalse(posted.ok)
+        self.assertEqual(_txt(posted.error), "ui_menu_not_closed")
+        self.assertTrue(posted.ui_menu.open_after)
+        self.assertEqual(_txt(posted.ui_menu.class_name), "MapMenu")
+        self.assertEqual(posted.ui_menu.menu_id_after, MENU_MAP_ID)
+        self.assertEqual(
+            model.logs,
+            ["ui_menu_set menu=map before=22 after=22 ok=0 "
+             "error=ui_menu_not_closed removed=map_exclude+map_restriction"],
+        )
+        self.assertEqual(model.jobs.Count(), 0)
+
+    def test_close_never_lands_waits_through_the_exact_deadline(self) -> None:
+        # (b, exact) 0.125 is exact in binary, so 40 ticks of it land
+        # elapsed exactly on deadline_s (the 0.05 loop above never
+        # does): nothing may post on that tick, and the timeout post
+        # must land on the next one. A ">=" in the runner's deadline
+        # check would post ui_menu_not_closed at elapsed == deadline_s.
+        model, _menu = self._close_model()
+        job = model.jobs.GetElement(0)
+        self.assertEqual(model.runner.GetElapsedS(), 0.0)
+        self.assertEqual(job.sample_start_s, 0.0)
+        self.assertEqual(job.deadline_s, 5.0)
+        for _ in range(40):
+            model.tick(0.125)
+            self.assertEqual(model.posted, [])
+            self.assertEqual(model.jobs.Count(), 1)
+        self.assertEqual(model.runner.GetElapsedS(), job.deadline_s)
+        self.assertEqual(model.runner.GetElapsedS(), 5.0)
+        model.tick(0.125)
+        self.assertGreater(model.runner.GetElapsedS(), job.deadline_s)
+        self.assertEqual(len(model.posted), 1)
+        posted = model.posted[0]
+        self.assertFalse(posted.ok)
+        self.assertEqual(_txt(posted.error), "ui_menu_not_closed")
+        self.assertTrue(posted.ui_menu.open_after)
+        self.assertEqual(_txt(posted.ui_menu.class_name), "MapMenu")
+        self.assertEqual(posted.ui_menu.menu_id_after, MENU_MAP_ID)
+        self.assertEqual(
+            model.logs,
+            ["ui_menu_set menu=map before=22 after=22 ok=0 "
+             "error=ui_menu_not_closed removed=map_exclude+map_restriction"],
+        )
+        self.assertEqual(model.jobs.Count(), 0)
+
+    def test_close_at_sample_start_waits_for_a_later_tick(self) -> None:
+        # ProcessUiMenuJob is false while elapsed <= sample_start_s:
+        # even with the close already in effect, a zero-timeslice tick
+        # (elapsed still equal to sample_start_s) must not post. A "<"
+        # in place of the "<=" would post the ok on that tick.
+        model, _menu = self._close_model()
+        job = model.jobs.GetElement(0)
+        self.assertEqual(model.runner.GetElapsedS(), job.sample_start_s)
+        model.ui.complete_pending()
+        model.tick(0.0)
+        self.assertEqual(model.runner.GetElapsedS(), job.sample_start_s)
+        self.assertEqual(model.posted, [])
+        self.assertEqual(model.jobs.Count(), 1)
+        model.tick()
+        self.assertEqual(len(model.posted), 1)
+        posted = model.posted[0]
+        self.assertTrue(posted.ok)
+        self.assertEqual(_txt(posted.error), "")
+        self.assertTrue(posted.ui_menu.open_before)
+        self.assertFalse(posted.ui_menu.open_after)
+        self.assertEqual(_txt(posted.ui_menu.class_name), "")
+        self.assertEqual(posted.ui_menu.menu_id_before, MENU_MAP_ID)
+        self.assertEqual(posted.ui_menu.menu_id_after, -1)
+        self.assertEqual(
+            model.logs,
+            ["ui_menu_set menu=map before=22 after=-1 ok=1 "
+             "removed=map_exclude+map_restriction"],
+        )
+        self.assertEqual(model.jobs.Count(), 0)
+
+    def test_open_keeps_the_one_tick_read_through_the_runner(self) -> None:
+        # (c) Appears on tick 1: ok on tick 1. Appears only on tick 3:
+        # still ui_menu_not_opened on tick 1 (the one-tick open, kept).
+        model = _UiMenuRunnerModel(messages=self.messages)
+        model.ui.enter_mode = "deferred"
+        returned, _result = model.dispatch_menu(True)
+        self.assertFalse(returned)
+        model.ui.complete_pending()
+        model.tick()
+        self.assertEqual(len(model.posted), 1)
+        self.assertTrue(model.posted[0].ok)
+        self.assertTrue(model.posted[0].ui_menu.open_after)
+        self.assertEqual(model.jobs.Count(), 0)
+
+        model = _UiMenuRunnerModel(messages=self.messages)
+        model.ui.enter_mode = "deferred"
+        returned, _result = model.dispatch_menu(True)
+        self.assertFalse(returned)
+        # Tick 1: the menu has not appeared yet, so the one-tick open
+        # read posts ui_menu_not_opened on this tick.
+        model.tick()
+        self.assertEqual(len(model.posted), 1)
+        posted = model.posted[0]
+        self.assertFalse(posted.ok)
+        self.assertEqual(_txt(posted.error), "ui_menu_not_opened")
+        self.assertEqual(model.jobs.Count(), 0)
+        # Tick 2: the menu still has not appeared.
+        model.tick()
+        self.assertEqual(len(model.posted), 1)
+        self.assertIsNone(model.ui.FindMenu(MENU_MAP_ID))
+        # Tick 3: only now does the menu appear; the already posted
+        # one-tick answer stands and nothing posts again.
+        model.ui.complete_pending()
+        model.tick()
+        self.assertIsNotNone(model.ui.FindMenu(MENU_MAP_ID))
+        self.assertEqual(len(model.posted), 1)
+
+    def test_old_one_tick_process_posts_not_closed_on_tick_1(self) -> None:
+        # (d) Negative control: the ee3a89d ProcessUiMenuJob body, on an
+        # in-memory copy of the source, posts ui_menu_not_closed on the
+        # first tick in scenario (a), so (a) discriminates.
+        process_body = _method_body(self.source, PROCESS_UI_MENU)
+        if "FillUiMenuRead(job.ui_menu, menuId);" not in process_body:
+            raise AssertionError(
+                "ProcessUiMenuJob lacks the close read the mutant replaces"
+            )
+        old_body = (
+            "\n\t\tif (!job)\n\t\t{\n\t\t\treturn false;\n\t\t}\n"
+            "\t\treturn m_JobRunner.GetElapsedS() > job.sample_start_s;\n\t"
+        )
+        mutant = self.source.replace(process_body, old_body, 1)
+        self.assertNotEqual(mutant, self.source)
+        model, _menu = self._close_model(client=mutant)
+        model.tick()
+        self.assertEqual(len(model.posted), 1)
+        posted = model.posted[0]
+        self.assertFalse(posted.ok)
+        self.assertEqual(_txt(posted.error), "ui_menu_not_closed")
+        self.assertTrue(posted.ui_menu.open_after)
+        self.assertEqual(model.jobs.Count(), 0)
+
+
+# --- Error values of ui_menu_set / ui_map_set (d4b4fix-1114) -------------
+
+_MENU_BUSY_RESULT: dict[str, Any] = {
+    "ok": 0, "error": "ui_menu_busy",
+    "ui_menu": {"open_before": 0, "open_after": 0, "class_name": "",
+                "menu_id_before": 9, "menu_id_after": 9},
+}
+_MENU_NOT_OPENED_RESULT: dict[str, Any] = {
+    "ok": 0, "error": "ui_menu_not_opened",
+    "ui_menu": {"open_before": 0, "open_after": 0, "class_name": "",
+                "menu_id_before": -1, "menu_id_after": -1},
+}
+_MENU_NOT_CLOSED_RESULT: dict[str, Any] = {
+    "ok": 0, "error": "ui_menu_not_closed",
+    "ui_menu": {"open_before": 1, "open_after": 1, "class_name": "MapMenu",
+                "menu_id_before": 22, "menu_id_after": 22},
+}
+_MAP_NOT_SET_RESULT: dict[str, Any] = {
+    "ok": 0, "error": "ui_map_not_set",
+    "ui_map": {"scale_before": 0.30000001192092896, "scale_after": 1.0,
+               "center_before": [7944.80517578125, 1900.637451171875],
+               "center_after": [7680.0, 9600.0], "class_name": "MapMenu"},
+}
+_MAP_NOT_SET_TEXT = (
+    "ui_map_not_set; observed=scale_before=0.30000001192092896 "
+    "scale_after=1.0 "
+    "center_before=[7944.80517578125,1900.637451171875] "
+    "center_after=[7680.0,9600.0] class_name=MapMenu"
+)
+
+
+class UiMenuMapErrorDetailTest(unittest.TestCase):
+    def test_exact_observed_strings(self) -> None:
+        self.assertEqual(
+            str(server._bridge_error(_MENU_BUSY_RESULT, MENU_COMMAND)),
+            "ui_menu_busy; observed=open_before=0 open_after=0 "
+            "menu_id_before=9 menu_id_after=9",
+        )
+        self.assertEqual(
+            str(server._bridge_error(_MENU_NOT_OPENED_RESULT, MENU_COMMAND)),
+            "ui_menu_not_opened; observed=open_before=0 open_after=0 "
+            "menu_id_before=-1 menu_id_after=-1",
+        )
+        self.assertEqual(
+            str(server._bridge_error(_MENU_NOT_CLOSED_RESULT, MENU_COMMAND)),
+            "ui_menu_not_closed; observed=open_before=1 open_after=1 "
+            "class_name=MapMenu menu_id_before=22 menu_id_after=22",
+        )
+        self.assertEqual(
+            str(server._bridge_error(_MAP_NOT_SET_RESULT, MAP_COMMAND)),
+            _MAP_NOT_SET_TEXT,
+        )
+        self.assertEqual(
+            str(server._bridge_error(
+                {"ok": 0, "error": "ui_map_widget_missing",
+                 "ui_map": {"class_name": "MapMenu", "scale_after": 1.0}},
+                MAP_COMMAND,
+            )),
+            "ui_map_widget_missing; observed=class_name=MapMenu",
+        )
+        # Bool open values cross as 0/1 too.
+        self.assertEqual(
+            str(server._bridge_error(
+                {"ok": 0, "error": "ui_menu_busy",
+                 "ui_menu": {"open_before": True, "open_after": False}},
+                MENU_COMMAND,
+            )),
+            "ui_menu_busy; observed=open_before=1 open_after=0",
+        )
+
+    def test_other_codes_stay_bare_even_with_a_filled_payload(self) -> None:
+        for code in ("timeout", "bad_args", "client_not_in_game", "no_mission"):
+            with self.subTest(verb=MENU_COMMAND, code=code):
+                result = {"ok": 0, "error": code,
+                          "ui_menu": dict(_MENU_NOT_CLOSED_RESULT["ui_menu"])}
+                self.assertEqual(str(server._bridge_error(result, MENU_COMMAND)), code)
+        for code in ("ui_map_not_open", "timeout", "bad_args",
+                     "client_not_in_game"):
+            with self.subTest(verb=MAP_COMMAND, code=code):
+                result = {"ok": 0, "error": code,
+                          "ui_map": dict(_MAP_NOT_SET_RESULT["ui_map"])}
+                self.assertEqual(str(server._bridge_error(result, MAP_COMMAND)), code)
+
+    def test_malformed_values_are_dropped(self) -> None:
+        # Bool menu id, open_after 2, a class_name with a space or of
+        # 65 chars: each dropped, the valid pairs kept.
+        self.assertEqual(
+            str(server._bridge_error(
+                {"ok": 0, "error": "ui_menu_not_closed",
+                 "ui_menu": {"open_before": 1, "open_after": 2,
+                             "class_name": "Map Menu",
+                             "menu_id_before": True, "menu_id_after": 22}},
+                MENU_COMMAND,
+            )),
+            "ui_menu_not_closed; observed=open_before=1 menu_id_after=22",
+        )
+        self.assertEqual(
+            str(server._bridge_error(
+                {"ok": 0, "error": "ui_menu_not_closed",
+                 "ui_menu": {"class_name": "A" * 65, "menu_id_after": -1}},
+                MENU_COMMAND,
+            )),
+            "ui_menu_not_closed; observed=menu_id_after=-1",
+        )
+        # NaN/inf scale, a 3-number centre, a bad class_name.
+        self.assertEqual(
+            str(server._bridge_error(
+                {"ok": 0, "error": "ui_map_not_set",
+                 "ui_map": {"scale_before": math.nan, "scale_after": math.inf,
+                            "center_before": [1.0, 2.0, 3.0],
+                            "center_after": [7680.0, 9600.0],
+                            "class_name": "Map Menu"}},
+                MAP_COMMAND,
+            )),
+            "ui_map_not_set; observed=center_after=[7680.0,9600.0]",
+        )
+        self.assertEqual(
+            str(server._bridge_error(
+                {"ok": 0, "error": "ui_map_not_set",
+                 "ui_map": {"scale_before": 0.5, "class_name": "A" * 65}},
+                MAP_COMMAND,
+            )),
+            "ui_map_not_set; observed=scale_before=0.5",
+        )
+        # Nothing valid left, or no report at all: the bare code.
+        self.assertEqual(
+            str(server._bridge_error(
+                {"ok": 0, "error": "ui_menu_busy",
+                 "ui_menu": {"open_after": 2, "class_name": "has space"}},
+                MENU_COMMAND,
+            )),
+            "ui_menu_busy",
+        )
+        self.assertEqual(
+            str(server._bridge_error(
+                {"ok": 0, "error": "ui_map_widget_missing", "ui_map": {}},
+                MAP_COMMAND,
+            )),
+            "ui_map_widget_missing",
+        )
+
+    def test_ui_map_widget_missing_malformed_class_name_stays_bare(
+        self,
+    ) -> None:
+        # The widget-missing branch has its own token check: a class_name
+        # with a space or of 65 chars is dropped there too, so no pair is
+        # left and the bare code stays.
+        for class_name in ("Map Menu", "A" * 65):
+            with self.subTest(class_name=class_name):
+                self.assertEqual(
+                    str(server._bridge_error(
+                        {"ok": 0, "error": "ui_map_widget_missing",
+                         "ui_map": {"class_name": class_name}},
+                        MAP_COMMAND,
+                    )),
+                    "ui_map_widget_missing",
+                )
+
+    def test_ui_map_centre_elements_must_be_finite_numbers(self) -> None:
+        # Each element of a two-number centre is checked on its own: a
+        # bool, NaN, inf or string element drops the whole centre, for
+        # center_before and for center_after, while the other pairs of
+        # the same reply are kept.
+        bad_centres: list[Any] = [
+            [True, 9600.0],
+            [math.nan, 1.0],
+            [math.inf, 1.0],
+            ["9600", 1.0],
+            [1.0, True],
+            [1.0, math.nan],
+            [1.0, math.inf],
+            [1.0, "9600"],
+        ]
+        valid_ui_map: dict[str, Any] = {
+            "scale_before": 0.5, "scale_after": 1.0,
+            "center_before": [1000.0, 2000.0],
+            "center_after": [7680.0, 9600.0], "class_name": "MapMenu",
+        }
+        expected_without = {
+            "center_before": (
+                "ui_map_not_set; observed=scale_before=0.5 scale_after=1.0 "
+                "center_after=[7680.0,9600.0] class_name=MapMenu"
+            ),
+            "center_after": (
+                "ui_map_not_set; observed=scale_before=0.5 scale_after=1.0 "
+                "center_before=[1000.0,2000.0] class_name=MapMenu"
+            ),
+        }
+        for key, expected in expected_without.items():
+            for bad in bad_centres:
+                with self.subTest(key=key, centre=bad):
+                    ui_map = dict(valid_ui_map)
+                    ui_map[key] = bad
+                    self.assertEqual(
+                        str(server._bridge_error(
+                            {"ok": 0, "error": "ui_map_not_set",
+                             "ui_map": ui_map},
+                            MAP_COMMAND,
+                        )),
+                        expected,
+                    )
+
+    def test_run_not_owned_keeps_global_hint_without_observed(self) -> None:
+        # Every other code carries no observed= detail, but the global
+        # hints of _bridge_error still apply: run_not_owned keeps its
+        # next_step even with a filled ui_menu or ui_map payload.
+        menu_result = {"ok": 0, "error": "run_not_owned",
+                       "ui_menu": dict(_MENU_NOT_CLOSED_RESULT["ui_menu"])}
+        text = str(server._bridge_error(menu_result, MENU_COMMAND))
+        self.assertEqual(text, "run_not_owned; next_step=session_acquire_wait")
+        self.assertNotIn("observed=", text)
+        map_result = {"ok": 0, "error": "run_not_owned",
+                      "ui_map": dict(_MAP_NOT_SET_RESULT["ui_map"])}
+        text = str(server._bridge_error(map_result, MAP_COMMAND))
+        self.assertEqual(text, "run_not_owned; next_step=session_acquire_wait")
+        self.assertNotIn("observed=", text)
+
+    def test_negative_control_without_the_new_branch_is_bare(self) -> None:
+        with patch(
+            "dayz_mcp.bridge_errors._bridge_error_detail", return_value=""
+        ):
+            self.assertEqual(
+                str(server._bridge_error(_MENU_BUSY_RESULT, MENU_COMMAND)),
+                "ui_menu_busy",
+            )
+            self.assertEqual(
+                str(server._bridge_error(_MAP_NOT_SET_RESULT, MAP_COMMAND)),
+                "ui_map_not_set",
+            )
+
+
+def _fake_state(result: dict[str, Any]) -> SimpleNamespace:
+    # Copied from test_ui_error_diagnostics.py (_fake_state): test
+    # modules must not import each other (test_suite_structure).
+    return SimpleNamespace(
+        status_snapshot=loopback.ServerState("k").status_snapshot,
+        daemon_generation="test-generation",
+        enqueue_command=lambda *args, **kwargs: (200, {"id": 41}),
+        take_result=lambda command_id, remove=False: dict(result),
+        abandon_command=lambda *args, **kwargs: None,
+    )
+
+
+async def _wire_error_text(
+    tool: str, arguments: dict[str, Any], result: dict[str, Any]
+) -> str:
+    """Copied from test_ui_error_diagnostics.py (_wire_error_text)."""
+    app, runtime = build_app(ServerConfig(key="k", port=0, log_sink=lambda _m: None))
+    with patch.object(runtime, "ensure_peer_allowed", return_value=None), patch.object(
+        type(runtime), "state", new_callable=PropertyMock, return_value=_fake_state(result)
+    ):
+        async with create_connected_server_and_client_session(app._mcp_server) as session:
+            call = await session.call_tool(tool, arguments)
+    assert call.isError, call
+    for block in call.content[1:]:
+        marker = call.meta["server_code_freshness"]
+        assert block.text.startswith(f"SERVER_CODE_FRESHNESS {marker['status']}: "), call
+        assert "remediation=reopen_mcp_client" in block.text, call
+    return call.content[0].text
+
+
+class UiMenuMapErrorWireTest(unittest.IsolatedAsyncioTestCase):
+    @slow_test
+    async def test_observed_reaches_the_client_over_the_wire(self) -> None:
+        text = await _wire_error_text(
+            MENU_COMMAND, {"menu": "map", "open": False}, _MENU_NOT_CLOSED_RESULT
+        )
+        self.assertEqual(
+            text,
+            "Error executing tool ui_menu_set: ui_menu_not_closed; "
+            "observed=open_before=1 open_after=1 class_name=MapMenu "
+            "menu_id_before=22 menu_id_after=22",
+        )
+        text = await _wire_error_text(
+            MAP_COMMAND,
+            {"scale": 1.0, "center": [4000.0, 10000.0]},
+            _MAP_NOT_SET_RESULT,
+        )
+        self.assertEqual(
+            text, f"Error executing tool ui_map_set: {_MAP_NOT_SET_TEXT}"
+        )
+        # Negative control: with the new branch bypassed the same calls
+        # give the bare code.
+        with patch(
+            "dayz_mcp.bridge_errors._bridge_error_detail", return_value=""
+        ):
+            text = await _wire_error_text(
+                MENU_COMMAND, {"menu": "map", "open": False},
+                _MENU_NOT_CLOSED_RESULT,
+            )
+            self.assertEqual(
+                text, "Error executing tool ui_menu_set: ui_menu_not_closed"
+            )
+            text = await _wire_error_text(
+                MAP_COMMAND,
+                {"scale": 1.0, "center": [4000.0, 10000.0]},
+                _MAP_NOT_SET_RESULT,
+            )
+            self.assertEqual(
+                text, "Error executing tool ui_map_set: ui_map_not_set"
+            )
 
 
 if __name__ == "__main__":
