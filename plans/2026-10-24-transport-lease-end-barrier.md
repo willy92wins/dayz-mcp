@@ -991,7 +991,9 @@ it runs.
     that row ends `close_not_reported` when the hook returns.
   - A late clean of an OWED server row whose floors fall short answers `applied` and changes
     nothing: it is the row's current close, so it is not `ignored`, and the row keeps its
-    reasons. One whose floors pass clears the row and stores them.
+    reasons. Since fb-20261112-104708-b92a the row is instead rewritten with the
+    freshly recomputed reasons when they differ (owed_since is kept), and a clean
+    that passes still clears it. One whose floors pass clears the row and stores them.
   - The ids in every report and restart pair are checked before any row changes, so a bad id
     raises with nothing applied, and a published close needs a `close_id` (1650-1654, 1717-1723,
     1776).

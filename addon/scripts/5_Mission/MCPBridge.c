@@ -269,6 +269,7 @@ class MCPBridge : Managed
 		m_SincePollS = m_SincePollS + timeslice;
 		MCPBotControl.Tick(this, m_ElapsedS);
 		MCPSurvivorDrive.Tick(this);
+		MCPInfectedDrive.Tick();
 
 		if (!m_Configured)
 		{
@@ -4360,11 +4361,13 @@ class MCPBridge : Managed
 		return true;
 	}
 
-	// Impose heading/speed on an infected server-side through its AI input controller.
-	// Vanilla precedent: PluginDayZInfectedDebug drives a possessed infected the same
-	// way (plugindayzinfecteddebug.c:385); combo order follows dayzanimal.c:548-550.
-	// Heading arrives in degrees and is converted here (OverrideHeading takes radians).
-	// mode "release" hands control back to the vanilla AI.
+	// Impose heading/speed on an infected server-side through its AI input controller
+	// (MCPInfectedDrive, MCP_InfectedDrive.c). Vanilla precedent: PluginDayZInfectedDebug
+	// drives a possessed infected the same way (plugindayzinfecteddebug.c:385); combo
+	// order follows dayzanimal.c:548-550. Heading arrives in degrees and is converted
+	// here (OverrideHeading takes radians). The drive is held, re-applied every tick,
+	// until mode "release", death, deletion, shutdown or the lease close
+	// (DispatchLeaseClose).
 	protected bool DispatchInfectedDrive(MCPCommand command, MCPResult result)
 	{
 		if (!command.args || command.args.type == "" || !command.args.pos || command.args.pos.Count() != 3)
@@ -4427,6 +4430,7 @@ class MCPBridge : Managed
 
 		if (release)
 		{
+			MCPInfectedDrive.Release(infected);
 			controller.OverrideMovementSpeed(false, 0.0);
 			controller.OverrideHeading(false, 0.0);
 			controller.OverrideTurnSpeed(false, 0.0);
@@ -4439,9 +4443,7 @@ class MCPBridge : Managed
 		}
 		else
 		{
-			controller.OverrideTurnSpeed(true, Math.PI2);
-			controller.OverrideMovementSpeed(true, command.args.speed);
-			controller.OverrideHeading(true, command.args.heading * Math.DEG2RAD);
+			MCPInfectedDrive.Drive(infected, command.args.heading * Math.DEG2RAD, command.args.speed);
 			// Record each infected this bridge overrides (§2.7 step 2).
 			if (m_InfectedOverridden && m_InfectedOverridden.Find(infected) < 0)
 			{
@@ -8808,6 +8810,9 @@ class MCPBridge : Managed
 		// below reads s_Driven itself, so a drive that survives this is
 		// residue, never a silent clean.
 		MCPSurvivorDrive.ShutdownAll(this);
+		// The registry re-applies the overrides every tick, so the close
+		// must empty it, with the three overrides set to false on each entry.
+		MCPInfectedDrive.ShutdownAll();
 		// §2.7 step 2: release every recorded infected with the same three
 		// calls. The registry and the debt stay: the native lifetime cannot
 		// be read back, so this is unverified until the process exits.
@@ -9113,6 +9118,7 @@ class MCPBridge : Managed
 	{
 		MCPBotControl.ShutdownAll(this);
 		MCPSurvivorDrive.ShutdownAll(this);
+		MCPInfectedDrive.ShutdownAll();
 		// A completed cached callback is no longer in m_CallbackRefs.
 		if (m_PollCallback)
 		{
