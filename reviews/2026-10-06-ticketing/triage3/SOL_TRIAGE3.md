@@ -407,9 +407,9 @@ Conflictos de #195 y build de P:\SimpleGroup en 251 s: **orchestrator fact**. Di
 No sustituye FK offline. La contribución auxiliar tiene rutas locales, `CocaLab_dev/tools/pour_fk.py:29-31`:
 
 ```python
-DZ = r"C:\Users\guill\OneDrive\Documentos\DayZ Projects\DZ"
-DAYZATOOL = os.environ.get("DAYZATOOL", r"C:\Users\guill\Downloads\DayZATool_v1.3\DayZATool.exe")
-SEANIM_READER = r"C:\Users\guill\OneDrive\Documentos\DayZ Projects\A6_SR2M_dev\tools\anim-pipeline"
+DZ = r"%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DZ"
+DAYZATOOL = os.environ.get("DAYZATOOL", r"%USERPROFILE%\Downloads\DayZATool_v1.3\DayZATool.exe")
+SEANIM_READER = r"%USERPROFILE%\OneDrive\Documentos\DayZ Projects\A6_SR2M_dev\tools\anim-pipeline"
 ```
 
 **PROPOSED FIX:** **M**, adaptar contribución como CLI portable con consumidor ejecutable y contrato de resultados; decidir después el verbo. SEALED no, ENFORCE no.

@@ -2070,7 +2070,8 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
                 self.assertEqual(results, ["applied"])
                 self.assertEqual(self._owed(), [("server", expected)])
         # Decision 11: a clean of that same close that fails the floors
-        # again leaves the OWED row as it was; one that passes clears it.
+        # in another way rewrites the OWED row with the freshly computed
+        # reasons; one that passes clears it.
         again = self.coordinator.note_close_outcomes(
             [
                 self._close_outcome(
@@ -2086,7 +2087,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
             ]
         )
         self.assertEqual(again, ["applied"])
-        self.assertEqual(self._owed(), [("server", floors)])
+        self.assertEqual(self._owed(), [("server", conn_gen)])
         passing = self.coordinator.note_close_outcomes(
             [
                 self._close_outcome(
@@ -2285,11 +2286,175 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
                         "lease_end", self.coordinator.status(self.a)
                     )
                 else:
-                    owed = dict(self._owed())
                     self.assertEqual(
-                        owed.get("client"), ["action_input_in_flight"]
+                        self._owed(),
+                        [
+                            ("client", ["action_input_in_flight"]),
+                            ("server", ["look_floor_unapplied"]),
+                        ],
                     )
-                    self.assertIn("look_floor_unapplied", owed.get("server", []))
+
+    def test_owed_server_clean_rewrites_reasons_and_keeps_owed_since(self) -> None:
+        client_floor = _floor(10, 20, conn_gen=1, move_id=0, weapon_id=46, look_id=10)
+        round_id, ids = self._published_round([])
+        client = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "client",
+                    ids["client"],
+                    "residue",
+                    reasons=["action_input_in_flight"],
+                    floor=dict(client_floor),
+                )
+            ]
+        )
+        self.assertEqual(client, ["applied"])
+        self.assertEqual(
+            self._owed(),
+            [
+                ("client", ["action_input_in_flight"]),
+                ("server", ["weapon_floor_unapplied", "look_floor_unapplied"]),
+            ],
+        )
+        self.clock.advance(5.0)
+
+        def server_since() -> float:
+            unconfirmed = self.coordinator.status(self.a)["lease_end"][
+                "unconfirmed"
+            ]
+            return next(
+                float(row["since_s"])
+                for row in unconfirmed
+                if row["peer"] == "server"
+            )
+
+        since_before = server_since()
+        self.assertEqual(since_before, 5.0)
+        partial = _floor(10, 20, conn_gen=1, move_id=0, weapon_id=46, look_id=9)
+        server = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "server",
+                    ids["server"],
+                    "clean",
+                    reported_floors=[dict(partial)],
+                )
+            ]
+        )
+        self.assertEqual(server, ["applied"])
+        self.assertEqual(
+            self._owed(),
+            [
+                ("client", ["action_input_in_flight"]),
+                ("server", ["look_floor_unapplied"]),
+            ],
+        )
+        self.assertEqual(server_since(), since_before)
+        # No public path sets reported on an owed row (note_close_round
+        # only reports pending rows), so set it through the row map.
+        row = self.coordinator._lease_end_rows[("run-1", "server")]
+        row.reported = True
+        again = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "server",
+                    ids["server"],
+                    "clean",
+                    reported_floors=[dict(partial)],
+                )
+            ]
+        )
+        self.assertEqual(again, ["applied"])
+        self.assertEqual(
+            self._owed(),
+            [
+                ("client", ["action_input_in_flight"]),
+                ("server", ["look_floor_unapplied"]),
+            ],
+        )
+        self.assertTrue(row.reported)
+        self.assertEqual(server_since(), since_before)
+        settled = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "server",
+                    ids["server"],
+                    "clean",
+                    reported_floors=[dict(client_floor)],
+                )
+            ]
+        )
+        self.assertEqual(settled, ["applied"])
+        self.assertEqual(self._owed(), [("client", ["action_input_in_flight"])])
+
+    def test_owed_server_clean_with_other_conn_gen_replaces_reasons(self) -> None:
+        client_floor = _floor(10, 20, conn_gen=1, move_id=0, weapon_id=46, look_id=10)
+        round_id, ids = self._published_round([])
+        client = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "client",
+                    ids["client"],
+                    "residue",
+                    reasons=["action_input_in_flight"],
+                    floor=dict(client_floor),
+                )
+            ]
+        )
+        self.assertEqual(client, ["applied"])
+        self.assertEqual(
+            self._owed(),
+            [
+                ("client", ["action_input_in_flight"]),
+                ("server", ["weapon_floor_unapplied", "look_floor_unapplied"]),
+            ],
+        )
+        server = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "server",
+                    ids["server"],
+                    "clean",
+                    reported_floors=[
+                        _floor(
+                            10,
+                            20,
+                            conn_gen=2,
+                            move_id=0,
+                            weapon_id=46,
+                            look_id=10,
+                        )
+                    ],
+                )
+            ]
+        )
+        self.assertEqual(server, ["applied"])
+        self.assertEqual(
+            self._owed(),
+            [
+                ("client", ["action_input_in_flight"]),
+                (
+                    "server",
+                    [
+                        "player_move_conn_gen_unapplied",
+                        "weapon_conn_gen_unapplied",
+                        "look_conn_gen_unapplied",
+                    ],
+                ),
+            ],
+        )
 
     def test_k17_weapon_floor_unapplied(self) -> None:
         self._bind()

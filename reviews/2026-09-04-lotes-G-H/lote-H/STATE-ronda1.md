@@ -50,7 +50,7 @@ Sobre de stop. `execute_dayz_test_stop` (`tools/dayz_mcp/dayz_test_tool.py:817`)
 [PASS ] H2-ANILLO-EN-MEMORIA-EMPIEZA-VACIO tras reiniciar no se inventa historia
           anillo tras reiniciar=[] run_presente=False eventos_de_retirada_en_el_jsonl=1 -- publicar un diagnostico aqui significaria haberlo reconstruido leyendo events.jsonl, que es lo que D1 prohibe; la lista vacia es la respuesta correcta
 [PASS ] [GUARDA] H2-LECTURA-NO-ABRE-EVENTS-JSONL status/box no leen el audit ni una vez
-          aperturas bajo C:\Users\guill\AppData\Local\Temp\tmpa40oqaqj\runtime\audit: [] (events.jsonl=2983 bytes; control positivo vio 3 aperturas) -- leer el jsonl desde la ruta de lectura rompe la escritura del writer en Windows; D1 lo prohibe
+          aperturas bajo %USERPROFILE%\AppData\Local\Temp\tmpa40oqaqj\runtime\audit: [] (events.jsonl=2983 bytes; control positivo vio 3 aperturas) -- leer el jsonl desde la ruta de lectura rompe la escritura del writer en Windows; D1 lo prohibe
 [PASS ] H3-RUN-NOT-ACTIVE-SOBRE run presente y terminal devuelve el sobre estructurado
           ok | devuelto={'status': 'failed', 'run_id': '12345678-1234-4234-8234-1234567890ab', 'error_code': 'run_not_active', 'daemon_generation_at_launch': 'gen-snapOld-f9735d1bfe28496b81f92b2c87d5e1c0', 'daemon_generation_current': 'gen-snapNew-07cc992ebadc4b9a87158d0452c241ff', 'generation_changed': False} -- hoy resolve_sto
 [PASS ] H3-MUT-RECOMPUTA-GENERATION-CHANGED los tres campos se COPIAN, no se recalculan

@@ -329,6 +329,8 @@ class SceneToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("DayZInfected gets ECE_INITAI", batch)
         self.assertIn("partial", batch)
         self.assertIn("y null", batch)
+        self.assertIn("first surface", batch)
+        self.assertNotIn("the ground surface_query reads", batch)
         for claim in (
             "groups of per_tick",
             "one command per group",
@@ -590,7 +592,11 @@ class SceneToolTest(unittest.IsolatedAsyncioTestCase):
             ({"pos": [1.0, 2.0, 3.0]}, "bad_args: items[3].type"),
             ({"type": "", "pos": [1.0, 2.0, 3.0]}, "bad_args: items[3].type"),
             ({"type": "Barrel_Green"}, "bad_args: items[3].pos"),
-            ({"type": "Barrel_Green", "pos": [1.0, 2.0]}, "bad_args: items[3].pos"),
+            (
+                {"type": "Barrel_Green", "pos": [1.0, 2.0]},
+                "bad_args: items[3].pos [1.0, 2.0] must be [x, y, z] finite numbers, "
+                "y null for the first surface",
+            ),
             ({"type": "Barrel_Green", "pos": [None, 2.0, 3.0]}, "bad_args: items[3].pos"),
             ({"type": "Barrel_Green", "pos": [1.0, float("nan"), 3.0]}, "bad_args: items[3].pos"),
             ({"type": "Barrel_Green", "pos": [1.0, True, 3.0]}, "bad_args: items[3].pos"),

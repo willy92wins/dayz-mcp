@@ -5,7 +5,7 @@ VERDICT: CHANGES_REQUIRED
 ## FINDINGS
 
 **F1 — P2 — Explicit sidecar paths bypass selector validation.**  
-[tools/mcp_capture.py:577](C:/Users/guill/dzmcp_gauntlet/g5r9_selection/ws/tools/mcp_capture.py:577)
+[tools/mcp_capture.py:577](%USERPROFILE%/dzmcp_gauntlet/g5r9_selection/ws/tools/mcp_capture.py:577)
 
 Executable scenario:
 
@@ -18,7 +18,7 @@ Executable scenario:
 **Verified:** a read-only probe intercepted that exact write call. Validate the selector before accepting an override.
 
 **F2 — P2 — Public capture results do not consistently propagate selection errors or prevent persistence.**  
-[tools/mcp_capture.py:938](C:/Users/guill/dzmcp_gauntlet/g5r9_selection/ws/tools/mcp_capture.py:938), with consumers at `tools/mcp_capture.py:1481` and `tools/mcp_capture.py:1633`.
+[tools/mcp_capture.py:938](%USERPROFILE%/dzmcp_gauntlet/g5r9_selection/ws/tools/mcp_capture.py:938), with consumers at `tools/mcp_capture.py:1481` and `tools/mcp_capture.py:1633`.
 
 Executable scenario: invalid argv as above, no sidecar override, and a successful nonblack capture backend.
 
@@ -29,7 +29,7 @@ Executable scenario: invalid argv as above, no sidecar override, and a successfu
 **Verified:** synthetic backend probes exercised the public functions; persistence was intercepted. Propagate a structured selection failure through both public entrypoints and stop persistence when it occurs.
 
 **F3 — P2 — Standalone capture now requires the DayZ-MCP package.**  
-[tools/mcp_capture.py:556](C:/Users/guill/dzmcp_gauntlet/g5r9_selection/ws/tools/mcp_capture.py:556), repeated in the exception handler at `tools/mcp_capture.py:931`.
+[tools/mcp_capture.py:556](%USERPROFILE%/dzmcp_gauntlet/g5r9_selection/ws/tools/mcp_capture.py:556), repeated in the exception handler at `tools/mcp_capture.py:931`.
 
 Executable scenario: load `mcp_capture.py` in an environment with Pillow available but `dayz_mcp` unavailable, omit the selector and sidecar override, then call `_frame_stale_report("key", "window", "ab", {})`.
 

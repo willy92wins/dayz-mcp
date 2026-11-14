@@ -11,8 +11,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
+from dayz_mcp.runtime_state import bounded_text, valid_utc_timestamp
+
 
 SESSION_TTL_S = 120.0
+LEASE_WORK_IDLE_S = 1800.0
 LEASE_END_BOUND_S = 40.0
 LEASE_GRACE_S = 90.0
 MAX_PREF_RENEWALS = 1
@@ -175,9 +178,22 @@ class ClientIdentity:
             or not session_id
         ):
             raise ValueError("invalid_identity")
+        # Same predicates CoordinationFaultStore.validate applies to the WAL
+        # marker in runtime_state.py: refuse at admission an identity the WAL
+        # would refuse at grant, instead of queueing it to fail wal_arm. The
+        # marker carries public_payload(), so session is checked as its
+        # first 12 characters (what the WAL receives), not the raw id.
+        candidate = cls(platform, pid, ppid, started, session_id, label)
+        public = candidate.public_payload()
+        if (
+            not bounded_text(public["session"], 200)
+            or not bounded_text(public["started_at_utc"], 64)
+            or not valid_utc_timestamp(str(public["started_at_utc"]))
+        ):
+            raise ValueError("invalid_identity")
         if not isinstance(label, str) or len(label) > 120:
             raise ValueError("invalid_identity")
-        return cls(platform, pid, ppid, started, session_id, label)
+        return candidate
 
     def to_payload(self) -> dict[str, object]:
         return dataclasses.asdict(self)
@@ -236,6 +252,7 @@ class _Lease:
     lease_id: str
     granted_at: float
     expires_at: float
+    last_work_at: float = 0.0
     source_ticket_id: str | None = None
     source_operation_id: str | None = None
     vehicle_active: bool = False
@@ -305,6 +322,7 @@ class _ExpiryGrace:
 AuditCallback = Callable[[dict[str, object]], object]
 CleanupCallback = Callable[..., object]
 AttachedRunProbe = Callable[[str, str], bool]
+IdleHoldProbe = Callable[[str, str, float], bool]
 FaultArmCallback = Callable[[dict[str, object]], str]
 FaultTransitionCallback = Callable[..., str]
 FaultClearCallback = Callable[[str, str], bool]
@@ -332,6 +350,7 @@ class SessionCoordinator:
         fault_clear: FaultClearCallback | None = None,
         persist_snapshot: PersistSnapshotCallback | None = None,
         attached_run_probe: AttachedRunProbe | None = None,
+        idle_hold_probe: IdleHoldProbe | None = None,
     ) -> None:
         self._time_fn = time_fn
         self._token_fn = token_fn or (lambda: secrets.token_urlsafe(32))
@@ -357,6 +376,7 @@ class SessionCoordinator:
             lambda _session_id, _lease_id, _reason, _vehicle_active: {}
         )
         self._attached_run_probe = attached_run_probe
+        self._idle_hold_probe = idle_hold_probe
         if (
             isinstance(cleanup_timeout_s, bool)
             or not isinstance(cleanup_timeout_s, (int, float))
@@ -681,6 +701,7 @@ class SessionCoordinator:
                     granted_at = self._time_fn()
                     lease.granted_at = granted_at
                     lease.expires_at = granted_at + SESSION_TTL_S
+                    lease.last_work_at = granted_at
                     self._active = lease
                     self._bump_revision_locked()
                     wal_outcome = self._finish_wal_after_publish_locked()
@@ -1427,6 +1448,55 @@ class SessionCoordinator:
             lease, error = self._validate_token_locked(client, lease_token)
             if lease is None:
                 return self._token_error_tuple(error, degraded)
+            probe = self._idle_hold_probe
+            refused = False
+            work_idle_s = 0.0
+            if (
+                probe is not None
+                and self._time_fn() - lease.last_work_at >= LEASE_WORK_IDLE_S
+            ):
+                session_id = client.session_id
+                lease_id = lease.lease_id
+                self._condition.release()
+                try:
+                    try:
+                        hold = bool(probe(session_id, lease_id, LEASE_WORK_IDLE_S))
+                    except Exception:
+                        hold = False
+                finally:
+                    self._condition.acquire()
+                degraded = self._unique([*degraded, *self._expire_due()])
+                lease, error = self._validate_token_locked(client, lease_token)
+                if lease is None:
+                    return self._token_error_tuple(error, degraded)
+                work_idle_s = self._time_fn() - lease.last_work_at
+                refused = hold and work_idle_s >= LEASE_WORK_IDLE_S
+            if refused:
+                if not self._write_audit_locked(
+                    "session_heartbeat",
+                    client=client,
+                    reason="owner_heartbeat",
+                    duration_s=0.0,
+                    lease_id=lease.lease_id,
+                    decision="work_idle",
+                ):
+                    return 503, self._payload_with_degradation(
+                        self._audit_failed_payload("write"), degraded
+                    )
+                if self._active is not lease:
+                    return 409, self._payload_with_degradation(
+                        {"error": "lease_invalid"}, degraded
+                    )
+                # The audit write dropped the lock: work that landed in
+                # that window restarts the idle clock, so recheck it.
+                work_idle_s = self._time_fn() - lease.last_work_at
+                if work_idle_s >= LEASE_WORK_IDLE_S:
+                    payload = self._active_payload_locked(lease)
+                    payload["renewal_refused"] = "work_idle"
+                    payload["work_idle_s"] = work_idle_s
+                    if degraded:
+                        payload = self._merge_cleanup_degraded(payload, degraded)
+                    return 200, payload
             if not self._write_audit_locked(
                 "session_heartbeat",
                 client=client,
@@ -1553,6 +1623,7 @@ class SessionCoordinator:
                         # Owner reads stay authorized and audited. They do not
                         # extend expires_at and are not a renewal stamp.
                         # file_matches renews through session_heartbeat instead.
+                        lease.last_work_at = self._time_fn()
                         return AuthorizationDecision(
                             True,
                             200,
@@ -1617,6 +1688,7 @@ class SessionCoordinator:
                 )
             now = self._time_fn()
             lease.expires_at = now + SESSION_TTL_S
+            lease.last_work_at = now
             pin_seconds = self._bounded_operation_timeout(operation_timeout_s)
             deadline = now + pin_seconds if pin_seconds > 0.0 else None
             reservation_id = uuid.uuid4().hex
@@ -3480,6 +3552,7 @@ class SessionCoordinator:
             granted_at = self._time_fn()
             lease.granted_at = granted_at
             lease.expires_at = granted_at + SESSION_TTL_S
+            lease.last_work_at = granted_at
             self._active = lease
             self._bump_revision_locked()
             wal_outcome = self._finish_wal_after_publish_locked()
@@ -3595,6 +3668,7 @@ class SessionCoordinator:
             lease_id,
             now,
             now + SESSION_TTL_S,
+            last_work_at=now,
             source_ticket_id=source_ticket_id,
             source_operation_id=source_operation_id,
         )
@@ -4905,6 +4979,8 @@ class SessionCoordinator:
         if row.peer == "server":
             reasons = self._server_clean_reasons_locked(row, outcome)
             if reasons:
+                if reasons != row.reasons:
+                    self._set_row_owed_locked(row, reasons)
                 return True
             self._remember_server_floors_locked(row, outcome)
         self._settle_row_locked(row)

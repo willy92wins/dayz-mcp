@@ -206,10 +206,10 @@ class RealRegistryProviderTest(unittest.TestCase):
 
     def test_real_registry_reads_through_wmi_and_skips_winreg(self) -> None:
         stale = _FakeWinreg(0, 0)
-        values = {"pid": 15544, "ActiveUser": 35309983}
+        values = {"pid": 15544, "ActiveUser": 39734374}
         with patch.object(sp.wmi_host, "read_hkcu_dword", side_effect=lambda _k, name: values[name]) as wmi:
             snap = self._read(sp.WindowsSteamPreflightProvider(real_registry=True), stale)
-        self.assertEqual((snap.pid, snap.active_user), (15544, 35309983))
+        self.assertEqual((snap.pid, snap.active_user), (15544, 39734374))
         self.assertEqual(wmi.call_count, 2)
         self.assertEqual(stale.opened, 0)
 

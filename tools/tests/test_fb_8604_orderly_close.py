@@ -1253,7 +1253,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         _write_rpt(
             runtime.server_rpt,
             "boot server\n"
-            '1:14:03.254 Player "Dev" (steamID=76561197995575711 '
+            '1:14:03.254 Player "Dev" (steamID=76561198000000102 '
             "pos=<12830.6, 10099.6, 6.0>) is connected\n",
         )
         profiles = runtime.server_rpt.parent
@@ -1261,7 +1261,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         # the script log is from an older launch, and crash_*.log is not one.
         finished = (
             "SCRIPT       : [Logout]: Player "
-            "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg= finished\n"
+            "TcmSnkztHYG6vKHSzwZPju4gD2sNd5iA6OZaCwb3Azw= finished\n"
         )
         old_script = profiles / "script_2020-01-01_00-00-00.log"
         old_script.write_text(finished, encoding="utf-8")
@@ -1285,7 +1285,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         # linked uid written after the client close. A line already on disk
         # is a previous session.
         runtime = self._runtime()
-        uid = "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg="
+        uid = "TcmSnkztHYG6vKHSzwZPju4gD2sNd5iA6OZaCwb3Azw="
         self._connect_dev(runtime, uid=uid)
         script = runtime.server_rpt.parent / "script_test.log"
         script.write_text("boot\n", encoding="utf-8")
@@ -1329,7 +1329,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         _write_rpt(
             runtime.server_rpt,
             "boot server\n"
-            '1:14:03.254 Player "Dev" (steamID=76561197995575711 '
+            '1:14:03.254 Player "Dev" (steamID=76561198000000102 '
             "pos=<12830.6, 10099.6, 6.0>) is connected\n",
         )
         runtime.append_on_close = TERMINATION
@@ -1346,7 +1346,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
                 "[StateMachine]: Player Dev (dpnid 1 uid " + uid + ") Entering Ready\n"
             )
         lines.append(
-            '1:14:03.254 Player "Dev" (steamID=76561197995575711 '
+            '1:14:03.254 Player "Dev" (steamID=76561198000000102 '
             "pos=<12830.6, 10099.6, 6.0>) is connected\n"
         )
         _write_rpt(runtime.server_rpt, "".join(lines))
@@ -1363,7 +1363,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         runtime = self._runtime()
-        uid = "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg="
+        uid = "TcmSnkztHYG6vKHSzwZPju4gD2sNd5iA6OZaCwb3Azw="
         self._connect_dev(runtime, uid=uid)
         self._arm_graceful(runtime)
         script = runtime.server_rpt.parent / "script_test.log"
@@ -1782,7 +1782,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         "Entering AuthPlayerLoginState\n"
         "16:24:08.680 El jugador Dev se está conectando.\n"
         "16:24:08.785 [StateMachine]: Player Dev (dpnid 12442596 uid "
-        "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg=) Entering "
+        "TcmSnkztHYG6vKHSzwZPju4gD2sNd5iA6OZaCwb3Azw=) Entering "
         "CreateNetObjectsLoginState\n"
         "16:24:17.788    AUDIO     (E): Sound set "
         "'Motohelmet_pushHeavy_SoundVoice_Char_SoundSet' references missing "
@@ -1791,44 +1791,44 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
     _RPT_130_AT_EXIT = (
         "oice_Char_SoundShader'\n"
         "16:24:17.824 El jugador Dev "
-        "(id=HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg= "
+        "(id=TcmSnkztHYG6vKHSzwZPju4gD2sNd5iA6OZaCwb3Azw= "
         "pos=<1189.3, 5392.5, 162.5>) se ha conectado.\n"
-        '16:24:17.824 Player "Dev" (steamID=76561198141021937 '
+        '16:24:17.824 Player "Dev" (steamID=76561198000000101 '
         "pos=<1189.3, 5392.5, 162.5>) is connected\n"
         "16:27:58.813 [Disconnect]: Finish script disconnect 12442596 "
-        "(HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg=)\n"
+        "(TcmSnkztHYG6vKHSzwZPju4gD2sNd5iA6OZaCwb3Azw=)\n"
     )
     _SCRIPT_130_CONNECT = (
         "16:24:17.834  SCRIPT       : [DayZ_MCP] godmode on=1 "
-        "uid=76561198141021937 reason=connect\n"
+        "uid=76561198000000101 reason=connect\n"
         "16:25:00.436 SCRIPT       : [DayZ-MCP] poll commands=1 "
         "sent_tick=345594 callback_tick=346132\n"
     )
     _SCRIPT_130_LOGOUT = (
         "16:27:58.813  SCRIPT       : [Logout]: New player "
-        "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg= with instant logout\n"
+        "TcmSnkztHYG6vKHSzwZPju4gD2sNd5iA6OZaCwb3Azw= with instant logout\n"
         "16:27:58.813  SCRIPT       : [DayZ_MCP] godmode released "
-        "uid=76561198141021937 reason=disconnect\n"
+        "uid=76561198000000101 reason=disconnect\n"
         "16:27:58.813  SCRIPT       : [Logout]: Player "
-        "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg= finished\n"
+        "TcmSnkztHYG6vKHSzwZPju4gD2sNd5iA6OZaCwb3Azw= finished\n"
     )
     _RPT_129 = (
         "15:33:36.51  [StateMachine]: Player Dev (dpnid 13730253 uid "
-        "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg=) Entering "
+        "TcmSnkztHYG6vKHSzwZPju4gD2sNd5iA6OZaCwb3Azw=) Entering "
         "CreateNetObjectsLoginState\n"
-        '15:33:53.819 Player "Dev" (steamID=76561198141021937 '
+        '15:33:53.819 Player "Dev" (steamID=76561198000000101 '
         "pos=<4875.0, 10470.0, 337.2>) is connected\n"
     )
     _SCRIPT_129_CONNECT = (
-        " SCRIPT       : [DayZ_MCP] godmode on=1 uid=76561198141021937 "
+        " SCRIPT       : [DayZ_MCP] godmode on=1 uid=76561198000000101 "
         "reason=connect\n"
     )
     _SCRIPT_129_LOGOUT = (
         " SCRIPT       : [Logout]: New player "
-        "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg= with logout time 15\n"
+        "TcmSnkztHYG6vKHSzwZPju4gD2sNd5iA6OZaCwb3Azw= with logout time 15\n"
         "SCRIPT       : [DayZ_MCP] godmode released uid= reason=disconnect\n"
         "SCRIPT       : [Logout]: Player "
-        "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg= finished\n"
+        "TcmSnkztHYG6vKHSzwZPju4gD2sNd5iA6OZaCwb3Azw= finished\n"
     )
 
     def _logs_2986(
@@ -1922,9 +1922,9 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
             runtime,
             self._RPT_130_ON_DISK,
             "20:53:04.501 SCRIPT       : [DayZ_MCP] godmode on=1 "
-            "uid=76561198141021937 reason=player_godmode\n"
+            "uid=76561198000000101 reason=player_godmode\n"
             "16:27:58.813  SCRIPT       : [DayZ_MCP] godmode released "
-            "uid=76561198141021937 reason=disconnect\n",
+            "uid=76561198000000101 reason=disconnect\n",
         )
         runtime.append_on_close = self._RPT_130_AT_EXIT + TERMINATION
         runtime.reap_event = "run_reaped"
@@ -1939,15 +1939,15 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
 
 class Fb2986LogoutIdTest(unittest.TestCase):
     def test_logout_id_is_the_rpt_uid_of_the_steam_id(self) -> None:
-        # Run 612202d5's RPT: `Player "Dev" (steamID=76561198141021937 ...)`
+        # Run 612202d5's RPT: `Player "Dev" (steamID=76561198000000101 ...)`
         # and `[StateMachine]: Player Dev (... uid HmY1...=)`.
         self.assertEqual(
-            dayz_test_tool._logout_id("76561198141021937"),
-            "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg=",
+            dayz_test_tool._logout_id("76561198000000101"),
+            "TcmSnkztHYG6vKHSzwZPju4gD2sNd5iA6OZaCwb3Azw=",
         )
         self.assertNotEqual(
-            dayz_test_tool._logout_id("76561198141021938"),
-            "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg=",
+            dayz_test_tool._logout_id("76561198000000103"),
+            "TcmSnkztHYG6vKHSzwZPju4gD2sNd5iA6OZaCwb3Azw=",
         )
 
 
@@ -1961,7 +1961,7 @@ class Fb62c5LongLogTest(unittest.TestCase):
     """
 
     _CONNECTED = (
-        '1:14:03.254 Player "Dev" (steamID=76561197995575711 '
+        '1:14:03.254 Player "Dev" (steamID=76561198000000102 '
         "pos=<12830.6, 10099.6, 6.0>) is connected\n"
     ).encode("ascii")
     _FINISHED = b"[Logout]: Player abc123 finished\n"

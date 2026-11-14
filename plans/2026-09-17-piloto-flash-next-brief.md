@@ -64,7 +64,7 @@ export PRIME_AGENT_TELEMETRY=0 DO_NOT_TRACK=1
 export PROMPT="$(cat "$LAB/brief-ola0.txt")"
 script -qec "prime-agent -p \"\$PROMPT\" --cwd $WORK --provider gx10 \
   --model Qwen/Qwen3.8-Flash-Next --thinking off --mode json --no-session -nc -ns \
-  --skill /mnt/c/Users/guill/.claude/skills/<la que cierre §5.1>" /tmp/gx10.jsonl
+  --skill %USERPROFILE%/.claude/skills/<la que cierre §5.1>" /tmp/gx10.jsonl
 ```
 
 ⚠ Este comando está **incompleto a propósito**: sin las compensaciones de §5.1 (convenciones

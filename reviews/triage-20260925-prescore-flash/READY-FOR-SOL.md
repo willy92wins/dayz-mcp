@@ -10,7 +10,7 @@ Ready for Sol/Astra decide; G-CAL still not durable-green → no fix dispatch.
 ## What you inherit
 | Artifact | Path |
 |---|---|
-| Propose JSONL (43/43) | `C:\Users\guill\AppData\Local\Temp\orq-dispatch\mcp-triaje-prescore-flash-20260925\propose.jsonl` |
+| Propose JSONL (43/43) | `%USERPROFILE%\AppData\Local\Temp\orq-dispatch\mcp-triaje-prescore-flash-20260925\propose.jsonl` |
 | Mirror | `P:\DayZ_MCP_dev\reviews\triage-20260925-prescore-flash\propose.jsonl` |
 | PRESCORE full | JobDir `prescore.json` / reviews mirror |
 | Live inbox | JobDir `live-inbox.json` |

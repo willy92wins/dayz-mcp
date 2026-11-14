@@ -52,7 +52,7 @@ _DECLARED_MEMBER = re.compile(
 )
 _ACH_CACHE_DECL = "protected string m_PollArgContractHash;"
 _ACH_CACHE_INIT = "m_PollArgContractHash = EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);"
-_CAPS_WIRE = 'request = request + "&caps=" + ServerCapabilities();'
+_CAPS_WIRE = 'request = request + "&cm=" + ServerCapabilities();'
 _ACH_WIRE = 'request = request + "&ach=" + m_PollArgContractHash;'
 
 # The cache write/mutation detector and its verified signature catalogues
@@ -350,7 +350,7 @@ def verify_enforce_arg_contract_hash(source: str) -> None:
     if wire_prefix != "" and not wire_prefix.endswith((";", "}")):
         raise AssertionError("ach= announcement must not hang off a braceless condition")
     if start_poll.index(_CAPS_WIRE) > ach_at:
-        raise AssertionError("ach= must follow caps=")
+        raise AssertionError("ach= must follow cm=")
     if ach_at > start_poll.index('if (m_PeerInstance != "")'):
         raise AssertionError("ach= must precede optional inst= block")
     if ach_at > start_poll.index("m_Ctx.GET(cb, request);"):

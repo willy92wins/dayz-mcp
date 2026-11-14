@@ -190,7 +190,7 @@ class SettingsReaderTest(unittest.TestCase):
         with TemporaryDirectory() as raw:
             root = Path(raw)
             missing = root / "missing.json"
-            self.assertFalse(read_idle_warden_enabled(missing))
+            self.assertTrue(read_idle_warden_enabled(missing))
             directory = root / "nested"
             directory.mkdir()
             self.assertFalse(read_idle_warden_enabled(directory))
@@ -200,6 +200,13 @@ class SettingsReaderTest(unittest.TestCase):
             bom = root / "bom.json"
             bom.write_bytes(b'\xef\xbb\xbf{"enabled": true}\n')
             self.assertFalse(read_idle_warden_enabled(bom))
+            invalid_utf8 = root / "invalid-utf8.json"
+            invalid_utf8.write_bytes(b'{"enabled": true}\xff\n')
+            self.assertFalse(read_idle_warden_enabled(invalid_utf8))
+            # Deeper than the decoder recurses: RecursionError, not ValueError.
+            deep = root / "deep.json"
+            deep.write_text("[" * 100000 + "0" + "]" * 100000, encoding="utf-8")
+            self.assertFalse(read_idle_warden_enabled(deep))
             for text in (
                 '{"enabled": "true"}',
                 '{"enabled": 1}',
@@ -378,6 +385,17 @@ class IdleWardenTest(unittest.TestCase):
             )
         )
 
+    def uncertain_input(self, at: float, pid: int = 802) -> list[str]:
+        # The guard cannot read this pid's identity, so the same movement
+        # the human tests record lands as uncertain input instead. The
+        # snapshot is restored afterwards: only the stamp stays behind.
+        saved = self.guard.snapshots.pop(pid, None)
+        try:
+            return self.human_input(at, pid=pid)
+        finally:
+            if saved is not None:
+                self.guard.snapshots[pid] = saved
+
     def row(self, now: float, run_id: str = "run-x") -> dict[str, object]:
         box = self.lifecycle.box_occupancy(now=now)
         for item in box["runs"]:
@@ -408,6 +426,10 @@ class IdleWardenTest(unittest.TestCase):
     def enable(self) -> None:
         self.settings.parent.mkdir(parents=True, exist_ok=True)
         self.settings.write_text('{"enabled": true}\n', encoding="utf-8")
+
+    def disable(self) -> None:
+        self.settings.parent.mkdir(parents=True, exist_ok=True)
+        self.settings.write_text('{"enabled": false}\n', encoding="utf-8")
 
     def advance(self, seconds: float) -> None:
         self.mono += float(seconds)
@@ -557,6 +579,7 @@ class IdleWardenTest(unittest.TestCase):
         # enqueue itself expires due leases. Advance only after the ticket is
         # in, so a disabled pass is the only thing that could drop either one.
         self.clock[0] = SESSION_TTL_S + 5
+        self.disable()
         warden = self.make_warden()
         self.assertEqual(warden.run_once(), "disabled")
         self.assertIsNotNone(self.coordinator._active)
@@ -1048,6 +1071,44 @@ class IdleWardenTest(unittest.TestCase):
         self.assertEqual(self.drive(), "countdown_aborted")
         self.assertEqual(self.windows.posted, [])
         self.assertEqual(self.row(self.wall_value)["use_state"], "human")
+
+    def test_uncertain_input_during_countdown_cancels(self) -> None:
+        self.abandon()
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "countdown":
+                self.uncertain_input(self.wall_value)
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "countdown_aborted")
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(
+            self.lifecycle.uncertain_input_at("run-x"), self.wall_value
+        )
+        self.assertIsNone(self.lifecycle.human_input_at("run-x"))
+
+    def test_uncertain_input_during_countdown_after_last_reaction_check_cancels(
+        self,
+    ) -> None:
+        self.abandon()
+        original = self.lifecycle.close_run
+
+        def wrapped(client, token, run_id):
+            # The destruction guard is already built when close_run is
+            # called, so this stamp only the final pre-close check can see.
+            self.uncertain_input(self.wall_value)
+            return original(client, token, run_id)
+
+        self.lifecycle.close_run = wrapped
+        try:
+            self.assertEqual(self.drive(), "countdown_aborted")
+        finally:
+            self.lifecycle.close_run = original
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(
+            self.lifecycle.uncertain_input_at("run-x"), self.wall_value
+        )
+        self.assertIsNone(self.lifecycle.human_input_at("run-x"))
 
     def test_input_just_after_the_last_sample_cancels_before_close(self) -> None:
         self.abandon()
@@ -1743,6 +1804,7 @@ class IdleWardenTest(unittest.TestCase):
     def test_exit_does_not_leave_the_adoption_marker(self) -> None:
         # This cycle did not adopt. A pre-existing marker stays for startup recovery.
         self.abandon()
+        self.disable()
         warden = self.make_warden()
         marker = self.lifecycle._adoption_marker_path()
         self.assertIsNotNone(marker)
@@ -1764,7 +1826,7 @@ class IdleWardenTest(unittest.TestCase):
         settled = self.lifecycle._adoption_settled_path()
         self.assertIsNotNone(settled)
         self.assertFalse(settled.exists())
-        self.assertFalse(self.settings.exists())
+        self.assertFalse(read_idle_warden_enabled(self.settings))
         stored = self.store.get("run-x")
         self.assertEqual(stored.state, "RUNNING_IDLE")
         self.assertIsNone(stored.owner_session_id)

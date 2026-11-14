@@ -15,7 +15,7 @@
       2166cef18f923329cc375a459d6e900639bfe0d86ee18d14cbd13761f6d78883  tools/tests/test_daemon.py
       6eb705d303f0b44bfb0ef12b5eb6f3fc800f3014672c224368c937b63a27c1bc  tools/tests/test_client_mode.py
       ae6817cdfc31e41b03b3a01fdf63bd3eb9aceba00ef7285a3f8beeab27e88db4  tools/tests/test_loopback.py
-[4] diff LF-normalizado contra C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws-frozen-r1:
+[4] diff LF-normalizado contra %USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws-frozen-r1:
       tools/dayz_mcp/loopback.py: +57 -43   (CRLF en el fichero entregado: 0)
       tools/dayz_mcp/process_lifecycle.py: +93 -75   (CRLF en el fichero entregado: 0)
       tools/tests/test_session_e2e.py: +0 -0   (CRLF en el fichero entregado: 0)

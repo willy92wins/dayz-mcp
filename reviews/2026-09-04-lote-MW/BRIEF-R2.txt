@@ -6,7 +6,7 @@ disco. Si algo te bloquea, dilo en el dictamen y sigue con el resto.
 ===============================================================================
 
 Eres una sesión nueva. Tu predecesor revisó los lotes M y W y dictaminó BLOQUEANTES=4; su
-dictamen entero está en C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\REVIEW-CODEX.md (léelo: contiene los cuatro repros literales).
+dictamen entero está en %USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\REVIEW-CODEX.md (léelo: contiene los cuatro repros literales).
 El orquestador aplicó los cuatro arreglos y dos del backlog. Tu producto es UN dictamen sobre
 exactamente esto:
 
@@ -44,12 +44,12 @@ Prohibido re-litigar el alcance de la ronda 1.
 ===============================================================================
 
   - Árbol con los arreglos (es el árbol vivo, ya integrado, SIN commit todavía o recién
-    commiteado; míralo por bytes, no por git): C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev
-    Solo LECTURA: no escribas ahí. Los workspaces de la ronda 1 (C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-M\ws, C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-W\ws) tienen
+    commiteado; míralo por bytes, no por git): %USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev
+    Solo LECTURA: no escribas ahí. Los workspaces de la ronda 1 (%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-M\ws, %USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-W\ws) tienen
     los mismos bytes de producto (hashes comparados por el orquestador).
-  - Diffs v2 contra HEAD d007838: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\DIFF-M-v2.patch y C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\DIFF-W-v2.patch
+  - Diffs v2 contra HEAD d007838: %USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\DIFF-M-v2.patch y %USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\DIFF-W-v2.patch
   - Intérprete, exacto y sin alternativa:
-      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+      %USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
   - Desde `<árbol>\tools` con `PYTHONPATH=.`; suite unittest (sin pytest).
   - Sin juego, sin red, sin daemon. El sandbox no ve el user-site de Python.
 
@@ -57,7 +57,7 @@ Prohibido re-litigar el alcance de la ronda 1.
 §2. ENTREGABLE
 ===============================================================================
 
-Escribe tu dictamen en: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\REVIEW-CODEX-R2.md
+Escribe tu dictamen en: %USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\REVIEW-CODEX-R2.md
 
     ## VEREDICTO
     Una línea: BLOQUEANTES=<n>.

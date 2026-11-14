@@ -29,6 +29,6 @@ script); a finding without a snippet is dropped. Defensive code is not a bug. At
 ## Boundaries
 Read-only except AUDIT.md (scratch under `_scratch/`, deleted before you finish). Python only with the project venv on
 in-memory or temporary-directory scenarios:
-`"/mnt/c/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/tools/.venv-mcp/Scripts/python.exe"`.
+`"%USERPROFILE%/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/tools/.venv-mcp/Scripts/python.exe"`.
 Never run an installer, pip, a daemon, DayZ, git or an MCP tool; never touch %LOCALAPPDATA%, C:\temp\DayZ_MCP_130*,
 the home directory or MCP configuration. Time ceiling about 60 minutes; write AUDIT.md early and fill it as you go.

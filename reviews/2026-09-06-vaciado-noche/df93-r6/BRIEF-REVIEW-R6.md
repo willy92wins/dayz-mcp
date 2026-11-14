@@ -11,11 +11,11 @@ salida literal) y qué debería pasar. Termina con la sección `LO QUE NO PUDE V
 
 ## Rutas
 
-- `<lote>` = `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6`
+- `<lote>` = `%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6`
 - `<ws>` = `<lote>\ws` — la entrega (copia fiel del worktree + los cambios del implementador). NO la modifiques.
-- `<wt>` = `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\e89adcdf-b230-4060-83b7-f733911e169a\scratchpad\wt-df93` — worktree git de la rama `work/df93-vpp-preflight` en `a7ddbac`, el PUNTO DE PARTIDA. SOLO LECTURA: ni `git checkout`, ni `git stash`, ni escribir nada ahí. Para el baseline usa `git -C <wt> show HEAD:<ruta>`.
+- `<wt>` = `%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\e89adcdf-b230-4060-83b7-f733911e169a\scratchpad\wt-df93` — worktree git de la rama `work/df93-vpp-preflight` en `a7ddbac`, el PUNTO DE PARTIDA. SOLO LECTURA: ni `git checkout`, ni `git stash`, ni escribir nada ahí. Para el baseline usa `git -C <wt> show HEAD:<ruta>`.
 - `<rev>` = `<lote>\review-r6` — tus scripts, salidas y el dictamen. Todo lo que escribas va aquí.
-- `<py>` = `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe` (ruta con espacios: entre comillas).
+- `<py>` = `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe` (ruta con espacios: entre comillas).
 - Entrega del implementador: `<ws>\STATE.md`; brief que recibió: `<lote>\run1\brief.txt`; diffs LF-normalizados generados por el receptor: `<lote>\DIFF-R6-product.patch` y `<lote>\DIFF-R6-tests.patch`.
 - Tests: desde `<ws>\tools` con `PYTHONPATH=.`: `& "<py>" -m unittest tests.test_vpp_preflight`. Regresión: `tests.test_native_launcher_transaction tests.test_dayz_test_tool tests.test_dayz_test_tool_modes tests.test_lifecycle_reconcile`. NO corras la suite completa (levanta daemons). No lances juego ni launcher.
 

@@ -116,7 +116,7 @@ lease-close gate never applies and residues stay readable on a census
 that announces no close support
 (a real bridge v12 peer is stopped earlier by the version gate). The
 adapter announces the verb as bit3 of its `xai` bitmask (see "How the
-adapter announces itself"); it adds no name to `caps=`.
+adapter announces itself"); it adds no name to the base census.
 
 The dispatch answers at once, with no job and no setter call. It never
 reads through `eAITarget.GetThreat` or `GetPosition(false)`, which would
@@ -249,16 +249,19 @@ already sounding with the same id). In-game validation is pending.
 
 ## How the adapter announces itself (deviation from plan 2.2)
 
-The adapter adds no verb names to `caps=`. With the names, the saturated
+The adapter adds no verb names to the base census. With the names, the saturated
 server poll measured 1037 characters, past the 1024 limit of #321 (1067
 with order/state, 1079 with v13's `lease_close`). Instead its poll carries
 `&xai=<16 hex>.<bitmask>`: the adapter contract hash plus one bit per verb,
 in the append-only order fixed in `bridge_readiness.py`
 (`EXPANSION_AI_VERB_BITS`: release, spawn, order, state, emote). The broker
 expands the mask to names before storing the census, so admission and the
-capability comparator keep seeing names, and the saturated poll with the
-full adapter (widest mask) and v13 measures 1020, four characters under
-the limit. This deviates from plan 2.2 ("the
+capability comparator keep seeing names. The base census itself now also
+travels as a bitmask: `ServerCapabilities()` returns the compact
+`cm=<epoch>.<hex>` announcement (`SERVER_CAPABILITIES_MASK`, bit order in
+`bridge_readiness.SERVER_CAPABILITY_BITS`, append-only) instead of the
+name list, so the saturated server poll with the full adapter (widest
+`xai` mask) measures 317 characters, far under the limit. This deviates from plan 2.2 ("the
 adapter adds its names to the census") and is provisional, pending
 Guillermo's confirmation.
 
