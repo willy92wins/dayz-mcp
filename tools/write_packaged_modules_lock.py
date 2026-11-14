@@ -69,7 +69,7 @@ def expected_linux_paths() -> list[str]:
     return sorted(f"tools/dayz_mcp/{name}" for name in LINUX_PACKAGED_MODULES)
 
 
-def _dayzmake_record(root: Path = REPO_ROOT) -> dict[str, str]:
+def _dayzmake_record(root: Path = REPO_ROOT) -> dict[str, object]:
     import ast
 
     tree = ast.parse((root / "tools/dayz_mcp/linux_build.py").read_text(encoding="utf-8"))
@@ -79,10 +79,26 @@ def _dayzmake_record(root: Path = REPO_ROOT) -> dict[str, str]:
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id in {"DAYZMAKE_SHA256", "DAYZMAKE_VERSION"}:
                     values[target.id] = str(node.value.value)
-    return {
-        "binary_sha256": values["DAYZMAKE_SHA256"].upper(),
-        "version": values["DAYZMAKE_VERSION"].removeprefix("v"),
-    }
+    # Preserve the release archive's record (its sha256, size, url and
+    # license) already in the Linux lock: it is what a download is checked
+    # against and is not derived from the sealed sources. Only the binary
+    # pin and version are derived here, from linux_build's constants.
+    record: dict[str, object] = {}
+    try:
+        existing = json.loads(
+            (root / "tools" / "packaged-modules.linux.lock.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        existing = None
+    if type(existing) is dict and type(existing.get("dayzmake_linux")) is dict:
+        record.update(existing["dayzmake_linux"])
+    record.update(
+        {
+            "binary_sha256": values["DAYZMAKE_SHA256"].upper(),
+            "version": values["DAYZMAKE_VERSION"].removeprefix("v"),
+        }
+    )
+    return record
 
 
 def compute_linux_lock(root: Path = REPO_ROOT) -> dict[str, object]:

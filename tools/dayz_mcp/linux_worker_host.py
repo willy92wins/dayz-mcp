@@ -129,12 +129,51 @@ def _load_app_main(members: dict[str, bytes], bundle: Path) -> types.ModuleType:
     return module
 
 
+def _venv_root() -> Path | None:
+    """The venv root named by the ``pyvenv.cfg`` next to or above the executable.
+
+    With ``-S``, ``site`` never runs, and on Python before 3.14 the venv is
+    only detected by ``site``: ``sys.prefix`` (and so ``sysconfig``) still
+    names the base installation, whose site-packages does not hold the
+    venv's ``psutil``. Locate the venv the way ``site`` does, from
+    ``pyvenv.cfg`` beside ``sys.executable`` or in its parent directory,
+    without importing ``site`` or processing any ``.pth`` file.
+    """
+    executable = Path(sys.executable)
+    for directory in (executable.parent, executable.parent.parent):
+        if (directory / "pyvenv.cfg").is_file():
+            return directory
+    return None
+
+
 def _add_site_packages() -> None:
     """Add site-packages for ``psutil`` without running any ``.pth`` hook."""
-    paths = sysconfig.get_paths()
-    for key in ("purelib", "platlib"):
-        candidate = paths.get(key)
-        if candidate and candidate not in sys.path and os.path.isdir(candidate):
+    candidates: list[str] = []
+    venv = _venv_root()
+    if venv is not None:
+        version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        candidates.extend(
+            str(venv / relative)
+            for relative in (
+                Path("lib") / version / "site-packages",
+                Path("lib64") / version / "site-packages",
+                Path("Lib") / "site-packages",
+            )
+        )
+        try:
+            candidates.extend(
+                str(path) for path in sorted(venv.glob("lib/python*/site-packages"))
+            )
+        except OSError:
+            pass
+    else:
+        paths = sysconfig.get_paths()
+        for key in ("purelib", "platlib"):
+            candidate = paths.get(key)
+            if candidate:
+                candidates.append(candidate)
+    for candidate in candidates:
+        if candidate not in sys.path and os.path.isdir(candidate):
             sys.path.append(candidate)
 
 

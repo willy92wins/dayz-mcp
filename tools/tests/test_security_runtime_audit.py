@@ -1337,7 +1337,19 @@ def _create_registered_launcher(opened_launcher):
     @classmethod
     def _build_builders(cls) -> str:
         return "import os\nimport subprocess\n" + cls._extract(
-            "dayz_mcp/linux_build.py", "MARKER", "_BUILD_ENV_KEYS", "build_argv", "build_environment"
+            "dayz_mcp/linux_build.py",
+            "MARKER",
+            "_BUILD_ENV_KEYS",
+            "build_argv",
+            "build_environment",
+            "_sealed_dayzmake",
+        )
+
+    def _build_function(self, call: str | None = None) -> str:
+        return (
+            "def run_addon_builder(payload, *, pending='', stream=None, temp=''):\n"
+            "    sealed_fd, dayzmake, refusal = _sealed_dayzmake()\n"
+            f"    return {call if call is not None else self._CANONICAL_BUILD_CALL}\n"
         )
 
     _CANONICAL_LIFECYCLE_CALL = (
@@ -1365,7 +1377,8 @@ def _create_registered_launcher(opened_launcher):
             + "\ndef _run_lifecycle_child(bundle, frame, command, secrets_env):\n"
             + f"    child = {self._CANONICAL_LIFECYCLE_CALL}\n"
             + "    return child\n"
-            + "\ndef _supervise_worker(bundle, *, cancel_read=3):\n"
+            + "\ndef _supervise_worker(bundle, *, canonical_request=b'', secrets_env=None, cancel_signal=None, output_sink=None):\n"
+            + "    cancel_read, cancel_write = os.pipe()\n"
             + f"    {worker_call}\n"
             + "    return worker\n"
         )
@@ -1394,19 +1407,13 @@ def _create_registered_launcher(opened_launcher):
 
     def test_linux_build_accepts_one_build_argv_popen(self) -> None:
         self.assertEqual(
-            self._linux_build_findings(
-                self._build_builders()
-                + "def run_addon_builder(payload, *, dayzmake='', pending='', stream=None, temp='', sealed_fd=9):\n"
-                + f"    return {self._CANONICAL_BUILD_CALL}\n"
-            ),
+            self._linux_build_findings(self._build_builders() + self._build_function()),
             [],
         )
 
     def test_linux_must_flag_fixtures(self) -> None:
-        canonical_build = (
-            "def run_addon_builder(payload, *, dayzmake='', pending='', stream=None, temp='', sealed_fd=9):\n"
-            f"    return {self._CANONICAL_BUILD_CALL}\n"
-        )
+        canonical_build = self._build_function()
+        canonical_build_source = self._build_builders() + canonical_build
         build_bodies = {
             "no_env": self._build_builders()
             + canonical_build.replace("env=build_environment(), ", ""),
@@ -1427,9 +1434,25 @@ def _create_registered_launcher(opened_launcher):
             + canonical_build.replace("pass_fds=(sealed_fd,)", "pass_fds=(99,)"),
             "start_new_session_false": self._build_builders()
             + canonical_build.replace("start_new_session=True", "start_new_session=False"),
+            "unapproved_argv0": self._build_builders()
+            + canonical_build.replace(
+                "build_argv(dayzmake,", 'build_argv("/unapproved/program",'
+            ),
+            "sealed_fd_rebound": self._build_builders()
+            + canonical_build.replace(
+                "    return subprocess.Popen(",
+                "    sealed_fd = 99\n    return subprocess.Popen(",
+            ),
+            "ld_preload_in_build_keys": self._build_builders()
+            + '\n_BUILD_ENV_KEYS += ("LD_PRELOAD",)\n'
+            + canonical_build,
+            "child_keys_augassign": self._build_builders()
+            + canonical_build
+            + '\n_BUILD_ENV_KEYS += ("LD_PRELOAD",)\n',
         }
         for label, body in build_bodies.items():
             with self.subTest(build=label):
+                self.assertNotEqual(body, canonical_build_source, label)
                 self.assertTrue(self._linux_build_findings(body), label)
         relay_bodies = {
             "no_env": self._CANONICAL_WORKER_CALL.replace(
@@ -1449,13 +1472,32 @@ def _create_registered_launcher(opened_launcher):
                 "_child_environment({'DAYZ_MCP_CANCEL_HANDLE': str(cancel_read)})",
                 "_child_environment({'LD_PRELOAD': '/tmp/x.so'})",
             ),
+            "host_argv_foreign": self._CANONICAL_WORKER_CALL.replace(
+                "_host_argv(bundle,", "_host_argv(other,"
+            ),
+            "host_argv_unapproved_call": self._CANONICAL_WORKER_CALL.replace(
+                "_host_argv(bundle, lifecycle=False)",
+                '_host_argv("/unapproved/program", lifecycle=False)',
+            ),
         }
         auditor = self._auditor()
         for label, call in relay_bodies.items():
             with self.subTest(relay=label), tempfile.TemporaryDirectory() as directory:
+                self.assertNotEqual(call, self._CANONICAL_WORKER_CALL, label)
                 root = Path(directory)
                 self._linux_relay_tree(root, call)
                 self.assertNotEqual(auditor.audit_process_creation(root), (), label)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._linux_relay_tree(root, self._CANONICAL_WORKER_CALL)
+            path = root / "dayz_mcp" / "linux_launcher.py"
+            rebound = path.read_text(encoding="utf-8").replace(
+                "    worker = subprocess.Popen(",
+                "    cancel_read = 99\n    worker = subprocess.Popen(",
+            )
+            self.assertNotEqual(rebound, path.read_text(encoding="utf-8"))
+            path.write_text(rebound, encoding="utf-8")
+            self.assertNotEqual(auditor.audit_process_creation(root), (), "cancel_read_rebound")
         builder_bodies = {
             "unapproved_argv": self._relay_builders().replace(
                 self._extract("dayz_mcp/linux_launcher.py", "_host_argv"),
@@ -1468,11 +1510,14 @@ def _create_registered_launcher(opened_launcher):
                 "    return dict(os.environ)\n",
             ),
             "ld_preload_in_child_keys": self._relay_builders().replace(
-                "'LOCALAPPDATA')", "'LOCALAPPDATA', 'LD_PRELOAD')"
+                '"LOCALAPPDATA")', '"LOCALAPPDATA", "LD_PRELOAD")'
             ),
+            "ld_preload_augassign": self._relay_builders()
+            + '\n_CHILD_ENV_KEYS += ("LD_PRELOAD",)\n',
         }
         for label, builders in builder_bodies.items():
             with self.subTest(relay_builder=label), tempfile.TemporaryDirectory() as directory:
+                self.assertNotEqual(builders, self._relay_builders(), label)
                 root = Path(directory)
                 self._write(
                     root,
@@ -1494,6 +1539,29 @@ def _create_registered_launcher(opened_launcher):
             self.assertTrue(
                 [f for f in findings if f.relative_path == "dayz_mcp/linux_worker_host.py"]
             )
+        host_bodies = {
+            "unapproved_source": (
+                "from pathlib import Path\n"
+                "class _SealedModuleFinder:\n"
+                "    def exec_module(self, module):\n"
+                '        source = Path("/tmp/unapproved.py").read_bytes()\n'
+                '        exec(compile(source, "x", "exec", dont_inherit=True), module.__dict__)\n'
+            ),
+            "members_rebound": (
+                "def _load_app_main(members, bundle, module):\n"
+                '    members = {"__main__.py": b"unapproved"}\n'
+                '    exec(compile(members["__main__.py"], "x", "exec", dont_inherit=True), module.__dict__)\n'
+            ),
+        }
+        for label, source in host_bodies.items():
+            with self.subTest(host=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write(root, "dayz_mcp/linux_worker_host.py", source)
+                findings = auditor.audit_process_creation(root)
+                self.assertTrue(
+                    [f for f in findings if f.relative_path == "dayz_mcp/linux_worker_host.py"],
+                    label,
+                )
 
     def test_linux_build_refuses_any_other_process_start(self) -> None:
         for body in (

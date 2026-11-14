@@ -185,7 +185,7 @@ class LinuxBundleTest(unittest.TestCase):
         )
         site_packages = next(venv.glob("lib/python*/site-packages"))
         hook_marker = self.root / "pth-ran"
-        (site_packages / "evil.pth").write_text(
+        (site_packages / "startup_hook.pth").write_text(
             f"import pathlib; pathlib.Path({str(hook_marker)!r}).write_text('x')\n"
         )
         python = venv / "bin" / "python"
@@ -205,9 +205,24 @@ class LinuxBundleTest(unittest.TestCase):
         sealed = set(native_bundle._APP_PACKAGED_MODULES) | set(linux_launcher.LINUX_EXTRA_MODULES)
         package = TOOLS / "dayz_mcp"
         missing: list[str] = []
+
+        def runtime_nodes(tree: ast.AST):
+            """Every node except the bodies of `if TYPE_CHECKING:` blocks."""
+            for node in ast.iter_child_nodes(tree):
+                if isinstance(node, ast.If) and (
+                    (isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING")
+                    or (isinstance(node.test, ast.Attribute) and node.test.attr == "TYPE_CHECKING")
+                ):
+                    for branch in node.orelse:
+                        yield branch
+                        yield from runtime_nodes(branch)
+                    continue
+                yield node
+                yield from runtime_nodes(node)
+
         for name in sorted(sealed):
             tree = ast.parse((package / name).read_text(encoding="utf-8"), filename=name)
-            for node in ast.walk(tree):
+            for node in runtime_nodes(tree):
                 imported: list[str] = []
                 if isinstance(node, ast.ImportFrom):
                     module = node.module or ""
@@ -305,6 +320,30 @@ class WorkerHostShimTest(unittest.TestCase):
         self.assertNotIn("msvcrt", sys.modules)
         self.assertEqual(module._bundle_root(), Path("/bundle"))
         sys.modules.pop("dayz_test_app_main", None)
+
+
+@unittest.skipUnless(POSIX, "sealed worker site-packages without site")
+class SealedHostSitePackagesTest(unittest.TestCase):
+    def test_add_site_packages_finds_psutil_without_site(self) -> None:
+        host = TOOLS / "dayz_mcp" / "linux_worker_host.py"
+        code = (
+            "import pathlib\n"
+            f"source = pathlib.Path({str(host)!r}).read_text(encoding='utf-8')\n"
+            "namespace = {'__name__': 'linux_worker_host_under_test', '__file__': "
+            f"{str(host)!r}}}\n"
+            "exec(compile(source, 'linux_worker_host.py', 'exec'), namespace)\n"
+            "namespace['_add_site_packages']()\n"
+            "import psutil\n"
+            "print(psutil.__file__)\n"
+        )
+        done = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", code],
+            input=b"",
+            capture_output=True,
+            timeout=60,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+        self.assertIn("site-packages", done.stdout.decode("utf-8", "replace"))
 
 
 @unittest.skipUnless(POSIX, "request_path_authority on POSIX")
@@ -423,6 +462,7 @@ class LinuxHostArgvShapeTest(unittest.TestCase):
             "linux_launcher_under_test", TOOLS / "dayz_mcp" / "linux_launcher.py"
         )
         module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         return module
 

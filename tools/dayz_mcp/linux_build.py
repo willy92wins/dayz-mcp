@@ -88,37 +88,10 @@ def build_environment() -> dict[str, str]:
     return {key: os.environ[key] for key in _BUILD_ENV_KEYS if os.environ.get(key)}
 
 
-def _file_sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def expected_sha256() -> str:
     """The digest a build tool must have: the release's, or a pinned dev build's."""
     override = os.environ.get(PIN_OVERRIDE_ENV, "").strip().lower()
     return override or DAYZMAKE_SHA256
-
-
-def resolve_dayzmake() -> tuple[str | None, str]:
-    """The pinned dayzmake on ``PATH`` as an absolute real path, or a refusal."""
-    path = shutil.which("dayzmake")
-    if path is None:
-        return None, f"dayzmake not found on PATH (install the {DAYZMAKE_VERSION} release)\n"
-    absolute = os.path.realpath(os.path.abspath(path))
-    try:
-        digest = _file_sha256(absolute)
-    except OSError as error:
-        return None, f"dayzmake at {absolute} is unreadable: {error}\n"
-    expected = expected_sha256()
-    if digest != expected:
-        return None, (
-            f"dayzmake_pin_mismatch: {absolute} is sha256 {digest}, expected {expected} "
-            f"({DAYZMAKE_VERSION}); set {PIN_OVERRIDE_ENV} to pin a development build\n"
-        )
-    return absolute, ""
 
 
 def _sealed_dayzmake() -> tuple[int | None, str | None, str]:
@@ -212,55 +185,73 @@ def run_addon_builder(
         if output_sink is not None:
             output_sink("stderr", refusal.encode("utf-8", "replace"))
         return _response(False)
-    target = Path(str(payload["target"]))
-    temp = Path(str(payload["temp"]))
-    if payload["clear"]:
-        shutil.rmtree(temp, ignore_errors=True)
-    target.mkdir(parents=True, exist_ok=True)
-    temp.mkdir(parents=True, exist_ok=True)
-    pbo = target / f"{payload['prefix']}.pbo"
-    # In the target's directory: the rename below must stay on one filesystem.
-    pending = target / f".{payload['prefix']}.pbo.{os.getpid()}.building"
-    log = temp / "dayzmake.log"
     try:
-        with open(log, "wb") as stream:
-            try:
-                child = subprocess.Popen(
-                    build_argv(dayzmake, payload, str(pending)),
-                    stdin=subprocess.DEVNULL,
-                    stdout=stream,
-                    stderr=subprocess.STDOUT,
-                    cwd=str(temp),
-                    env=build_environment(),
-                    close_fds=True,
-                    pass_fds=(sealed_fd,),
-                    # Its own process group: a binarizing build runs Proton under dayzmake,
-                    # and a cancel must end those too (the job object does on Windows).
-                    start_new_session=True,
-                )
-            finally:
-                os.close(sealed_fd)
-                sealed_fd = -1
-            deadline = time.monotonic() + BUILD_DEADLINE_S
-            while child.poll() is None:
-                if cancelled() or time.monotonic() > deadline:
-                    try:
-                        os.killpg(child.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    child.wait()
+        target = Path(str(payload["target"]))
+        temp = Path(str(payload["temp"]))
+        if payload["clear"]:
+            shutil.rmtree(temp, ignore_errors=True)
+        target.mkdir(parents=True, exist_ok=True)
+        temp.mkdir(parents=True, exist_ok=True)
+        pbo = target / f"{payload['prefix']}.pbo"
+        # In the target's directory: the rename below must stay on one filesystem.
+        pending = target / f".{payload['prefix']}.pbo.{os.getpid()}.building"
+        log = temp / "dayzmake.log"
+        try:
+            with open(log, "wb") as stream:
+                try:
+                    child = subprocess.Popen(
+                        build_argv(dayzmake, payload, str(pending)),
+                        stdin=subprocess.DEVNULL,
+                        stdout=stream,
+                        stderr=subprocess.STDOUT,
+                        cwd=str(temp),
+                        env=build_environment(),
+                        close_fds=True,
+                        pass_fds=(sealed_fd,),
+                        # Its own process group: a binarizing build runs Proton under dayzmake,
+                        # and a cancel must end those too (the job object does on Windows).
+                        start_new_session=True,
+                    )
+                except PermissionError as error:
+                    if output_sink is not None:
+                        output_sink(
+                            "stderr",
+                            (
+                                "dayzmake_sealed_image_unavailable: the sealed dayzmake "
+                                f"image cannot be executed: {error}\n"
+                            ).encode("utf-8", "replace"),
+                        )
                     return _response(False)
-                time.sleep(0.2)
-        if child.returncode != 0 or not pending.is_file() or pending.stat().st_size == 0:
-            if output_sink is not None:
-                output_sink("stderr", log.read_bytes()[-_ERROR_TAIL_BYTES:])
-            return _response(False)
-        os.replace(pending, pbo)
+                finally:
+                    if sealed_fd >= 0:
+                        os.close(sealed_fd)
+                        sealed_fd = -1
+                deadline = time.monotonic() + BUILD_DEADLINE_S
+                while child.poll() is None:
+                    if cancelled() or time.monotonic() > deadline:
+                        try:
+                            os.killpg(child.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        child.wait()
+                        return _response(False)
+                    time.sleep(0.2)
+            if child.returncode != 0 or not pending.is_file() or pending.stat().st_size == 0:
+                if output_sink is not None:
+                    output_sink("stderr", log.read_bytes()[-_ERROR_TAIL_BYTES:])
+                return _response(False)
+            os.replace(pending, pbo)
+        finally:
+            pending.unlink(missing_ok=True)
+        # The native launcher also requires a changed file, by identity and times; the
+        # rename gives a new inode, so an identical rebuild counts there and here.
+        return _response(True, pbo.stat().st_size)
     finally:
-        pending.unlink(missing_ok=True)
-    # The native launcher also requires a changed file, by identity and times; the
-    # rename gives a new inode, so an identical rebuild counts there and here.
-    return _response(True, pbo.stat().st_size)
+        if sealed_fd >= 0:
+            try:
+                os.close(sealed_fd)
+            except OSError:
+                pass
 
 
 def install_worker() -> None:

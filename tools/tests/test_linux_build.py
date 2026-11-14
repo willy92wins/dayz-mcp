@@ -174,7 +174,7 @@ class RunAddonBuilderTest(unittest.TestCase):
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
         digest = hashlib.sha256(fake.read_bytes()).hexdigest()
         os.environ[linux_build.PIN_OVERRIDE_ENV] = digest
-        temp_bin = Path(self.payload["temp"]) / "bin"
+        temp_bin = Path(self.payload["temp"]) / "daemonbin"
         temp_bin.mkdir(parents=True)
         impostor_log = self.root / "impostor"
         impostor = temp_bin / "dayzmake"
@@ -195,29 +195,57 @@ class RunAddonBuilderTest(unittest.TestCase):
         self.assertFalse(impostor_log.exists())
 
     def test_a_swap_after_the_check_never_runs(self) -> None:
-        # The sealed image is copied before the run, so replacing the PATH
-        # file afterwards cannot change what executes. Swap during the build
-        # through the log-writing fake: here swap before the run and confirm
-        # the digest gate on the sealed copy still refuses a wrong binary,
-        # and that a swapped-in impostor after sealing is not the source.
-        original = (self.bin_dir / "dayzmake").read_bytes()
-        digest = hashlib.sha256(original).hexdigest()
-        self.assertEqual(os.environ[linux_build.PIN_OVERRIDE_ENV], digest)
-        fd, argv0, refusal = linux_build._sealed_dayzmake()
-        self.assertIsNotNone(fd, refusal)
-        try:
-            impostor_log = self.root / "swapped"
-            (self.bin_dir / "dayzmake").write_text(
+        # Swap the PATH file after sealing and before the Popen inside
+        # run_addon_builder: the sealed image must still be what runs.
+        impostor_log = self.root / "swapped"
+        real_sealed = linux_build._sealed_dayzmake
+
+        def swapping_sealed():
+            fd, argv0, refusal = real_sealed()
+            impostor = self.bin_dir / "dayzmake"
+            impostor.write_text(
                 _FAKE_DAYZMAKE.format(log=impostor_log, fail=self.fail_marker)
             )
-            (self.bin_dir / "dayzmake").chmod(
-                (self.bin_dir / "dayzmake").stat().st_mode | stat.S_IXUSR
+            impostor.chmod(impostor.stat().st_mode | stat.S_IXUSR)
+            return fd, argv0, refusal
+
+        with mock.patch.object(linux_build, "_sealed_dayzmake", swapping_sealed):
+            self.assertTrue(self._run()["ok"])
+        self.assertTrue(self.log.exists(), "the original dayzmake did not run")
+        self.assertFalse(impostor_log.exists(), "the swapped-in dayzmake ran")
+
+    def test_a_failure_after_sealing_closes_the_memfd(self) -> None:
+        captured: dict[str, int] = {}
+        real_sealed = linux_build._sealed_dayzmake
+
+        def capturing_sealed():
+            fd, argv0, refusal = real_sealed()
+            captured["fd"] = fd
+            return fd, argv0, refusal
+
+        with mock.patch.object(linux_build, "_sealed_dayzmake", capturing_sealed):
+            with mock.patch.object(
+                linux_build.shutil, "rmtree", side_effect=OSError("rmtree failed")
+            ):
+                with self.assertRaises(OSError):
+                    linux_build.run_addon_builder(
+                        {**self.payload, "clear": True}, cancelled=lambda: False
+                    )
+        with self.assertRaises(OSError):
+            os.fstat(captured["fd"])
+
+    def test_a_sealed_image_the_kernel_refuses_to_execute_is_reported(self) -> None:
+        sink: list[bytes] = []
+        with mock.patch.object(
+            linux_build.subprocess, "Popen", side_effect=PermissionError("exec refused")
+        ):
+            raw = linux_build.run_addon_builder(
+                self.payload,
+                cancelled=lambda: False,
+                output_sink=lambda _channel, data: sink.append(data),
             )
-            with open(f"/proc/self/fd/{fd}", "rb") as stream:
-                self.assertEqual(hashlib.sha256(stream.read()).hexdigest(), digest)
-            self.assertTrue(argv0.startswith("/proc/self/fd/"))
-        finally:
-            os.close(fd)
+        self.assertFalse(json.loads(raw)["ok"])
+        self.assertIn(b"dayzmake_sealed_image_unavailable", b"".join(sink))
 
     def test_a_broken_tmpdir_does_not_stop_the_build(self) -> None:
         with mock.patch.dict(os.environ, {"TMPDIR": "/nonexistent/dayz-mcp-tmpdir"}):

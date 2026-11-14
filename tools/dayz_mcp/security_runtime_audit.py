@@ -1304,6 +1304,7 @@ _REVIEWED_BUILDERS = {
     ),
     ("dayz_mcp/linux_build.py", "build_environment"): (
         "def build_environment() -> dict[str, str]:\n"
+        "    \"\"\"The daemon's environment limited to what dayzmake and Proton read.\"\"\"\n"
         "    return {key: os.environ[key] for key in _BUILD_ENV_KEYS if os.environ.get(key)}\n"
     ),
 }
@@ -1392,19 +1393,71 @@ def _reviewed_dump(source: str) -> str:
     return ast.dump(ast.parse(source).body[0], include_attributes=False)
 
 
+def _sealed_dayzmake_ok(module: ast.Module | None) -> bool:
+    """``_sealed_dayzmake`` is the one source of the build's sealed image."""
+    if module is None or not _is_sole_top_level_def(module, "_sealed_dayzmake"):
+        return False
+    node = _top_level_def(module, "_sealed_dayzmake")
+    if node is None:
+        return False
+    call_names = {
+        _attribute_name(child.func)
+        for child in ast.walk(node)
+        if isinstance(child, ast.Call)
+    }
+    plain_calls = {
+        child.func.id
+        for child in ast.walk(node)
+        if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+    }
+    has_proc_path = any(
+        isinstance(child, ast.JoinedStr)
+        and any(
+            isinstance(part, ast.Constant) and part.value == "/proc/self/fd/"
+            for part in child.values
+        )
+        for child in ast.walk(node)
+    )
+    return (
+        "os.memfd_create" in call_names
+        and "fcntl.fcntl" in call_names
+        and "expected_sha256" in plain_calls
+        and has_proc_path
+    )
+
+
 def _builder_contract_ok(module: ast.Module | None, relative_path: str) -> bool:
+    # Pins compare docstrings too: the reviewed texts above carry them.
     if module is None:
         return False
     for (path, name), source in _REVIEWED_BUILDERS.items():
         if path != relative_path:
             continue
         node = _top_level_def(module, name)
-        if node is None or ast.dump(node, include_attributes=False) != _reviewed_dump(source):
+        bindings = _module_bindings(module, name)
+        if (
+            node is None
+            or len(bindings) != 1
+            or bindings[0] is not node
+            or ast.dump(node, include_attributes=False) != _reviewed_dump(source)
+        ):
             return False
     for name, source in _REVIEWED_CONSTANTS.get(relative_path, {}).items():
-        node = _top_level_assign(module, name)
-        if node is None or ast.dump(node, include_attributes=False) != _reviewed_dump(source):
+        assigns = [
+            node
+            for node in module.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
+        ]
+        bindings = _module_bindings(module, name)
+        if (
+            len(assigns) != 1
+            or len(bindings) != 1
+            or ast.dump(assigns[0], include_attributes=False) != _reviewed_dump(source)
+        ):
             return False
+    if relative_path == "dayz_mcp/linux_build.py" and not _sealed_dayzmake_ok(module):
+        return False
     return True
 
 
@@ -1591,6 +1644,134 @@ class _ProcessCreationVisitor(ast.NodeVisitor):
             return argument.id not in rebound
         return False
 
+    def _find_function(self, qualified: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        if self.module is None:
+            return None
+
+        def search(body: list[ast.stmt], prefix: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+            for item in body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    name = prefix + item.name
+                    if name == qualified:
+                        return item
+                    found = search(item.body, prefix)
+                    if found is not None:
+                        return found
+                elif isinstance(item, ast.ClassDef):
+                    found = search(item.body, prefix + item.name + ".")
+                    if found is not None:
+                        return found
+            return None
+
+        return search(self.module.body, "")
+
+    @staticmethod
+    def _parameters(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+        return {
+            argument.arg
+            for argument in (
+                list(node.args.posonlyargs) + list(node.args.args) + list(node.args.kwonlyargs)
+            )
+        } | ({node.args.vararg.arg} if node.args.vararg is not None else set()) | (
+            {node.args.kwarg.arg} if node.args.kwarg is not None else set()
+        )
+
+    @staticmethod
+    def _stores(
+        node: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+    ) -> list[ast.Name]:
+        return [
+            child
+            for child in ast.walk(node)
+            if isinstance(child, ast.Name)
+            and child.id == name
+            and isinstance(child.ctx, ast.Store)
+        ]
+
+    def _stores_before(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        name: str,
+        call: ast.Call,
+    ) -> list[ast.Name]:
+        position = (call.lineno, call.col_offset)
+        return [
+            child
+            for child in self._stores(node, name)
+            if (child.lineno, child.col_offset) < position
+        ]
+
+    @staticmethod
+    def _assignment_of(
+        node: ast.FunctionDef | ast.AsyncFunctionDef, store: ast.Name
+    ) -> ast.Assign | ast.AnnAssign | ast.AugAssign | None:
+        parents: dict[ast.AST, ast.AST] = {}
+        for parent in ast.walk(node):
+            for child in ast.iter_child_nodes(parent):
+                parents[child] = parent
+        current: ast.AST = store
+        while current in parents:
+            current = parents[current]
+            if isinstance(current, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                return current
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                return None
+        return None
+
+    def _sealed_origin_ok(
+        self, enclosing: ast.FunctionDef | None, call: ast.Call
+    ) -> bool:
+        if enclosing is None or not _sealed_dayzmake_ok(self.module):
+            return False
+        assignments: list[ast.Assign | ast.AnnAssign | ast.AugAssign | None] = []
+        for name in ("sealed_fd", "dayzmake"):
+            stores = self._stores_before(enclosing, name, call)
+            if len(stores) != 1:
+                return False
+            assignments.append(self._assignment_of(enclosing, stores[0]))
+        first, second = assignments
+        if first is None or first is not second or not isinstance(first, ast.Assign):
+            return False
+        if len(first.targets) != 1 or not isinstance(first.targets[0], ast.Tuple):
+            return False
+        if [elt.id if isinstance(elt, ast.Name) else "" for elt in first.targets[0].elts] != [
+            "sealed_fd",
+            "dayzmake",
+            "refusal",
+        ]:
+            return False
+        value = first.value
+        return (
+            isinstance(value, ast.Call)
+            and self._is_name(value.func, "_sealed_dayzmake")
+            and not value.args
+            and not value.keywords
+        )
+
+    def _cancel_origin_ok(
+        self, enclosing: ast.FunctionDef | None, call: ast.Call
+    ) -> bool:
+        if enclosing is None:
+            return False
+        stores = self._stores_before(enclosing, "cancel_read", call)
+        if len(stores) != 1:
+            return False
+        assignment = self._assignment_of(enclosing, stores[0])
+        if not isinstance(assignment, ast.Assign) or len(assignment.targets) != 1:
+            return False
+        target = assignment.targets[0]
+        if not isinstance(target, ast.Tuple) or [
+            elt.id if isinstance(elt, ast.Name) else "" for elt in target.elts
+        ] != ["cancel_read", "cancel_write"]:
+            return False
+        value = assignment.value
+        return (
+            isinstance(value, ast.Call)
+            and _attribute_name(value.func) == "os.pipe"
+            and not value.args
+            and not value.keywords
+        )
+
     def _is_canonical_host_dynamic(self, node: ast.Call, resolved: str | None) -> bool:
         if self.relative_path != _HOST_PATH or self.function not in _HOST_EXEC_FUNCTIONS:
             return False
@@ -1611,13 +1792,41 @@ class _ProcessCreationVisitor(ast.NodeVisitor):
             ):
                 return False
             first = node.args[0]
+            function = self._find_function(self.function)
+            if function is None:
+                return False
             if isinstance(first, ast.Name) and first.id == "source":
-                return True
-            return (
+                if self.function != "_SealedModuleFinder.exec_module":
+                    return False
+                stores = self._stores(function, "source")
+                if len(stores) != 1:
+                    return False
+                assignment = self._assignment_of(function, stores[0])
+                if not isinstance(assignment, ast.Assign) or len(assignment.targets) != 1:
+                    return False
+                if not self._is_name(assignment.targets[0], "source"):
+                    return False
+                value = assignment.value
+                return (
+                    isinstance(value, ast.Subscript)
+                    and isinstance(value.value, ast.Attribute)
+                    and value.value.attr == "_sources"
+                    and self._is_name(value.value.value, "self")
+                    and isinstance(value.slice, ast.Attribute)
+                    and value.slice.attr == "__name__"
+                    and self._is_name(value.slice.value, "module")
+                )
+            if not (
                 isinstance(first, ast.Subscript)
                 and self._is_name(first.value, "members")
                 and isinstance(first.slice, ast.Constant)
                 and first.slice.value == "__main__.py"
+            ):
+                return False
+            return (
+                self.function == "_load_app_main"
+                and "members" in self._parameters(function)
+                and not self._stores(function, "members")
             )
         return False
 
@@ -1652,6 +1861,31 @@ class _ProcessCreationVisitor(ast.NodeVisitor):
             return False
         if not self._env_call_ok(node, expected_env):
             return False
+        argv_call = node.args[0]
+        enclosing = self._enclosing_def()
+        if is_relay:
+            lifecycle = self._keyword(argv_call, "lifecycle")
+            if (
+                len(argv_call.args) != 1
+                or len(argv_call.keywords) != 1
+                or not isinstance(argv_call.args[0], ast.Name)
+                or enclosing is None
+                or argv_call.args[0].id not in self._parameters(enclosing)
+                or self._stores_before(enclosing, argv_call.args[0].id, node)
+                or not isinstance(lifecycle, ast.Constant)
+                or lifecycle.value is not (self.function == "_run_lifecycle_child")
+            ):
+                return False
+            if self.function == "_supervise_worker" and not self._cancel_origin_ok(enclosing, node):
+                return False
+        else:
+            if (
+                len(argv_call.args) != 3
+                or argv_call.keywords
+                or not self._is_name(argv_call.args[0], "dayzmake")
+                or not self._sealed_origin_ok(enclosing, node)
+            ):
+                return False
         close_fds = self._keyword(node, "close_fds")
         if close_fds is None or not self._is_true(close_fds):
             return False
