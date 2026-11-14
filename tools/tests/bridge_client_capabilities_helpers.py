@@ -11,8 +11,9 @@ import re
 DISPATCH_SIGNATURE = "protected void Dispatch(MCPCommand command)"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-MAX_NAMES = 64
-MAX_BYTES = 4096
+# The census no longer travels on the poll; its ceiling is the bit table's
+# (bridge_readiness.CAPABILITY_MASK_MAX_BITS), not the legacy wire bounds.
+MAX_NAMES = 256
 # Longest single string literal anywhere in vanilla is 237 bytes
 # (4_world/entities/vehicles/carscript.c:82). The census is longer than that,
 # so it is written as short literals joined with `+` at comma boundaries
@@ -97,11 +98,9 @@ def announced_literals(source: str) -> list[str]:
 
 def announced_caps(source: str) -> list[str]:
     raw = "".join(announced_literals(source))
-    if len(raw.encode("ascii", "strict")) > MAX_BYTES:
-        raise AssertionError("announcement exceeds 4096 bytes")
     names = raw.split(",") if raw else []
     if len(names) > MAX_NAMES:
-        raise AssertionError("announcement exceeds 64 names")
+        raise AssertionError("announcement exceeds CAPABILITY_MASK_MAX_BITS names")
     for name in names:
         if not NAME_RE.match(name):
             raise AssertionError(f"invalid capability name {name!r}")

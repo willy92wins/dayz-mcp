@@ -486,14 +486,22 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// outside is refused, never clamped.
 	protected const float ACTOR_EMOTE_WAIT_MIN_S = 0.5;
 	protected const float ACTOR_EMOTE_WAIT_MAX_S = 30.0;
-	//! Capability census announced on every poll as `caps=`: the exact set of
-	//! command.cmd branches Dispatch() handles before falling to unknown_command,
-	//! sorted bytewise and comma-separated. tools/tests/test_bridge_client_capabilities.py
-	//! cross-checks it against the dispatcher chain; the daemon compares it with
-	//! the tools it registers. Written as short literals joined with +, split at
-	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
+	//! Capability census of Dispatch(): the exact set of command.cmd branches
+	//! Dispatch() handles before falling to unknown_command, sorted bytewise
+	//! and comma-separated. tools/tests/test_bridge_client_capabilities.py
+	//! cross-checks it against the dispatcher chain. It is no longer sent on
+	//! the poll: the poll sends the mask constant declared below instead. Written as
+	//! short literals joined with +, split at commas
+	//! (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
 	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,dev_free_camera_set,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,lease_close_client,player_look_at,player_look_at_release,player_move," + "player_respawn,player_trace,player_view_set,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_map_set,ui_menu_set,ui_pause,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace," + "weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	//! Compact announcement sent on every poll as cm=<epoch>.<hex>: the census
+	//! above as a bitmask. Bit order is bridge_readiness.CLIENT_CAPABILITY_BITS
+	//! in tools/dayz_mcp/bridge_readiness.py (append only, never reorder);
+	//! bit i set means the census name at index i is dispatched. Precomputed:
+	//! no runtime code computes it, and the tests tie it bit for bit to
+	//! CLIENT_POLL_CAPS and to Dispatch().
+	protected const string CLIENT_POLL_CAPS_MASK = "1.3fffffffffff";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -503,7 +511,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected string m_Key;
 	protected string m_PeerInstance;
 	protected string m_PollVersion;
-	// Pre-encoded once from CLIENT_POLL_CAPS; key and inst are not cached.
+	// Set once from CLIENT_POLL_CAPS_MASK (sent as is, no encoding); key and inst are not cached.
 	protected string m_PollCapabilities;
 	protected float m_PollHz;
 	protected float m_Accum;
@@ -610,7 +618,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_TickPollSent = 0;
 		m_TickPollCallback = 0;
 		m_PollVersion = "";
-		m_PollCapabilities = EncodeQueryValue(CLIENT_POLL_CAPS);
+		m_PollCapabilities = CLIENT_POLL_CAPS_MASK;
 		m_PeerInstance = "";
 		m_PollInFlight = false;
 		m_PollInFlightS = 0.0;
@@ -982,7 +990,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
 		}
-		request = request + "&caps=" + m_PollCapabilities;
+		request = request + "&cm=" + m_PollCapabilities;
 		request = request + LoadCounterQuery();
 		// 800 ms is the daemon poll cap. The script cannot change the 10 s read timeout.
 		request = request + "&wait_ms=800";

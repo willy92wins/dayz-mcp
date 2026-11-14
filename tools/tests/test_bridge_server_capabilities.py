@@ -1,10 +1,10 @@
 """Server half of the capability announcement (ficha 8f8c BONUS, module M03).
 
-``MCPBridge.StartPoll`` announces ``caps=`` on every poll: the census of the
-commands its ``Dispatch`` chain handles, sorted ascending and comma separated.
-It goes on the wire as is: the names are ``[a-z0-9_]`` and a query may carry
-a literal comma (RFC 3986 3.4). ``%2C`` on every separator pushed the server
-poll past the URL length the engine sends (test_poll_url_engine_limit). This
+``MCPBridge.StartPoll`` announces ``cm=`` on every poll: a bitmask of the
+census of the commands its ``Dispatch`` chain handles, sorted ascending.
+The census constant itself is no longer sent; the mask is ``[0-9a-f.]``,
+needs no encoding, and keeps the poll far below the URL length the engine
+sends (test_poll_url_engine_limit). This
 test owns the expected census as a literal and checks it against the live
 source:
 
@@ -16,16 +16,16 @@ source:
   literals joined by ``+`` (the same form vanilla uses for a ``const string``
   built from pieces). The resolved value must equal that census exactly, in
   canonical order, without duplicates, every name inside the grammar the
-  daemon accepts (``[a-z][a-z0-9_]{0,63}``, at most 64 names, 4096 bytes).
+  daemon accepts (``[a-z][a-z0-9_]{0,63}``, at most 256 names).
   No single literal may exceed ``MAX_LITERAL_CHUNK`` characters: the longest
   single literal in the vanilla scripts is about 240 characters, and a longer
   one would only be rejected by the Enforce compiler, which this text parser
   cannot observe. Chunk boundaries fall on commas so every piece is itself a
   readable sub-list;
-* ``MCPBridge()`` must copy ``SERVER_CAPABILITIES`` once into
+* ``MCPBridge()`` must copy ``SERVER_CAPABILITIES_MASK`` once into
   ``m_PollCapabilities`` (never reassigned elsewhere, never percent-encoded),
-  and ``StartPoll`` must append ``&caps=`` from that cached member after
-  ``ver`` and before the optional ``inst`` block, so a peer that has no
+  and ``StartPoll`` must append ``&cm=`` through ``ServerCapabilities()``
+  after ``ver`` and before the optional ``inst`` block, so a peer that has no
   instance still announces without rebuilding the census on every poll.
 
 The expected census is never derived from ``loopback.SERVER_COMMANDS``, from
@@ -43,6 +43,7 @@ import zlib
 from types import SimpleNamespace
 from urllib.parse import parse_qs, unquote
 
+from dayz_mcp.bridge_readiness import parse_capability_mask
 from tests._addon_paths import addon_root
 from tests.enforce_subset_helpers import (
     EnforceArray,
@@ -59,16 +60,17 @@ DISPATCH_SIGNATURE = "protected void Dispatch(MCPCommand command)"
 CONSTRUCTOR_SIGNATURE = "void MCPBridge()"
 START_POLL_SIGNATURE = "protected void StartPoll()"
 CAPS_CACHE_DECL = "protected string m_PollCapabilities;"
-CAPS_CACHE_INIT = "m_PollCapabilities = SERVER_CAPABILITIES;"
-CAPS_WIRE = 'request = request + "&caps=" + ServerCapabilities();'
+CAPS_CACHE_INIT = "m_PollCapabilities = SERVER_CAPABILITIES_MASK;"
+CAPS_WIRE = 'request = request + "&cm=" + ServerCapabilities();'
 VER_WIRE = '"&ver=" + GetPollVersion()'
 INSTANCE_GUARD = 'if (m_PeerInstance != "")'
 POLL_GET = "m_Ctx.GET(cb, request);"
 
 # Grammar the daemon side accepts after decoding (ficha 8f8c, DESIGN 9).
 NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
-MAX_NAMES = 64
-MAX_BYTES = 4096
+# The census no longer travels on the poll; its ceiling is the bit table's
+# (bridge_readiness.CAPABILITY_MASK_MAX_BITS), not the legacy wire bounds.
+MAX_NAMES = 256
 # Longest single string literal measured in the vanilla scripts is ~240
 # characters (carscript.c); nothing shipped is known to compile above that.
 MAX_LITERAL_CHUNK = 200
@@ -275,7 +277,6 @@ def _capabilities_literal(clean: str) -> list[str]:
 
 def _assert_grammar(test: unittest.TestCase, names: list[str]) -> None:
     test.assertLessEqual(len(names), MAX_NAMES)
-    test.assertLessEqual(len(",".join(names).encode("ascii", "strict")), MAX_BYTES)
     test.assertEqual(len(set(names)), len(names), "duplicate capability name")
     for name in names:
         test.assertIsNotNone(NAME_RE.fullmatch(name), f"capability name outside the grammar: {name!r}")
@@ -297,7 +298,7 @@ def _assert_announced_on_every_poll(test: unittest.TestCase, clean: str) -> None
     test.assertEqual(
         constructor.count(CAPS_CACHE_INIT),
         1,
-        "MCPBridge() must copy SERVER_CAPABILITIES into m_PollCapabilities once",
+        "MCPBridge() must copy SERVER_CAPABILITIES_MASK into m_PollCapabilities once",
     )
     init_at = constructor.index(CAPS_CACHE_INIT)
     init_depth = constructor_masked[:init_at].count("{") - constructor_masked[:init_at].count("}")
@@ -331,7 +332,7 @@ def _assert_announced_on_every_poll(test: unittest.TestCase, clean: str) -> None
     )
 
 
-def _execute_translated_poll_caps(source: str, clean: str) -> list[str]:
+def _execute_translated_poll_caps(source: str, clean: str, bit_table: tuple[str, ...] | None = None) -> list[str]:
     class WireString(EnforceString):
         def __add__(self, other):
             if isinstance(other, bool):
@@ -572,12 +573,24 @@ def _execute_translated_poll_caps(source: str, clean: str) -> list[str]:
     if not request.startswith("poll?"):
         raise AssertionError(f"unexpected poll path: {request!r}")
     parsed = parse_qs(request[len("poll?") :], strict_parsing=True, keep_blank_values=True)
-    if "caps" not in parsed or len(parsed["caps"]) != 1:
-        raise AssertionError(f"missing single caps parameter in {request!r}")
-    return parsed["caps"][0].split(",") if parsed["caps"][0] else []
+    if "cm" not in parsed or len(parsed["cm"]) != 1:
+        raise AssertionError(f"missing single cm parameter in {request!r}")
+    if bit_table is None:
+        # Real bridge: decode with the Python table, never with the source's
+        # alphabetical census (append-only bit order differs from it).
+        names, reason = parse_capability_mask("server", parsed["cm"][0])
+        if reason != "ok" or names is None:
+            raise AssertionError(f"undecodable cm parameter in {request!r}: {reason}")
+        return list(names)
+    # Synthetic fixture: decode with the explicit fixture bit table.
+    mask = re.fullmatch(r"([1-9][0-9]{0,2})\.([0-9a-f]+)", parsed["cm"][0])
+    if mask is None:
+        raise AssertionError(f"malformed cm parameter in {request!r}")
+    bits = int(mask.group(2), 16)
+    return [name for index, name in enumerate(bit_table) if bits & (1 << index)]
 
 
-def _assert_contract(test: unittest.TestCase, source: str, expected: tuple[str, ...]) -> list[str]:
+def _assert_contract(test: unittest.TestCase, source: str, expected: tuple[str, ...], bit_table: tuple[str, ...] | None = None) -> list[str]:
     clean = _without_comments(source)
     dispatched = _walk_dispatch_chain(_method_body(clean, DISPATCH_SIGNATURE))
     test.assertEqual(len(set(dispatched)), len(dispatched), "duplicate dispatcher branch")
@@ -586,8 +599,10 @@ def _assert_contract(test: unittest.TestCase, source: str, expected: tuple[str, 
     test.assertEqual(announced, sorted(dispatched), "announcement must be the sorted dispatcher census")
     test.assertEqual(announced, list(expected), "announcement must equal the literal expected census")
     _assert_announced_on_every_poll(test, clean)
-    wire_caps = _execute_translated_poll_caps(source, clean)
-    test.assertEqual(wire_caps, list(expected), "translated MCPBridge() + StartPoll() must emit expected caps")
+    if bit_table is None and tuple(expected) == FIXTURE_EXPECTED:
+        bit_table = FIXTURE_BITS
+    wire_caps = _execute_translated_poll_caps(source, clean, bit_table=bit_table)
+    test.assertEqual(set(wire_caps), set(expected), "translated MCPBridge() + StartPoll() must emit expected caps")
     return dispatched
 
 
@@ -608,6 +623,7 @@ def _encode_query_value(value: str) -> str:
     return "".join(out)
 
 
+FIXTURE_BITS = ("alpha", "entities_query", "zulu")
 FIXTURE_EXPECTED = ("alpha", "entities_query", "zulu")
 FIXTURE_INITIALIZER = '"alpha," + "entities_query," + "zulu"'
 
@@ -618,16 +634,17 @@ def _known_good_source() -> str:
 	protected const int MAX_PENDING = 32;
 	// caps: one entry per Dispatch() branch, sorted ascending, short literals joined by +.
 	protected const string SERVER_CAPABILITIES = "alpha," + "entities_query," + "zulu";
+	protected const string SERVER_CAPABILITIES_MASK = "1.7";
 	protected string m_PollCapabilities;
 
 	void MCPBridge()
 	{
-		m_PollCapabilities = SERVER_CAPABILITIES;
+		m_PollCapabilities = SERVER_CAPABILITIES_MASK;
 	}
 
 	protected string ServerCapabilities()
 	{
-		return SERVER_CAPABILITIES;
+		return SERVER_CAPABILITIES_MASK;
 	}
 
 	protected string ExtensionPollParams()
@@ -640,7 +657,7 @@ def _known_good_source() -> str:
 		MCPPollCallback cb = new MCPPollCallback(this);
 		string request = "poll?key=" + m_Key;
 		request = request + "&ver=" + GetPollVersion();
-		request = request + "&caps=" + ServerCapabilities();
+		request = request + "&cm=" + ServerCapabilities();
 		if (m_PeerInstance != "")
 		{
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
@@ -840,13 +857,12 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
     def test_announcement_needs_no_query_encoding(self) -> None:
         clean = _without_comments(BRIDGE_PATH.read_text(encoding="utf-8"))
         announced = _capabilities_literal(clean)
-        joined = ",".join(announced)
-        # Only unreserved characters and the comma separator: nothing to encode.
-        self.assertEqual(_encode_query_value(joined).replace("%2C", ","), joined)
-        query = "key=k&ver=" + _encode_query_value("10~1.29.163709") + "&caps=" + joined + "&inst=abc"
+        mask = "1." + format((1 << len(announced)) - 1, "x")
+        # Only unreserved characters ([0-9a-f.]): nothing to encode.
+        self.assertEqual(_encode_query_value(mask), mask)
+        query = "key=k&ver=" + _encode_query_value("10~1.29.163709") + "&cm=" + mask + "&inst=abc"
         parsed = parse_qs(query, strict_parsing=True, keep_blank_values=True)
-        self.assertEqual(parsed["caps"], [joined])
-        self.assertEqual(unquote(joined).split(","), announced)
+        self.assertEqual(parsed["cm"], [mask])
         self.assertEqual(announced, list(EXPECTED_SERVER_CAPABILITIES))
 
     def test_single_literal_longer_than_the_chunk_limit_is_rejected(self) -> None:
@@ -862,8 +878,8 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
 
     def test_innocuous_reads_of_cached_capabilities_are_allowed(self) -> None:
         fixture = _known_good_source()
-        fixture_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
-        fixture_wire = '\t\trequest = request + "&caps=" + ServerCapabilities();\n'
+        fixture_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES_MASK;\n"
+        fixture_wire = '\t\trequest = request + "&cm=" + ServerCapabilities();\n'
         fixture_ctor = "\tvoid MCPBridge()\n"
         for needle in (fixture_init, fixture_wire, fixture_ctor):
             self.assertEqual(fixture.count(needle), 1, needle)
@@ -931,7 +947,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             ),
             "non_mutating_string_methods": fixture.replace(
                 fixture_wire,
-                "\t\tstring head = m_PollCapabilities.Substring(0, 5);\n"
+                "\t\tstring head = m_PollCapabilities.Substring(0, 3);\n"
                 "\t\tstring trimmed = m_PollCapabilities.Trim();\n"
                 '\t\tint commaPos = m_PollCapabilities.IndexOf(",");\n'
                 '\t\tbool hasAlpha = m_PollCapabilities.Contains("alpha");\n'
@@ -1055,7 +1071,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
                 _assert_contract(self, variant, EXPECTED_SERVER_CAPABILITIES)
 
     def test_foreign_by_value_homonym_does_not_hide_native_out(self) -> None:
-        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
+        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES_MASK;\n"
         try_init_head = "\tprotected void TryInit()\n\t{\n"
         call = '\t\tErrorExString("review", m_PollCapabilities);\n'
         fixture = _known_good_source()
@@ -1078,7 +1094,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
                     _assert_contract(self, mutant, expected)
 
     def test_foreign_by_value_find_does_not_vouch_for_map_find(self) -> None:
-        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
+        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES_MASK;\n"
         try_init_head = "\tprotected void TryInit()\n\t{\n"
         call = (
             "\t\tmap<int, string> reviewValues = new map<int, string>();\n"
@@ -1103,7 +1119,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
                     _assert_contract(self, mutant, expected)
 
     def test_source_declaration_does_not_vouch_for_an_engine_receiver(self) -> None:
-        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
+        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES_MASK;\n"
         try_init_head = "\tprotected void TryInit()\n\t{\n"
         call = '\t\tg_Game.GetProfileString("review", m_PollCapabilities);\n'
         fixture = _known_good_source()
@@ -1124,7 +1140,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
                     _assert_contract(self, mutant, expected)
 
     def test_receiver_out_declaration_and_arity_are_rejected(self) -> None:
-        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
+        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES_MASK;\n"
         try_init_head = "\tprotected void TryInit()\n\t{\n"
         ctor_head = "\tvoid MCPBridge()\n"
         fixture = _known_good_source()
@@ -1161,7 +1177,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
         """Sol d2-r8: F10 fixed-size out, an unparsed declaration and a
         class-typed receiver are rejected; a foreign Print(out) is out of
         scope for the bridge's bare Print (the F04 false rejection)."""
-        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
+        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES_MASK;\n"
         try_init_head = "\tprotected void TryInit()\n\t{\n"
         ctor_head = "\tvoid MCPBridge()\n"
         fixture = _known_good_source()
@@ -1276,8 +1292,8 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
         source = _known_good_source()
         caps_line = '\tprotected const string SERVER_CAPABILITIES = "alpha," + "entities_query," + "zulu";\n'
         caps_cache_decl = "\tprotected string m_PollCapabilities;\n"
-        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
-        caps_wire = '\t\trequest = request + "&caps=" + ServerCapabilities();\n'
+        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES_MASK;\n"
+        caps_wire = '\t\trequest = request + "&cm=" + ServerCapabilities();\n'
         ctor_head = "\tvoid MCPBridge()\n"
         mutate_out_decl = (
             "\tprotected void MutateOut(out string value)\n"

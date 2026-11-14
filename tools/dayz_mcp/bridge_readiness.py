@@ -409,6 +409,172 @@ EXPANSION_AI_VERB_BITS: tuple[str, ...] = (
 _XAI_ANNOUNCE = re.compile(r"\A([0-9a-f]{16})\.(0|[1-9][0-9]{0,3})\Z")
 
 
+# Capability census as a bitmask (capsbits): both bridges announce their
+# census on every poll as cm=<epoch>.<hex> instead of the name list, so the
+# poll URL stays far below the engine limit however many verbs are added.
+# This module is the single source of the bit order: bit i is the name at
+# index i. Append only from now on: a new verb goes at the end, a retired
+# verb keeps its slot (its bit is simply never set again); never reorder,
+# never reuse a slot. A non-append change ships as a new epoch while the
+# epoch-1 table below stays decodable.
+CAPABILITY_MASK_EPOCH = 1
+CAPABILITY_MASK_MAX_BITS = 256
+SERVER_CAPABILITY_BITS: tuple[str, ...] = (
+    "action_cursor_ids",
+    "bot_start",
+    "bot_stop",
+    "entities_query",
+    "exec_enforce",
+    "hands_attach",
+    "hands_take",
+    "infected_drive",
+    "inventory_attach",
+    "inventory_give",
+    "inventory_move",
+    "lease_close",
+    "loadout_apply",
+    "loadout_clear",
+    "loadout_get",
+    "nav_path_query",
+    "notify_players",
+    "object_anim",
+    "object_delete",
+    "object_doors",
+    "object_inspect",
+    "object_resolve",
+    "object_set_health",
+    "player_godmode",
+    "player_heal",
+    "player_kill",
+    "player_teleport",
+    "players_visibility",
+    "query_all_players",
+    "query_get_in_condition",
+    "query_player_state",
+    "scene_clear",
+    "scene_entities",
+    "scene_raycast",
+    "server_perf",
+    "surface_query",
+    "survivor_drive",
+    "survivor_drive_release",
+    "telemetry_read",
+    "vehicle_door",
+    "vehicle_enter",
+    "vehicle_prepare_fixture",
+    "weapon_state",
+    "world_spawn",
+    "world_spawn_batch",
+    "world_time_get",
+    "world_time_set",
+    "world_weather_set",
+)
+CLIENT_CAPABILITY_BITS: tuple[str, ...] = (
+    "action_cursor",
+    "action_hold",
+    "action_hold_cancel",
+    "action_use",
+    "action_use_component",
+    "action_use_door",
+    "action_use_target",
+    "actor_emote",
+    "anim_timeline",
+    "camera_get",
+    "camera_path_play",
+    "camera_path_release",
+    "camera_set",
+    "camera_set_focus",
+    "chat_read",
+    "dev_free_camera_set",
+    "engine_set",
+    "gameplay_state",
+    "hud_set",
+    "input_describe",
+    "input_trigger",
+    "key_press",
+    "lease_close_client",
+    "player_look_at",
+    "player_look_at_release",
+    "player_move",
+    "player_respawn",
+    "player_trace",
+    "player_view_set",
+    "restore_gameplay",
+    "ui_click",
+    "ui_dialog",
+    "ui_focus",
+    "ui_pause",
+    "ui_reload_layout",
+    "ui_set_text",
+    "ui_tree",
+    "vehicle_control",
+    "vehicle_get_in_client",
+    "vehicle_release",
+    "vehicle_telemetry",
+    "vehicle_trace",
+    "weapon_aim",
+    "weapon_fire",
+    "weapon_raise",
+    "weapon_sights",
+)
+CAPABILITY_MASK_TABLES: dict[str, dict[int, tuple[str, ...]]] = {
+    "server": {CAPABILITY_MASK_EPOCH: SERVER_CAPABILITY_BITS},
+    "client": {CAPABILITY_MASK_EPOCH: CLIENT_CAPABILITY_BITS},
+}
+_CAPABILITY_MASK = re.compile(r"\A([1-9][0-9]{0,2})\.([0-9a-f]+)\Z")
+
+
+def encode_capability_mask(peer: str, names) -> str:
+    """Encode a census as ``"<epoch>.<hex>"`` for *peer* at the current epoch.
+
+    Raises ValueError on an unknown peer or a name with no bit. The Enforce
+    side sends a precomputed constant; this encoder is for tests and docs.
+    """
+
+    tables = CAPABILITY_MASK_TABLES.get(peer)
+    if tables is None:
+        raise ValueError(f"unknown capability-mask peer: {peer!r}")
+    table = tables[CAPABILITY_MASK_EPOCH]
+    index = {name: bit for bit, name in enumerate(table)}
+    bits = 0
+    for name in names:
+        if name not in index:
+            raise ValueError(f"capability name has no bit for {peer}: {name!r}")
+        bits |= 1 << index[name]
+    return f"{CAPABILITY_MASK_EPOCH}.{bits:x}"
+
+
+def parse_capability_mask(peer: str, raw: str | None) -> tuple[tuple[str, ...] | None, str]:
+    """Decode a ``cm=`` announcement into names plus the reason it is usable.
+
+    Grammar: ``<epoch>.<hex>``, epoch decimal ``[1-9][0-9]{0,2}``, hex
+    lowercase canonical (no leading zeros, ``0`` the only zero form), at
+    most ``CAPABILITY_MASK_MAX_BITS // 4`` digits. Bits at or beyond the
+    table length are ignored (a newer PBO this daemon cannot call anyway).
+    """
+
+    match = _CAPABILITY_MASK.match(raw or "")
+    if match is None:
+        return None, "malformed"
+    hex_part = match.group(2)
+    if len(hex_part) > CAPABILITY_MASK_MAX_BITS // 4:
+        return None, "malformed"
+    if len(hex_part) > 1 and hex_part.startswith("0"):
+        return None, "malformed"
+    epoch = int(match.group(1))
+    tables = CAPABILITY_MASK_TABLES.get(peer) or {}
+    table = tables.get(epoch)
+    if table is None:
+        return None, "unknown_epoch"
+    bits = int(hex_part, 16)
+    names = tuple(
+        name for index, name in enumerate(table) if bits & (1 << index)
+    )
+    if not names:
+        return None, "empty"
+    return names, "ok"
+
+
 def parse_xai(raw: str | None) -> tuple[str | None, tuple[str, ...]]:
     """'<hash>.<mask>' -> (hash, verbs); anything else -> (None, ()).
 
