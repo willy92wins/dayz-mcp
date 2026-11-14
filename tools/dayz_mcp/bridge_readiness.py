@@ -468,6 +468,7 @@ SERVER_CAPABILITY_BITS: tuple[str, ...] = (
     "world_time_get",
     "world_time_set",
     "world_weather_set",
+    "player_set_stance",
 )
 CLIENT_CAPABILITY_BITS: tuple[str, ...] = (
     "action_cursor",
@@ -638,6 +639,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "player_godmode": "player_godmode",
         "player_heal": "player_heal",
         "player_kill": "player_kill",
+        "player_set_stance": "player_set_stance",
         "player_teleport": "player_teleport",
         "players_visibility": "players_visibility",
         "query_all_players": "query_all_players",

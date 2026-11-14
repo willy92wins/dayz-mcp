@@ -234,6 +234,8 @@ def _minimal_args(cmd: str) -> dict:
         }
     if cmd == "player_kill":
         return {"uid": "player-1"}
+    if cmd == "player_set_stance":
+        return {"uid": "player-1", "stance": "erect", "recover": False}
     if cmd == "bot_start":
         return {
             "object_id": 1,

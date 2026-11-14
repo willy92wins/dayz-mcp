@@ -695,6 +695,7 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "player_godmode",
     # A mistyped uid key must not be dropped: kill has no first-player fallback.
     "player_kill",
+    "player_set_stance",
     "bot_start",
     "bot_stop",
     # A mistyped scene_id key must not create a batch outside its scene, where
@@ -8651,6 +8652,47 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         args = {"uid": uid}
         async with runtime.tool_lock:
             return await runtime.call_bridge("player_kill", args, "server", _timeout(timeout_s))
+
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Set a connected living player's body stance on "
+            "the server (erect, crouch or prone) without killing or respawning "
+            "them and without writing health or shock. uid is required and "
+            "never falls back to the first human; uid selects by "
+            "PlayerIdentity.GetPlainId(). This is a server command "
+            "(HumanCommandMove.ForceStance), not a client UAStance input: r7d "
+            "showed UAStance is not drivable from the harness after a collapse. "
+            "A dead body is refused as player_dead with no respawn. A body in a "
+            "vehicle is in_vehicle. An unconscious body is still_unconscious "
+            "unless recover=true, which requests the vanilla juncture "
+            "DayZPlayerSyncJunctures.SendPlayerUnconsciousness(player, false) "
+            "(the same call player_heal uses) and still does not write health "
+            "or shock; if the body stays unconscious this tick the answer is "
+            "still_unconscious and the caller can retry once the player is up. "
+            "recover=false (default) never calls that juncture. The answer is "
+            "player_set_stance: uid, stance, recover, before, after, "
+            "unconscious_before, unconscious_after, recovered. Errors: "
+            "bad_args, player_not_found, no_identity, player_dead, in_vehicle, "
+            "still_unconscious, no_move_command. "
+            f"{GODMODE_DEFAULT_LINE}"
+        )
+    )
+    async def player_set_stance(
+        uid: StrictStr,
+        stance: Literal["erect", "crouch", "prone"],
+        recover: StrictBool = False,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(uid, str) or not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
+        if stance not in ("erect", "crouch", "prone"):
+            raise ToolError(_bad_args("stance", stance, "be erect, crouch or prone"))
+        if not isinstance(recover, bool):
+            raise ToolError(_bad_args("recover", recover, "be a bool"))
+        args: dict[str, Any] = {"uid": uid, "stance": stance, "recover": recover}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("player_set_stance", args, "server", _timeout(timeout_s))
 
     @app.tool(
         description=(

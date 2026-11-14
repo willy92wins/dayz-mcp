@@ -570,6 +570,18 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("uid_wrong_type", {"uid": 1}, (False, "bad_args")),
         ("extra_key", {"uid": "player-1", "id": "player-1"}, (False, "bad_args")),
     ),
+    "player_set_stance": (
+        ("valid_erect", {"uid": "player-1", "stance": "erect", "recover": False}, (True, None)),
+        ("valid_crouch_recover", {"uid": "player-1", "stance": "crouch", "recover": True}, (True, None)),
+        ("valid_prone", {"uid": "player-1", "stance": "prone", "recover": False}, (True, None)),
+        ("empty_uid", {"uid": "", "stance": "erect", "recover": False}, (False, "bad_args")),
+        ("missing_uid", {"stance": "erect", "recover": False}, (False, "bad_args")),
+        ("missing_stance", {"uid": "player-1", "recover": False}, (False, "bad_args")),
+        ("missing_recover", {"uid": "player-1", "stance": "erect"}, (False, "bad_args")),
+        ("bad_stance", {"uid": "player-1", "stance": "flying", "recover": False}, (False, "bad_args")),
+        ("uid_wrong_type", {"uid": 1, "stance": "erect", "recover": False}, (False, "bad_args")),
+        ("extra_key", {"uid": "player-1", "stance": "erect", "recover": False, "id": "x"}, (False, "bad_args")),
+    ),
     "bot_start": (
         (
             "valid",

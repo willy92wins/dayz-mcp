@@ -308,6 +308,14 @@ class MCPArgs
 	// player_view_set: first or third. An absent key reads "", which the
 	// bridge refuses (bad_args). Empty on every other command.
 	string view;
+	// player_set_stance: erect, crouch or prone. The tool always sends it;
+	// an absent key reads "", which the bridge refuses (bad_args).
+	string stance;
+	// player_set_stance: if true, request the vanilla unconsciousness
+	// juncture (DayZPlayerSyncJunctures.SendPlayerUnconsciousness, false)
+	// before the stance change. The tool always sends it; an absent key
+	// reads false, which refuses a still-unconscious body.
+	bool recover;
 	// inventory_move (fb-20261024-212316-17fa). 0 means no target.
 	int item_object_id;
 	int target_object_id;
@@ -1081,6 +1089,24 @@ class MCPPlayerGodmode
 	bool after;
 };
 
+
+// player_set_stance reply. before/after are the closed stance names
+// (erect, crouch, prone, or unknown). unconscious_* is IsUnconscious()
+// around the call. recover echoes the request. recovered is true when
+// the body was unconscious before and conscious after the vanilla
+// juncture. Primitives only: no entity reference.
+class MCPPlayerSetStance
+{
+	string uid;
+	string stance;
+	bool recover;
+	string before;
+	string after;
+	bool unconscious_before;
+	bool unconscious_after;
+	bool recovered;
+};
+
 // player_kill reply. health_* is GetHealth("", "") around SetHealth(0).
 // alive_* is IsAlive() at those same reads. killed is true only when the body
 // is dead and its health is not above zero. godmode_policy_preserved is true
@@ -1596,6 +1622,8 @@ class MCPResult
 	ref MCPPlayerHeal player_heal;
 	// player_godmode reply. Unassigned on its refusals and on other commands.
 	ref MCPPlayerGodmode player_godmode;
+	// player_set_stance reply. Unassigned on its refusals and on other commands.
+	ref MCPPlayerSetStance player_set_stance;
 	// player_move reply, also on its refusals once the phase is known.
 	// Unassigned on other commands.
 	ref MCPPlayerMove player_move;

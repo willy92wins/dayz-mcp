@@ -102,6 +102,8 @@ PRUNABLE_FIELDS = (
     "player_heal",
     # player_godmode fills it with the state before and after the switch (3136).
     "player_godmode",
+    # player_set_stance fills it, also on its refusals once the body is known.
+    "player_set_stance",
     # player_move fills it, also on its refusals once the phase is known (c1cb).
     "player_move",
     # player_trace fills it with the trace header and its paged samples (4ae5).

@@ -31,7 +31,7 @@ OTHER_UID = "76561198000000002"
 
 # Commands whose daemon schema or uid rule requires a non-empty uid.
 UID_REQUIRED = frozenset({
-    "player_teleport", "player_heal", "player_godmode", "player_kill",
+    "player_teleport", "player_heal", "player_godmode", "player_kill", "player_set_stance",
     "inventory_give", "hands_take", "hands_attach",
 })
 

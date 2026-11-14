@@ -71,6 +71,8 @@ CLIENT_EPOCH1 = (
 # sent CLIENT_POLL_CAPS through EncodeQueryValue (commas as %2C).
 SERVER_CAPS_MAIN = ",".join(SERVER_EPOCH1)
 CLIENT_CAPS_MAIN_WIRE = "%2C".join(CLIENT_EPOCH1)
+SERVER_CAPS_TODAY = ",".join(SERVER_CAPABILITY_BITS)
+SERVER_CM_TODAY = "1.1ffffffffffff"
 
 _PEER_FIXTURE = {
     "server": (INST_SERVER, PID_SERVER),
@@ -250,23 +252,23 @@ class AppendRetireRegressionTest(unittest.TestCase):
         variant = variant.replace(
             "action_cursor_ids,bot_start,bot_stop", "action_cursor_ids,bot_stop", 1
         )
-        self.assertEqual(variant.count('SERVER_CAPABILITIES_MASK = "1.ffffffffffff"'), 1)
+        self.assertEqual(variant.count('SERVER_CAPABILITIES_MASK = "1.1ffffffffffff"'), 1)
         variant = variant.replace(
-            'SERVER_CAPABILITIES_MASK = "1.ffffffffffff"',
-            'SERVER_CAPABILITIES_MASK = "1.fffffffffffd"',
+            'SERVER_CAPABILITIES_MASK = "1.1ffffffffffff"',
+            'SERVER_CAPABILITIES_MASK = "1.1fffffffffffd"',
             1,
         )
         self.assertNotEqual(variant, source)
         # Table unchanged: bot_start keeps its slot, it is simply never set.
         self.assertEqual(CAPABILITY_MASK_TABLES["server"][1], SERVER_CAPABILITY_BITS)
         constant = _mask_constant(variant, "SERVER_CAPABILITIES_MASK")
-        self.assertEqual(constant, "1.fffffffffffd")
+        self.assertEqual(constant, "1.1fffffffffffd")
         census = _const_census(variant, "SERVER_CAPABILITIES")
         names, reason = parse_capability_mask("server", constant)
         self.assertEqual(reason, "ok")
         self.assertEqual(set(names), set(census))
         self.assertEqual(set(names), set(_dispatch_branches(variant)))
-        self.assertEqual(len(names), 47)
+        self.assertEqual(len(names), 48)
         self.assertIn("bot_stop", names)
         self.assertNotIn("bot_start", names)
         self.assertEqual(encode_capability_mask("server", census), constant)
@@ -301,9 +303,9 @@ class EquivalenceTest(unittest.TestCase):
         legacy = _state()
         masked = _state()
         server_ach = EXPECTED_SERVER_ARG_CONTRACT_HASH
-        _poll(legacy, "server", caps=SERVER_CAPS_MAIN, ach=server_ach, xai=xai)
+        _poll(legacy, "server", caps=SERVER_CAPS_TODAY, ach=server_ach, xai=xai)
         _poll(legacy, "client", caps=",".join(CLIENT_EPOCH1))
-        _poll(masked, "server", cm="1.ffffffffffff", ach=server_ach, xai=xai)
+        _poll(masked, "server", cm=SERVER_CM_TODAY, ach=server_ach, xai=xai)
         _poll(masked, "client", cm="1.3fffffffffff")
         return legacy, masked
 
@@ -351,7 +353,7 @@ class MixedPeersTest(unittest.TestCase):
 
     def test_server_caps_client_cm(self) -> None:
         state = _state()
-        _poll(state, "server", caps=SERVER_CAPS_MAIN, ach=EXPECTED_SERVER_ARG_CONTRACT_HASH)
+        _poll(state, "server", caps=SERVER_CAPS_TODAY, ach=EXPECTED_SERVER_ARG_CONTRACT_HASH)
         _poll(state, "client", cm="1.3fffffffffff")
         compared, ready = _bridge_status(state)
         self.assertEqual(ready, {"ready": True, "reason": "ready"})
@@ -361,7 +363,7 @@ class MixedPeersTest(unittest.TestCase):
 
     def test_server_cm_client_caps(self) -> None:
         state = _state()
-        _poll(state, "server", cm="1.ffffffffffff", ach=EXPECTED_SERVER_ARG_CONTRACT_HASH)
+        _poll(state, "server", cm=SERVER_CM_TODAY, ach=EXPECTED_SERVER_ARG_CONTRACT_HASH)
         _poll(state, "client", caps=",".join(CLIENT_EPOCH1))
         compared, ready = _bridge_status(state)
         self.assertEqual(ready, {"ready": True, "reason": "ready"})
@@ -379,9 +381,12 @@ class OldFormatCompatibilityTest(unittest.TestCase):
             f"caps={CLIENT_CAPS_MAIN_WIRE}", keep_blank_values=True
         )["caps"][0]
         self.assertEqual(client_caps, ",".join(CLIENT_EPOCH1))
-        _poll(state, "server", caps=SERVER_CAPS_MAIN, ach=EXPECTED_SERVER_ARG_CONTRACT_HASH)
+        historical = _state()
+        _poll(historical, "server", caps=SERVER_CAPS_MAIN, ach=EXPECTED_SERVER_ARG_CONTRACT_HASH)
+        self.assertEqual(len(_view(historical, "server")["announced_commands"]), 48)
+        _poll(state, "server", caps=SERVER_CAPS_TODAY, ach=EXPECTED_SERVER_ARG_CONTRACT_HASH)
         _poll(state, "client", caps=client_caps)
-        for peer, count in (("server", 48), ("client", 46)):
+        for peer, count in (("server", 49), ("client", 46)):
             view = _view(state, peer)
             self.assertEqual(view["state"], "announced")
             self.assertEqual(view["reason"], "ok")

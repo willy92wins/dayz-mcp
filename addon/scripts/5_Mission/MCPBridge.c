@@ -78,14 +78,14 @@ class MCPBridge : Managed
 	// sent on the poll: the poll sends SERVER_CAPABILITIES_MASK instead.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "lease_close,loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "lease_close,loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_set_stance,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
 	// Compact announcement sent on every poll as cm=<epoch>.<hex>: the census
 	// above as a bitmask. Bit order is bridge_readiness.SERVER_CAPABILITY_BITS
 	// in tools/dayz_mcp/bridge_readiness.py (append only, never reorder);
 	// bit i set means the census name at index i is dispatched. Precomputed:
 	// no runtime code computes it, and the tests tie it bit for bit to
 	// SERVER_CAPABILITIES and to Dispatch().
-	protected const string SERVER_CAPABILITIES_MASK = "1.ffffffffffff";
+	protected const string SERVER_CAPABILITIES_MASK = "1.1ffffffffffff";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
@@ -824,6 +824,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "player_kill")
 		{
 			postNow = DispatchPlayerKill(command, result);
+		}
+		else if (command.cmd == "player_set_stance")
+		{
+			postNow = DispatchPlayerSetStance(command, result);
 		}
 		else if (command.cmd == "bot_start")
 		{
@@ -4004,6 +4008,89 @@ class MCPBridge : Managed
 			killPlayer.SetAllowDamage(damageAllowed);
 			result.ok = false;
 			result.error = "kill_not_applied";
+			return true;
+		}
+		result.ok = true;
+		return true;
+	}
+
+
+	// player_set_stance: server-authoritative stance (and optional vanilla
+	// unconsciousness juncture) on a living PlayerBase. uid is required and
+	// never falls back to the first human. Does not write health or shock,
+	// does not kill, does not respawn.
+	protected bool DispatchPlayerSetStance(MCPCommand command, MCPResult result)
+	{
+		string stanceUid;
+		string stanceError;
+		string stanceWanted;
+		Human stanceHuman;
+		PlayerBase stancePlayer;
+		PlayerIdentity stanceIdentity;
+		MCPPlayerSetStance stanceReport;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		stanceUid = command.args.uid;
+		stanceWanted = command.args.stance;
+		if (stanceUid == "" || (stanceWanted != "erect" && stanceWanted != "crouch" && stanceWanted != "prone"))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		stanceHuman = FindHumanByUid(stanceUid);
+		if (!stanceHuman)
+		{
+			result.ok = false;
+			result.error = "player_not_found";
+			return true;
+		}
+		stancePlayer = PlayerBase.Cast(stanceHuman);
+		if (!stancePlayer)
+		{
+			result.ok = false;
+			result.error = "player_not_found";
+			return true;
+		}
+		stanceIdentity = stancePlayer.GetIdentity();
+		if (!stanceIdentity)
+		{
+			result.ok = false;
+			result.error = "no_identity";
+			return true;
+		}
+		if (stanceIdentity.GetPlainId() != stanceUid)
+		{
+			result.ok = false;
+			result.error = "player_not_found";
+			return true;
+		}
+		if (!stancePlayer.IsAlive())
+		{
+			result.ok = false;
+			result.error = "player_dead";
+			return true;
+		}
+
+		stanceReport = new MCPPlayerSetStance();
+		stanceReport.uid = stanceUid;
+		stanceReport.stance = stanceWanted;
+		stanceReport.recover = command.args.recover;
+		stanceReport.before = stancePlayer.MCPStanceName();
+		stanceReport.unconscious_before = stancePlayer.IsUnconscious();
+		stanceError = stancePlayer.MCPSetStanceServer(stanceWanted, command.args.recover);
+		stanceReport.after = stancePlayer.MCPStanceName();
+		stanceReport.unconscious_after = stancePlayer.IsUnconscious();
+		stanceReport.recovered = stanceReport.unconscious_before && !stanceReport.unconscious_after;
+		result.player_set_stance = stanceReport;
+		if (stanceError != "")
+		{
+			result.ok = false;
+			result.error = stanceError;
 			return true;
 		}
 		result.ok = true;

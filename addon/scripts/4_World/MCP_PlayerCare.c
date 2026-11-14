@@ -484,4 +484,95 @@ modded class PlayerBase
 		}
 		return count;
 	}
+
+	// Closed stance name for m_MovementState.m_iStanceIdx (human.c
+	// HumanMovementState, dayzplayer.c STANCEIDX_*). Raised variants
+	// collapse to the body stance. An unknown index is "unknown".
+	string MCPStanceName()
+	{
+		int stanceId;
+		stanceId = m_MovementState.m_iStanceIdx;
+		if (stanceId == DayZPlayerConstants.STANCEIDX_ERECT || stanceId == DayZPlayerConstants.STANCEIDX_RAISEDERECT)
+		{
+			return "erect";
+		}
+		if (stanceId == DayZPlayerConstants.STANCEIDX_CROUCH || stanceId == DayZPlayerConstants.STANCEIDX_RAISEDCROUCH)
+		{
+			return "crouch";
+		}
+		if (stanceId == DayZPlayerConstants.STANCEIDX_PRONE || stanceId == DayZPlayerConstants.STANCEIDX_RAISEDPRONE)
+		{
+			return "prone";
+		}
+		return "unknown";
+	}
+
+	int MCPStanceIdFromName(string stance)
+	{
+		if (stance == "erect")
+		{
+			return DayZPlayerConstants.STANCEIDX_ERECT;
+		}
+		if (stance == "crouch")
+		{
+			return DayZPlayerConstants.STANCEIDX_CROUCH;
+		}
+		if (stance == "prone")
+		{
+			return DayZPlayerConstants.STANCEIDX_PRONE;
+		}
+		return -1;
+	}
+
+	// player_set_stance: server-authoritative body stance for a living player.
+	// Does not write health or shock, does not kill, does not respawn.
+	// recover=true may call DayZPlayerSyncJunctures.SendPlayerUnconsciousness(this, false)
+	// (dayzplayersyncjunctures.c; the same vanilla juncture MCPHealServer uses
+	// after a vitals reset). This tool does not raise shock first; the
+	// juncture may apply on a later tick, and if shock is still under the
+	// vanilla unconscious threshold the player may fall unconscious again.
+	// Stance is applied with HumanCommandMove.ForceStance (human.c) to
+	// STANCEIDX_ERECT/CROUCH/PRONE. Client UAStance is not used.
+	string MCPSetStanceServer(string stance, bool recover)
+	{
+		HumanCommandMove moveCmd;
+		int stanceId;
+		stanceId = MCPStanceIdFromName(stance);
+		if (stanceId < 0)
+		{
+			return "bad_args";
+		}
+		if (!IsAlive())
+		{
+			return "player_dead";
+		}
+		if (IsInVehicle())
+		{
+			return "in_vehicle";
+		}
+		if (IsUnconscious())
+		{
+			if (!recover)
+			{
+				return "still_unconscious";
+			}
+			DayZPlayerSyncJunctures.SendPlayerUnconsciousness(this, false);
+			if (IsUnconscious())
+			{
+				return "still_unconscious";
+			}
+		}
+		moveCmd = GetCommand_Move();
+		if (!moveCmd)
+		{
+			StartCommand_Move();
+			moveCmd = GetCommand_Move();
+		}
+		if (!moveCmd)
+		{
+			return "no_move_command";
+		}
+		moveCmd.ForceStance(stanceId);
+		return "";
+	}
 };

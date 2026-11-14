@@ -104,6 +104,7 @@ SERVER_COMMANDS = {
     "player_heal",
     "player_godmode",
     "player_kill",
+    "player_set_stance",
     "bot_start",
     "bot_stop",
     "object_anim",
@@ -1502,6 +1503,7 @@ SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG = 360.0
 # arg-contract hash.
 _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "player_kill",
+    "player_set_stance",
     "bot_start",
     "bot_stop",
     "object_resolve",
@@ -1755,6 +1757,16 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={
                 "godmode": _is_strict_bool,
                 "uid": _is_uid,
+            },
+        )
+    ),
+    "player_set_stance": _command_schema(
+        _schema_variant(
+            required=("uid", "stance", "recover"),
+            validators={
+                "uid": _is_uid,
+                "stance": _one_of("erect", "crouch", "prone"),
+                "recover": _is_strict_bool,
             },
         )
     ),

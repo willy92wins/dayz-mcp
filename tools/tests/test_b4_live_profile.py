@@ -218,6 +218,7 @@ class AlwaysRefusedTest(unittest.TestCase):
             ("vehicle_control", {}, "client"),
             ("vehicle_telemetry", {}, "client"),
             ("player_kill", {}, "server"),
+            ("player_set_stance", {}, "server"),
             ("world_spawn", {}, "server"),
             ("restore_gameplay", {}, "client"),
         )
