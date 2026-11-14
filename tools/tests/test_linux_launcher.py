@@ -154,6 +154,82 @@ class LinuxBundleTest(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertNotIn(b"DZW1", done.stdout)
 
+    def _variant_bundle(self, marker_source: bytes) -> object:
+        real = linux_launcher.sealed_sources()
+        variant = dict(real)
+        variant["dayz_mcp/linux_worker_host.py"] = marker_source
+        with patch.object(linux_launcher, "sealed_sources", return_value=variant):
+            linux_launcher.install(self.policy)
+            return linux_launcher.load_verified_bundle(linux_launcher.open_launcher())
+
+    def test_archived_host_variant_runs_for_both_children(self) -> None:
+        marker = b"import sys\nprint('ARCHIVED_HOST_MARKER', flush=True)\nsys.exit(7)\n"
+        bundle = self._variant_bundle(marker)
+        for lifecycle in (False, True):
+            with self.subTest(lifecycle=lifecycle):
+                argv = linux_launcher._host_argv(bundle, lifecycle=lifecycle)
+                self.assertNotIn("-m", argv)
+                done = subprocess.run(argv, input=b"", capture_output=True, timeout=60)
+                self.assertEqual(done.returncode, 7, done.stderr[-2000:])
+                self.assertIn(b"ARCHIVED_HOST_MARKER", done.stdout)
+
+    def test_a_pth_hook_in_site_packages_does_not_run(self) -> None:
+        marker = b"import sys\nprint('ARCHIVED_HOST_MARKER', flush=True)\nsys.exit(7)\n"
+        bundle = self._variant_bundle(marker)
+        venv = self.root / "venv"
+        subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", str(venv)],
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+        site_packages = next(venv.glob("lib/python*/site-packages"))
+        hook_marker = self.root / "pth-ran"
+        (site_packages / "evil.pth").write_text(
+            f"import pathlib; pathlib.Path({str(hook_marker)!r}).write_text('x')\n"
+        )
+        python = venv / "bin" / "python"
+        for lifecycle in (False, True):
+            with self.subTest(lifecycle=lifecycle):
+                argv = linux_launcher._host_argv(bundle, lifecycle=lifecycle)
+                argv[0] = str(python)
+                done = subprocess.run(argv, input=b"", capture_output=True, timeout=60)
+                self.assertIn(b"ARCHIVED_HOST_MARKER", done.stdout)
+                self.assertFalse(hook_marker.exists())
+
+    def test_the_linux_sealed_set_is_import_closed(self) -> None:
+        import ast
+
+        from dayz_mcp import native_bundle
+
+        sealed = set(native_bundle._APP_PACKAGED_MODULES) | set(linux_launcher.LINUX_EXTRA_MODULES)
+        package = TOOLS / "dayz_mcp"
+        missing: list[str] = []
+        for name in sorted(sealed):
+            tree = ast.parse((package / name).read_text(encoding="utf-8"), filename=name)
+            for node in ast.walk(tree):
+                imported: list[str] = []
+                if isinstance(node, ast.ImportFrom):
+                    module = node.module or ""
+                    if node.level:
+                        if module:
+                            imported.append(module.split(".")[0] + ".py")
+                        else:
+                            imported.extend(alias.name + ".py" for alias in node.names)
+                    elif module == "dayz_mcp":
+                        imported.extend(alias.name + ".py" for alias in node.names)
+                    elif module.startswith("dayz_mcp."):
+                        imported.append(module.split(".")[1] + ".py")
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        parts = alias.name.split(".")
+                        if parts[0] == "dayz_mcp" and len(parts) > 1:
+                            imported.append(parts[1] + ".py")
+                for sibling in imported:
+                    if sibling not in sealed and (package / sibling).is_file():
+                        missing.append(f"{name} imports {sibling}, which is not sealed")
+        self.assertEqual(missing, [])
+
     def test_the_linux_overlay_is_sealed_inside_app_pyz(self) -> None:
         # The overlay decides how the sealed worker behaves (paths, locks, the
         # build relay). Outside app.pyz an edit would change the worker while the
@@ -166,32 +242,54 @@ class LinuxBundleTest(unittest.TestCase):
 
         with zipfile.ZipFile(root / "app.pyz") as archive:
             members = set(archive.namelist())
-        for name in ("linux_compat.py", "linux_build.py", "byte_lock.py"):
+        for name in ("linux_compat.py", "linux_build.py", "byte_lock.py", "linux_worker_host.py"):
             with self.subTest(name=name):
                 self.assertIn(f"dayz_mcp/{name}", members)
         # And the worker host's finder is what serves them: it is inserted at
         # meta_path[0], ahead of the working tree.
         app_members = linux_worker_host._read_app(root, bundle.app_sha256)
         finder = linux_worker_host._SealedModuleFinder(app_members, str(root / "app.pyz"))
-        for name in ("linux_compat", "linux_build", "byte_lock"):
+        for name in ("linux_compat", "linux_build", "byte_lock", "linux_worker_host"):
             with self.subTest(name=name):
                 self.assertIsNotNone(finder.find_spec(f"dayz_mcp.{name}"))
 
     def test_a_drifted_overlay_is_refused_before_the_worker_starts(self) -> None:
         # Editing linux_compat.py must invalidate the bundle, not silently change
         # what the sealed worker does. sealed_sources() is the check that runs.
-        lock = json.loads((TOOLS / "packaged-modules.lock.json").read_text())
+        lock = json.loads((TOOLS / "packaged-modules.linux.lock.json").read_text())
         relative = "tools/dayz_mcp/linux_compat.py"
         self.assertIn(relative, lock["files"])
         lock["files"][relative] = "0" * 64
         with tempfile.TemporaryDirectory() as holder:
-            drifted = Path(holder) / "packaged-modules.lock.json"
+            drifted = Path(holder) / "packaged-modules.linux.lock.json"
             drifted.write_text(json.dumps(lock))
-            with patch.object(linux_launcher, "_LOCK_PATH", drifted):
+            with patch.object(linux_launcher, "_LINUX_LOCK_PATH", drifted):
                 with self.assertRaises(ValueError) as caught:
                     linux_launcher.sealed_sources()
         self.assertIn("packaged_module_drift", str(caught.exception))
         self.assertIn(relative, str(caught.exception))
+
+    def test_a_drifted_host_is_refused_and_a_matching_lock_is_stale(self) -> None:
+        # Same check for the worker host, and: a lock updated to match a
+        # drifted tree no longer matches the installed manifest.
+        self.install_and_open()
+        lock = json.loads((TOOLS / "packaged-modules.linux.lock.json").read_text())
+        relative = "tools/dayz_mcp/linux_worker_host.py"
+        lock["files"][relative] = "0" * 64
+        with tempfile.TemporaryDirectory() as holder:
+            drifted = Path(holder) / "packaged-modules.linux.lock.json"
+            drifted.write_text(json.dumps(lock))
+            with patch.object(linux_launcher, "_LINUX_LOCK_PATH", drifted):
+                with self.assertRaises(ValueError) as caught:
+                    linux_launcher.sealed_sources()
+        self.assertIn("packaged_module_drift", str(caught.exception))
+        with tempfile.TemporaryDirectory() as holder:
+            matched = Path(holder) / "packaged-modules.linux.lock.json"
+            matched.write_text(json.dumps(lock))
+            with patch.object(linux_launcher, "_LINUX_LOCK_PATH", matched):
+                with self.assertRaises(ValueError) as caught:
+                    linux_launcher.load_verified_bundle(linux_launcher.open_launcher())
+        self.assertIn("invalid_linux_launcher_bundle__stale", str(caught.exception))
 
 
 @unittest.skipUnless(POSIX, "the msvcrt shim of the Linux worker host")
@@ -313,6 +411,42 @@ class HostProbeTest(unittest.TestCase):
             Path("/s/steamapps/common/DayZ Server Exp/DayZServer").resolve(),
         )
         self.assertIsNone(derived("/s/steamapps/common/Other"))
+
+
+class LinuxHostArgvShapeTest(unittest.TestCase):
+    """The sealed-host argv shape and the extra-key refusal, on any platform."""
+
+    def _launcher(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "linux_launcher_under_test", TOOLS / "dayz_mcp" / "linux_launcher.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_host_argv_uses_sealed_source_without_site_or_module(self) -> None:
+        launcher = self._launcher()
+        bundle = types.SimpleNamespace(
+            host_source=b"print('host')\n", root=Path("/bundle"), app_sha256="AB" * 32
+        )
+        for lifecycle in (False, True):
+            argv = launcher._host_argv(bundle, lifecycle=lifecycle)
+            self.assertEqual(argv[1:4], ["-I", "-S", "-c"])
+            self.assertNotIn("-m", argv)
+            self.assertEqual(argv[4], "print('host')\n")
+            self.assertEqual(argv[argv.index("--app-sha256") + 1], "AB" * 32)
+            self.assertEqual(argv[-1] == "--lifecycle-child", lifecycle)
+
+    def test_child_environment_refuses_an_extra_key(self) -> None:
+        launcher = self._launcher()
+        secrets_env = {"DAYZ_MCP_LEASE_TOKEN": "token"}
+        secrets_env.update({"LD_PRELOAD": "/tmp/x.so"})
+        with self.assertRaises(ValueError):
+            launcher._child_environment(secrets_env)
+        allowed = launcher._child_environment({"DAYZ_MCP_CANCEL_HANDLE": "3"})
+        self.assertEqual(allowed["DAYZ_MCP_CANCEL_HANDLE"], "3")
 
 
 if __name__ == "__main__":

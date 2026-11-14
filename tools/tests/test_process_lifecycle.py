@@ -28,6 +28,7 @@ from dayz_mcp.process_lifecycle import (
     RunManifestStore,
     RunRecord,
     _ADOPT_NOT_DISPATCHABLE_HINT,
+    _holder_unattributed,
 )
 from tests.child_environment_helpers import (
     assert_whitelisted_child_environment,
@@ -48,6 +49,16 @@ from tests.process_lifecycle_helpers import (
     snapshot,
 )
 from tests._tiers import slow_test
+
+
+class HolderUnattributedTest(unittest.TestCase):
+    def test_uid_label_is_unattributed_on_windows(self) -> None:
+        if os.name == "nt":
+            self.assertTrue(_holder_unattributed(None, "uid:1000"))
+        else:
+            self.assertFalse(_holder_unattributed(None, "uid:1000"))
+        self.assertTrue(_holder_unattributed(None, None))
+        self.assertFalse(_holder_unattributed(5, "DayZServer"))
 
 
 class ProcessRecordIdentitySchemeTest(unittest.TestCase):

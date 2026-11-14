@@ -158,11 +158,70 @@ class RunAddonBuilderTest(unittest.TestCase):
 
     def test_the_pin_matches_the_dependency_lock(self) -> None:
         lock = json.loads(
-            (Path(__file__).resolve().parents[1] / "dependency-lock.json").read_text()
+            (Path(__file__).resolve().parents[1] / "packaged-modules.linux.lock.json").read_text()
         )
-        pinned = lock["remote_artifacts"]["dayzmake_linux"]
+        pinned = lock["dayzmake_linux"]
         self.assertEqual(linux_build.DAYZMAKE_SHA256.upper(), pinned["binary_sha256"])
         self.assertEqual(linux_build.DAYZMAKE_VERSION, f"v{pinned['version']}")
+
+    def test_a_relative_path_entry_runs_the_pinned_file_not_the_temp_one(self) -> None:
+        # PATH=bin relative to the daemon cwd; a different bin/dayzmake under
+        # the build temp must never run.
+        daemon_bin = self.root / "daemonbin"
+        daemon_bin.mkdir()
+        fake = daemon_bin / "dayzmake"
+        fake.write_text(_FAKE_DAYZMAKE.format(log=self.log, fail=self.fail_marker))
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        digest = hashlib.sha256(fake.read_bytes()).hexdigest()
+        os.environ[linux_build.PIN_OVERRIDE_ENV] = digest
+        temp_bin = Path(self.payload["temp"]) / "bin"
+        temp_bin.mkdir(parents=True)
+        impostor_log = self.root / "impostor"
+        impostor = temp_bin / "dayzmake"
+        impostor.write_text(_FAKE_DAYZMAKE.format(log=impostor_log, fail=self.fail_marker))
+        impostor.chmod(impostor.stat().st_mode | stat.S_IXUSR)
+        previous = os.getcwd()
+        os.chdir(self.root)
+        try:
+            with mock.patch.dict(os.environ, {"PATH": "daemonbin"}):
+                # which() resolves relative to this cwd, as the daemon's does.
+                with mock.patch.object(
+                    linux_build.shutil, "which", return_value="daemonbin/dayzmake"
+                ):
+                    self.assertTrue(self._run()["ok"])
+        finally:
+            os.chdir(previous)
+        self.assertTrue(self.log.exists())
+        self.assertFalse(impostor_log.exists())
+
+    def test_a_swap_after_the_check_never_runs(self) -> None:
+        # The sealed image is copied before the run, so replacing the PATH
+        # file afterwards cannot change what executes. Swap during the build
+        # through the log-writing fake: here swap before the run and confirm
+        # the digest gate on the sealed copy still refuses a wrong binary,
+        # and that a swapped-in impostor after sealing is not the source.
+        original = (self.bin_dir / "dayzmake").read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        self.assertEqual(os.environ[linux_build.PIN_OVERRIDE_ENV], digest)
+        fd, argv0, refusal = linux_build._sealed_dayzmake()
+        self.assertIsNotNone(fd, refusal)
+        try:
+            impostor_log = self.root / "swapped"
+            (self.bin_dir / "dayzmake").write_text(
+                _FAKE_DAYZMAKE.format(log=impostor_log, fail=self.fail_marker)
+            )
+            (self.bin_dir / "dayzmake").chmod(
+                (self.bin_dir / "dayzmake").stat().st_mode | stat.S_IXUSR
+            )
+            with open(f"/proc/self/fd/{fd}", "rb") as stream:
+                self.assertEqual(hashlib.sha256(stream.read()).hexdigest(), digest)
+            self.assertTrue(argv0.startswith("/proc/self/fd/"))
+        finally:
+            os.close(fd)
+
+    def test_a_broken_tmpdir_does_not_stop_the_build(self) -> None:
+        with mock.patch.dict(os.environ, {"TMPDIR": "/nonexistent/dayz-mcp-tmpdir"}):
+            self.assertTrue(self._run()["ok"])
 
     def test_the_child_gets_a_whitelisted_environment(self) -> None:
         dump = self.root / "env.txt"

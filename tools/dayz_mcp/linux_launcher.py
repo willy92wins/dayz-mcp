@@ -9,18 +9,20 @@ the daemon policy; the worker never sees them.
 
 There is no PE outside Windows. This module keeps everything else:
 
-- the bundle is the same ``app.pyz`` (``build_native_launcher._build_app_pyz``, every
-  member byte-identical to ``tools/packaged-modules.lock.json``) and the same
+- the bundle's ``app.pyz`` holds the Windows member set (every member
+  byte-identical to ``tools/packaged-modules.lock.json``) plus the Linux overlay
+  and worker host (``tools/packaged-modules.linux.lock.json``), built here with
+  the builder's zip entry shape, and the same
   ``request-policy.json`` / ``worker-runtime.json`` the builder emits from the
   launcher policy, written by ``install`` to
   ``$LOCALAPPDATA/DayZ_MCP/linux-launchers/dayz-test-v1/`` and pinned by
   ``bundle-manifest.json``; ``load_verified_bundle`` checks all of it again on every
-  open, and the lock against the sealed sources in the working tree;
+  open, and both locks against the sealed sources in the working tree;
 - ``launch_registered_linux`` is the PE's relay loop in Python: the worker and every
-  lifecycle child run under the approved interpreter with ``-I``, through
-  ``linux_worker_host``, which imports the sealed modules from the verified archive
-  bytes; secrets go only to the lifecycle child's environment, and the cancel
-  handle is a pipe the worker reads.
+  lifecycle child run under the approved interpreter with ``-I -S -c`` and the
+  worker host's source taken from the verified archive, so nothing from the
+  working tree or from ``site`` runs in the child; secrets go only to the
+  lifecycle child's environment, and the cancel handle is a pipe the worker reads.
 
 What the PE does and this does not: the debugger gate that approves every image a
 child maps, and the job object that kills the tree with the launcher. A same-user
@@ -57,6 +59,17 @@ _TERMINAL_MAGIC = b"DZW1"
 _BROKER_FAILURE = b'{"error":"broker_child_failed","ok":false}'
 _TOOLS_DIR = Path(__file__).resolve().parent.parent
 _LOCK_PATH = _TOOLS_DIR / "packaged-modules.lock.json"
+_LINUX_LOCK_PATH = _TOOLS_DIR / "packaged-modules.linux.lock.json"
+# The Linux member set: the Windows set plus these four, sealed only on Linux.
+LINUX_EXTRA_MODULES = ("byte_lock.py", "linux_build.py", "linux_compat.py", "linux_worker_host.py")
+_CHILD_EXTRA_ENV_KEYS = frozenset(
+    {
+        "DAYZ_MCP_CANCEL_HANDLE",
+        "DAYZ_MCP_CLIENT_ID_JSON",
+        "DAYZ_MCP_LEASE_TOKEN",
+        "DAYZ_MCP_NORMAL_POLICY_JSON",
+    }
+)
 _CANCEL_GRACE_S = 20.0
 _EXIT_WAIT_S = 5.0
 _LIFECYCLE_DEADLINE_S = {"start": 240.0}
@@ -142,14 +155,30 @@ def _closed_json(raw: bytes) -> dict[str, object]:
 # ---------------------------------------------------------------- sealed sources
 
 
-def sealed_sources() -> dict[str, bytes]:
-    """The members app.pyz must hold, each checked against packaged-modules.lock.json."""
-    lock = _closed_json(_LOCK_PATH.read_bytes())
+def _lock_files(path: Path) -> dict[str, object]:
+    lock = _closed_json(path.read_bytes())
+    if lock.get("format_version") != 1:
+        _invalid("packaged_modules_lock_invalid")
     files = lock.get("files")
     if type(files) is not dict:
         _invalid("packaged_modules_lock_invalid")
+    return files
+
+
+def sealed_sources() -> dict[str, bytes]:
+    """The members the Linux app.pyz must hold, checked against both locks."""
+    merged: dict[str, object] = {}
+    for path in (_LOCK_PATH, _LINUX_LOCK_PATH):
+        for relative, expected in _lock_files(path).items():
+            if relative in merged:
+                _invalid("packaged_modules_lock_invalid")
+            merged[relative] = expected
+    expected_linux = {f"tools/dayz_mcp/{name}" for name in LINUX_EXTRA_MODULES}
+    linux_files = set(_lock_files(_LINUX_LOCK_PATH))
+    if linux_files != expected_linux:
+        _invalid("packaged_modules_lock_invalid")
     members: dict[str, bytes] = {}
-    for relative, expected in files.items():
+    for relative, expected in merged.items():
         if not relative.startswith("tools/"):
             _invalid("packaged_modules_lock_invalid")
         raw = (_TOOLS_DIR.parent / relative).read_bytes()
@@ -172,14 +201,31 @@ def _verify_app(raw: bytes, expected: dict[str, bytes]) -> None:
             names = [item.filename for item in infos]
             if names != sorted(names) or len(names) != len(set(names)):
                 _invalid()
-            # Every archive member is sealed; the lock may seal more (launcher.cpp).
-            for name in names:
-                if name not in expected or archive.read(name) != expected[name]:
-                    _invalid()
-            if "__main__.py" not in names or not any(n.startswith("dayz_mcp/") for n in names):
+            if set(names) != set(expected):
                 _invalid()
+            for name in names:
+                if archive.read(name) != expected[name]:
+                    _invalid()
     except (OSError, KeyError, RuntimeError, zipfile.BadZipFile):
         _invalid()
+
+
+def _build_linux_app_pyz(destination: Path, members: dict[str, bytes], builder: object) -> None:
+    """Write the Linux app.pyz: same zip shape as the Windows builder, Linux set."""
+    import zipfile
+
+    with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        for name in sorted(members):
+            info, data = builder._zip_entry(name, members[name])
+            archive.writestr(info, data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+
+
+def _read_app_members(raw: bytes) -> dict[str, bytes]:
+    import io
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        return {item.filename: archive.read(item) for item in archive.infolist()}
 
 
 # ---------------------------------------------------------------- install
@@ -272,7 +318,7 @@ def install(policy_path: Path | str | None = None, launcher_id: str = LAUNCHER_I
     staging = root / f".{launcher_id}.staging-{secrets.token_hex(6)}"
     staging.mkdir(mode=0o700)
     try:
-        builder._build_app_pyz(staging / "app.pyz")
+        _build_linux_app_pyz(staging / "app.pyz", expected, builder)
         (staging / "request-policy.json").write_bytes(policy_bytes)
         (staging / "worker-runtime.json").write_bytes(runtime_bytes)
         files: dict[str, dict[str, object]] = {}
@@ -286,6 +332,7 @@ def install(policy_path: Path | str | None = None, launcher_id: str = LAUNCHER_I
             "format_version": 1,
             "launcher_id": launcher_id,
             "packaged_modules_lock_sha256": _sha256(_LOCK_PATH.read_bytes()),
+            "packaged_modules_linux_lock_sha256": _sha256(_LINUX_LOCK_PATH.read_bytes()),
         }
         (staging / MANIFEST_NAME).write_bytes(_canonical(manifest))
         os.chmod(staging / MANIFEST_NAME, 0o600)
@@ -353,6 +400,7 @@ class VerifiedLinuxBundle:
     manifest_sha256: str
     app_sha256: str
     root: Path
+    host_source: bytes = b""
     worker_runtime_document: object = None
     debug_image_authority: object = None
     _closed: bool = field(default=False, repr=False)
@@ -415,14 +463,23 @@ def load_verified_bundle(opened: object) -> VerifiedLinuxBundle:
     manifest = _closed_json(manifest_raw)
     files = manifest.get("files")
     if (
-        set(manifest) != {"files", "format_version", "launcher_id", "packaged_modules_lock_sha256"}
+        set(manifest)
+        != {
+            "files",
+            "format_version",
+            "launcher_id",
+            "packaged_modules_lock_sha256",
+            "packaged_modules_linux_lock_sha256",
+        }
         or manifest.get("format_version") != 1
         or manifest.get("launcher_id") != opened.launcher_id
         or type(files) is not dict
         or set(files) != set(BUNDLE_FILES)
     ):
         _invalid()
-    if manifest["packaged_modules_lock_sha256"] != _sha256(_LOCK_PATH.read_bytes()):
+    if manifest["packaged_modules_lock_sha256"] != _sha256(_LOCK_PATH.read_bytes()) or manifest[
+        "packaged_modules_linux_lock_sha256"
+    ] != _sha256(_LINUX_LOCK_PATH.read_bytes()):
         _invalid("invalid_linux_launcher_bundle__stale")
     live = {entry.name for entry in os.scandir(root)}
     if live != {*BUNDLE_FILES, MANIFEST_NAME}:
@@ -435,6 +492,7 @@ def load_verified_bundle(opened: object) -> VerifiedLinuxBundle:
             _invalid()
         contents[name] = raw
     _verify_app(contents["app.pyz"], sealed_sources())
+    host_source = _read_app_members(contents["app.pyz"])["dayz_mcp/linux_worker_host.py"]
 
     from dayz_mcp import native_bundle
 
@@ -450,6 +508,7 @@ def load_verified_bundle(opened: object) -> VerifiedLinuxBundle:
         app_sha256=files["app.pyz"]["sha256"],
         root=root,
         worker_runtime_document=runtime,
+        host_source=host_source,
     )
 
 
@@ -457,6 +516,8 @@ def load_verified_bundle(opened: object) -> VerifiedLinuxBundle:
 
 
 def _child_environment(extra: dict[str, str]) -> dict[str, str]:
+    if not set(extra) <= _CHILD_EXTRA_ENV_KEYS:
+        raise ValueError("child_environment_extra_key")
     env = {key: os.environ[key] for key in _CHILD_ENV_KEYS if os.environ.get(key)}
     env.update(extra)
     return env
@@ -466,8 +527,9 @@ def _host_argv(bundle: VerifiedLinuxBundle, *, lifecycle: bool) -> list[str]:
     argv = [
         sys.executable,
         "-I",
-        "-m",
-        "dayz_mcp.linux_worker_host",
+        "-S",
+        "-c",
+        bundle.host_source.decode("utf-8"),
         "--bundle",
         str(bundle.root),
         "--app-sha256",

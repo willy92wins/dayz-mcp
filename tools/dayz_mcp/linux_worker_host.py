@@ -2,22 +2,31 @@
 
 On Windows the native launcher starts ``runtime\\python.exe app.pyz`` from its
 bundle: the private worker, and one ``--lifecycle-child`` per lifecycle frame the
-worker sends. Outside Windows this module is that interpreter's entry:
+worker sends. Outside Windows the relay starts this host's source, taken from
+the verified archive, as::
 
-    python -I -m dayz_mcp.linux_worker_host --bundle DIR --app-sha256 HEX [--lifecycle-child]
+    python -I -S -c <archived host source> --bundle DIR --app-sha256 HEX [--lifecycle-child]
 
-- ``app.pyz`` is read once, its SHA-256 must be the one the launcher verified
-  against the bundle manifest, and every sealed module (``dayz_mcp/<name>.py``)
-  is then imported from those bytes, not from the working tree -- including the
-  Linux overlay (``linux_compat``, ``linux_build``, ``byte_lock``), which decides
-  how the sealed worker behaves and so is sealed with it;
+``-S`` keeps ``site`` (and every ``.pth`` hook) out of the child. In order, the
+host imports only the standard library, reads and hashes ``app.pyz``, creates
+the ``dayz_mcp`` package from the archive's ``__init__.py`` with an empty
+``__path__``, installs the sealed finder, and only then adds the interpreter's
+site-packages directory to ``sys.path`` (without processing its ``.pth``
+files) for the sealed set's one third-party dependency, ``psutil``. It then
+installs the Linux overlay and runs the sealed ``app_main``.
+
+- every sealed module (``dayz_mcp/<name>.py``) is imported from those bytes,
+  not from the working tree -- including the Linux overlay (``linux_compat``,
+  ``linux_build``, ``byte_lock``) and this host itself;
 - ``msvcrt.open_osfhandle`` is the identity: the cancel handle is a POSIX pipe
   descriptor, and ``os.read`` on it returns when the launcher writes or closes
   (the shim exists only while the sealed module is imported);
-- ``linux_compat.install()`` gives the sealed modules their POSIX behaviour;
 - the sealed ``app_main`` (the archive's ``__main__.py``) runs unchanged, except
   that its bundle root is ``--bundle`` instead of ``sys.executable``'s
   grandparent (the request policy and worker runtime documents live there).
+
+Known limit: the relay (``linux_launcher.py``), the interpreter, its standard
+library and the venv's ``psutil`` run unsealed, as in the bundle design.
 """
 
 from __future__ import annotations
@@ -25,11 +34,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.abc
+import importlib.machinery
 import importlib.util
 import io
 import os
 import stat
 import sys
+import sysconfig
 import types
 import zipfile
 from pathlib import Path
@@ -39,7 +50,7 @@ _PACKAGE_PREFIX = "dayz_mcp/"
 
 
 class _SealedModuleFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
-    """Serve ``dayz_mcp.<name>`` from the verified archive when it holds that module."""
+    """Serve ``dayz_mcp`` and ``dayz_mcp.<name>`` from the verified archive."""
 
     def __init__(self, members: dict[str, bytes], origin: str) -> None:
         self._sources = {
@@ -50,11 +61,21 @@ class _SealedModuleFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
             and name != _PACKAGE_PREFIX + "__init__.py"
             and "/" not in name[len(_PACKAGE_PREFIX) :]
         }
+        init = members.get(_PACKAGE_PREFIX + "__init__.py")
+        if init is None:
+            raise RuntimeError("package_init_missing")
+        self._sources["dayz_mcp"] = init
         self._origin = origin
 
     def find_spec(self, fullname, path=None, target=None):  # noqa: ANN001 - importlib protocol
         if fullname not in self._sources:
             return None
+        if fullname == "dayz_mcp":
+            spec = importlib.util.spec_from_loader(
+                fullname, self, origin=f"{self._origin}/dayz_mcp/__init__.py", is_package=True
+            )
+            spec.submodule_search_locations = []
+            return spec
         return importlib.util.spec_from_loader(
             fullname, self, origin=f"{self._origin}/{fullname.replace('.', '/')}.py"
         )
@@ -108,6 +129,15 @@ def _load_app_main(members: dict[str, bytes], bundle: Path) -> types.ModuleType:
     return module
 
 
+def _add_site_packages() -> None:
+    """Add site-packages for ``psutil`` without running any ``.pth`` hook."""
+    paths = sysconfig.get_paths()
+    for key in ("purelib", "platlib"):
+        candidate = paths.get(key)
+        if candidate and candidate not in sys.path and os.path.isdir(candidate):
+            sys.path.append(candidate)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="dayz_mcp.linux_worker_host", allow_abbrev=False)
     parser.add_argument("--bundle", required=True)
@@ -119,15 +149,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     members = _read_app(bundle, args.app_sha256)
-    package = sys.modules.get("dayz_mcp")
-    package_init = Path(getattr(package, "__file__", "") or "")
-    if package_init.read_bytes() != members.get(_PACKAGE_PREFIX + "__init__.py"):
-        raise RuntimeError("package_init_mismatch")
     sealed = _SealedModuleFinder(members, str(bundle / "app.pyz"))
     already = [name for name in sealed._sources if name in sys.modules]
     if already:
         raise RuntimeError("sealed_module_preloaded")
     sys.meta_path.insert(0, sealed)
+
+    import dayz_mcp  # noqa: F401 - created by the sealed finder from the archive
+
+    _add_site_packages()
 
     import asyncio  # noqa: F401 - imported before the msvcrt shim exists, see _load_app_main
     import subprocess  # noqa: F401

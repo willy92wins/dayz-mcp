@@ -78,13 +78,18 @@ Operator error codes:
 
 ## Linux (partial port)
 
-Windows is the supported host and nothing below changes it. The modules sealed into the dayz-test-v1 launcher
-(`PACKAGED_MODULES`, hashed in `tools/packaged-modules.lock.json`) include the Linux overlay that decides how
-the sealed worker behaves -- `linux_compat.py`, `linux_build.py` and `byte_lock.py` -- so the worker executes
-only verified bytes: editing one of them makes the bundle stale (`packaged_module_drift`, then
-`invalid_linux_launcher_bundle__stale`) and requires a reseal, exactly as for any other sealed module. The rest
+Windows is the supported host and nothing below changes it. The Windows dayz-test-v1 launcher seals exactly
+`PACKAGED_MODULES` (hashed in `tools/packaged-modules.lock.json`); the Linux bundle seals that same set plus
+the Linux overlay and worker host that decide how the sealed worker behaves -- `linux_compat.py`,
+`linux_build.py`, `byte_lock.py` and `linux_worker_host.py`, hashed in
+`tools/packaged-modules.linux.lock.json` -- so the worker executes only verified bytes: editing one of them
+makes the bundle stale (`packaged_module_drift`, then `invalid_linux_launcher_bundle__stale`) and requires a
+Linux reinstall (`python -m dayz_mcp.linux_launcher install`), never a Windows rebuild. The rest
 of the Linux port is unsealed and runs in the daemon, not in the sealed worker: `posix_fileops.py`,
 `linux_launcher.py`, `linux_windows.py`, `proton_client.py`, `podman_server.py`, `steam_linux.py`.
+Known limit: on Linux the verifier (`linux_launcher.py`) and the daemon run from the working tree; only what
+runs in the worker and its lifecycle children is sealed. The interpreter, its standard library and the venv's
+`psutil` are not sealed (on Windows the bundle ships its own runtime and the psutil wheel).
 
 - `dayz_mcp/linux_compat.py` (sealed): `install()` runs first in `python -m dayz_mcp` and, outside Windows only, sets
   `LOCALAPPDATA` to `$XDG_STATE_HOME` (else `~/.local/state`) when unset, defines the two Win32
@@ -156,19 +161,25 @@ a process differ.
   `build_native_launcher.py` are not edited: `dependency-lock.json` pins the first and every Windows build
   contract records the hash of the second, so touching either would cost a launcher rebuild. The relay's two
   `subprocess.Popen` calls are the only process creation `security_runtime_audit` accepts in
-  `linux_launcher.py` (one per relay function, argv straight from `_host_argv`). `server.py` imports this closure at
+  `linux_launcher.py` (one per relay function, argv straight from `_host_argv`, a required `env` from
+  `_child_environment`, `close_fds=True`, and the pinned streams, `cwd` and `pass_fds`; both builders and the
+  constants they read must match the reviewed sources the audit carries). `server.py` imports this closure at
   startup, as it imports the native one on Windows, so the server-code freshness check covers it. `python -m dayz_mcp.linux_launcher install [--policy FILE]` builds it from the
   launcher policy (default `$LOCALAPPDATA/DayZ_MCP/launcher-policy.json`, POSIX paths, same schema as the
-  Windows example) into `$LOCALAPPDATA/DayZ_MCP/linux-launchers/dayz-test-v1/`: the same `app.pyz`
-  (`build_native_launcher._build_app_pyz`, imported unchanged) and the same `request-policy.json` / `worker-runtime.json` the
-  Windows builder emits, pinned by `bundle-manifest.json`. Every open checks the directory is private to the
-  user, every file against the manifest, every archive member against `packaged-modules.lock.json` and the
-  lock against the sources; a policy root is sealed by `(st_dev, st_ino)` and must contain no symlink.
+  Windows example) into `$LOCALAPPDATA/DayZ_MCP/linux-launchers/dayz-test-v1/`: an `app.pyz` written by
+  `linux_launcher` with the builder's zip entry shape, holding exactly the Windows members plus the four Linux
+  modules, and the same `request-policy.json` / `worker-runtime.json` the
+  Windows builder emits, pinned by `bundle-manifest.json` (which pins both locks). Every open checks the directory is private to the
+  user, every file against the manifest, every archive member against both locks and the
+  locks against the sources; a policy root is sealed by `(st_dev, st_ino)` and must contain no symlink.
   `launch_registered_linux` is the PE's relay loop: it starts the sealed worker
-  (`python -I -m dayz_mcp.linux_worker_host --bundle DIR --app-sha256 HEX`), writes the bootstrap frame, and
+  (`python -I -S -c <archived linux_worker_host source> --bundle DIR --app-sha256 HEX`), writes the bootstrap frame, and
   answers each lifecycle frame by starting a `--lifecycle-child` that alone receives the lease token, client
-  identity and daemon policy; the worker's `DZW1` terminal is the launcher's stdout. The worker host imports the
-  sealed modules from the verified archive bytes, gives `app_main` an `msvcrt` with an identity
+  identity and daemon policy; the worker's `DZW1` terminal is the launcher's stdout. The worker host is taken
+  from the verified archive (no `-m`, no working-tree path, no `site` or `.pth` hook), creates the `dayz_mcp`
+  package from the archive's `__init__.py` with an empty `__path__`, imports the
+  sealed modules from the verified archive bytes, then adds site-packages for `psutil` without running its
+  `.pth` files, gives `app_main` an `msvcrt` with an identity
   `open_osfhandle` only while it is imported (the cancel handle is a pipe descriptor; a module named `msvcrt`
   left in `sys.modules` turns `subprocess` into its Windows branch), and points its bundle root at `--bundle`.
   Not rebuilt: the debugger gate on every image a child maps and the job object. Build mode
@@ -226,10 +237,13 @@ busy-polls `/proc/self/statm` and `/proc/meminfo` after the last building type l
 landscape (4+ minutes, twice; ~10 s without); and a mod mounted read-only (`:ro`) is skipped without a log
 line, while from an overlay (`:O`) it loads. Absolute `-config` and `-profiles` work; absolute `-mission` looked like it did, but left the server without `init.c`'s `main` (2026-11-06, below).
 
-Tests: `tests/test_linux_launcher.py` (bundle install and tamper refusal, the overlay sealed inside `app.pyz`
-and a drifted overlay refused, the worker host running the sealed
-worker from the archive, the `msvcrt` shim scope, the POSIX path authority, the host probes, the allow rule)
-and two relay-boundary tests in `tests/test_security_runtime_audit.py`. Tests of the Windows approval registry
+Tests: `tests/test_linux_launcher.py` (bundle install and tamper refusal, the overlay and host sealed inside
+`app.pyz` and a drifted overlay or host refused, the archived host variant running for both children, a `.pth`
+hook not running, the Linux sealed set import-closed, the worker host running the sealed
+worker from the archive, the `msvcrt` shim scope, the POSIX path authority, the host probes, the allow rule,
+and the host argv shape and `_child_environment` extra-key refusal on any platform),
+`tests/test_linux_build.py` (the sealed dayzmake image, relative `PATH`, swap and broken `TMPDIR`) and the
+relay/build/host boundary tests in `tests/test_security_runtime_audit.py`. Tests of the Windows approval registry
 and of the `Popen` launch path are skipped off Windows (`skipIf(os.name != "nt")`, with the reason).
 
 #### Which binary runs (policy decides)
@@ -284,20 +298,26 @@ and of the `Popen` launch path are skipped off Windows (`skipIf(os.name != "nt")
   from `PATH` (https://github.com/bzed/dayzmake): `pack` for `pack_only`, otherwise `build --proton-binarize`, which
   brings its own `P:` sandbox, so the worker's junction stage is not used. The argv comes only from the validated
   frame. Unlike the sealed `AddonBuilder.exe` on Windows, dayzmake is not sealed, so the executable is pinned by
-  content: only the v1.0.0 release asset runs, matched against `DAYZMAKE_SHA256` (the archive's digest and the
-  executable's are both in `dependency-lock.json`), and anything else is refused as `dayzmake_pin_mismatch`
-  before it starts. A development build runs only when `DAYZ_MCP_DAYZMAKE_SHA256` names its digest. The child
+  content: only the v1.0.0 release asset runs, matched against `DAYZMAKE_SHA256` (the release record is in
+  `tools/packaged-modules.linux.lock.json`, key `dayzmake_linux`), and anything else is refused as
+  `dayzmake_pin_mismatch` before it starts. The `PATH` result is resolved to an absolute real path, copied
+  into a sealed `memfd` while it is hashed, and executed as `/proc/self/fd/<fd>` with `pass_fds`, so the bytes
+  that run are the bytes that were hashed and `TMPDIR` plays no part; a kernel that forbids executing memfds
+  refuses the build, with no fallback to the `PATH` file. A development build runs only when `DAYZ_MCP_DAYZMAKE_SHA256` names its digest. The child
   gets a whitelisted environment (`build_environment()`: `HOME`, `PATH`, the locale, the `XDG_*` directories and
   the names dayzmake reads for the Proton binarize -- `PROTON`, `DAYZ_TOOLS`, `STEAM_ROOT`, `BIOUTPUT`,
   `STEAM_COMPAT_CLIENT_INSTALL_PATH`), not the daemon's whole block. The
   PBO goes to `@Mod/Addons/` (both engines load that spelling on Linux). The `msvcrt` shared build lock is replaced
   by a `byte_lock` port. `security_runtime_audit` accepts exactly one `subprocess.Popen` here, in `run_addon_builder`,
-  with `build_argv(...)` as its only positional argument, `env=build_environment()` when an environment is given,
-  and no keyword outside `stdin`, `stdout`, `stderr`, `env`, `close_fds`, `cwd`, `pass_fds`, `start_new_session`
+  with `build_argv(...)` as its only positional argument, a required `env=build_environment()`,
+  `close_fds=True`, `start_new_session=True`, `pass_fds=(sealed_fd,)`, the pinned streams and `cwd`, and no
+  keyword outside `stdin`, `stdout`, `stderr`, `env`, `close_fds`, `cwd`, `pass_fds`, `start_new_session`
   (so no `shell`, `executable`, `preexec_fn` or `**mapping`); both builders must be single undecorated top-level
-  `def`s of the file. The relay's two Popen calls in `linux_launcher` follow the same rule with `_host_argv` and
-  `_child_environment`. The builders' bodies are trusted, not analysed (`linux_build` is sealed). This is the
-  counterpart of the launcher's AddonBuilder child.
+  `def`s of the file and must be AST-equal to the reviewed sources the audit carries, as must every constant
+  they read. The relay's two Popen calls in `linux_launcher` follow the same rule with `_host_argv` and
+  `_child_environment` (whose extra keys are limited to the four `DAYZ_MCP_*` names and which raises on any
+  other), and `linux_worker_host.py` is audited too: only its two sealed `exec(compile(...))` shapes over
+  archive bytes are allowed there. This is the counterpart of the launcher's AddonBuilder child.
 
 Measured 2026-11-06 (DayZDiag 1.30.164289.70, GE-Proton11-1, `@DayZ_MCP`, scratch `HOME`), all through `dayz_test_run`:
 `mode=all`: bridge `ready` with server and client polls bound to the run about 34 s after `dayz_test_run` returned

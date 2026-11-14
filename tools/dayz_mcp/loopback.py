@@ -11016,8 +11016,9 @@ def _bind_exclusive(port: int, log_sink: LogSink, reclaim_orphans: bool) -> "Exc
         ):
             raise
         # A confirmed-dead-parent dayz_mcp orphan was terminated and the port came
-        # free; retry the exclusive bind exactly once. The exclusive lock stays intact — the bind is
-        # still ExclusiveThreadingHTTPServer with allow_reuse_address False.
+        # free; retry the exclusive bind exactly once. The exclusive lock stays intact: the bind is
+        # still ExclusiveThreadingHTTPServer (exclusive bind on Windows, where
+        # allow_reuse_address is False; it is True only off Windows).
         return ExclusiveThreadingHTTPServer(("127.0.0.1", port), Handler)
 
 

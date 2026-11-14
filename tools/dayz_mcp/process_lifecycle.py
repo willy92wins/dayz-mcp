@@ -455,7 +455,9 @@ def _holder_unattributed(pid: object, name: object) -> bool:
     """
     if name is None:
         return True
-    return pid is None and not (isinstance(name, str) and name.startswith("uid:"))
+    return pid is None and not (
+        os.name != "nt" and isinstance(name, str) and name.startswith("uid:")
+    )
 
 
 def _is_dayz_image(name: object) -> bool:

@@ -1,10 +1,11 @@
 """Linux behaviour for the sealed worker, sealed with it.
 
-This module is a member of ``PACKAGED_MODULES`` (``build_native_launcher.py``) and
-is hashed in ``tools/packaged-modules.lock.json``, so it travels inside ``app.pyz``
-and is verified with the rest of the sealed worker: editing it makes the bundle
-stale (``packaged_module_drift`` / ``invalid_linux_launcher_bundle__stale``) and a
-reseal is required. It is not loaded from the working tree.
+This module is a member of the Linux sealed set (the Windows ``PACKAGED_MODULES``
+plus the Linux overlay, in ``tools/dayz_mcp/linux_launcher.py``) and is hashed in
+``tools/packaged-modules.linux.lock.json``, so it travels inside the Linux
+``app.pyz`` and is verified with the rest of the sealed worker: editing it makes
+the bundle stale (``packaged_module_drift`` / ``invalid_linux_launcher_bundle__stale``)
+and a Linux reinstall is required. It is not loaded from the working tree.
 
 ``install()`` runs first in ``python -m dayz_mcp`` and, outside Windows only, puts
 Linux implementations in place before any other module binds them:

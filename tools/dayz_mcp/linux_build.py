@@ -13,11 +13,18 @@ built only from the validated frame:
   launcher's ``exit_code``, ``ok`` and ``pbo_size``.
 
 The executable is pinned, unlike a bare ``PATH`` lookup: only the v1.0.0 release asset
-runs, matched by ``DAYZMAKE_SHA256`` (its archive is recorded in ``dependency-lock.json``
-and a test keeps the two in step). Anything else is refused as ``dayzmake_pin_mismatch``
-before it starts, unless ``DAYZ_MCP_DAYZMAKE_SHA256`` names the digest of a development
-build. The child gets ``build_environment()``, the daemon's block limited to the names
-dayzmake and Proton read, instead of inheriting all of it.
+runs, matched by ``DAYZMAKE_SHA256`` (the release record lives in
+``tools/packaged-modules.linux.lock.json`` and a test keeps the two in step). The
+``PATH`` result is resolved to an absolute real path, opened without following
+a final symlink, and copied into a sealed ``memfd`` while it is hashed; the
+child executes ``/proc/self/fd/<fd>`` for that sealed image, so the bytes that
+run are the bytes that were hashed. Anything else is refused as
+``dayzmake_pin_mismatch`` before it starts, unless
+``DAYZ_MCP_DAYZMAKE_SHA256`` names the digest of a development build, and a
+host without a usable sealed memfd refuses the build instead of falling back
+to the ``PATH`` file. The child gets ``build_environment()``, the daemon's
+block limited to the names dayzmake and Proton read, instead of inheriting
+all of it.
 
 ``install_worker`` replaces the Win32 parts of the sealed worker's build path and the
 ``msvcrt`` shared build lock in the worker host. The sealed files stay byte-identical.
@@ -45,8 +52,8 @@ MARKER = "$PBOPREFIX$"
 _ERROR_TAIL_BYTES = 8192
 
 # The build tool is not sealed here, so it is pinned by content instead: the
-# executable inside dayzmake-v1.0.0-debian-trixie-x86_64.tar.gz. The archive's own
-# digest lives in dependency-lock.json (remote_artifacts.dayzmake_linux) and
+# executable inside dayzmake-v1.0.0-debian-trixie-x86_64.tar.gz. The release
+# record lives in packaged-modules.linux.lock.json (dayzmake_linux) and
 # test_linux_build checks that the two agree.
 DAYZMAKE_VERSION = "v1.0.0"
 DAYZMAKE_SHA256 = "6626bf1d4ea95c43b607c4b9550dab22549777adbbe58032637e8717bd175d38"
@@ -96,21 +103,81 @@ def expected_sha256() -> str:
 
 
 def resolve_dayzmake() -> tuple[str | None, str]:
-    """The pinned dayzmake on ``PATH``, or ``(None, reason)`` when it must not run."""
+    """The pinned dayzmake on ``PATH`` as an absolute real path, or a refusal."""
     path = shutil.which("dayzmake")
     if path is None:
         return None, f"dayzmake not found on PATH (install the {DAYZMAKE_VERSION} release)\n"
+    absolute = os.path.realpath(os.path.abspath(path))
     try:
-        digest = _file_sha256(path)
+        digest = _file_sha256(absolute)
     except OSError as error:
-        return None, f"dayzmake at {path} is unreadable: {error}\n"
+        return None, f"dayzmake at {absolute} is unreadable: {error}\n"
     expected = expected_sha256()
     if digest != expected:
         return None, (
-            f"dayzmake_pin_mismatch: {path} is sha256 {digest}, expected {expected} "
+            f"dayzmake_pin_mismatch: {absolute} is sha256 {digest}, expected {expected} "
             f"({DAYZMAKE_VERSION}); set {PIN_OVERRIDE_ENV} to pin a development build\n"
         )
-    return path, ""
+    return absolute, ""
+
+
+def _sealed_dayzmake() -> tuple[int | None, str | None, str]:
+    """A sealed memfd holding the pinned dayzmake, its ``/proc`` path, or a refusal.
+
+    Returns ``(descriptor, argv0, "")`` on success; the caller owns the
+    descriptor and closes it once the child has started.
+    """
+    found = shutil.which("dayzmake")
+    if found is None:
+        return None, None, f"dayzmake not found on PATH (install the {DAYZMAKE_VERSION} release)\n"
+    absolute = os.path.realpath(os.path.abspath(found))
+    if not hasattr(os, "memfd_create"):
+        return None, None, "dayzmake_sealed_image_unavailable: memfd_create is unavailable\n"
+    source_fd: int | None = None
+    sealed_fd: int | None = None
+    try:
+        source_fd = os.open(absolute, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        info = os.fstat(source_fd)
+        if not stat.S_ISREG(info.st_mode):
+            return None, None, f"dayzmake at {absolute} is not a regular file\n"
+        flags = getattr(os, "MFD_CLOEXEC", 0) | getattr(os, "MFD_ALLOW_SEALING", 0)
+        sealed_fd = os.memfd_create("dayzmake", flags)
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(source_fd, 1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+            view = memoryview(block)
+            while view:
+                written = os.write(sealed_fd, view)
+                view = view[written:]
+        actual = digest.hexdigest()
+        expected = expected_sha256()
+        if actual != expected:
+            os.close(sealed_fd)
+            sealed_fd = None
+            return None, None, (
+                f"dayzmake_pin_mismatch: {absolute} is sha256 {actual}, expected {expected} "
+                f"({DAYZMAKE_VERSION}); set {PIN_OVERRIDE_ENV} to pin a development build\n"
+            )
+        import fcntl
+
+        seals = (
+            getattr(fcntl, "F_SEAL_SHRINK", 2)
+            | getattr(fcntl, "F_SEAL_GROW", 4)
+            | getattr(fcntl, "F_SEAL_WRITE", 8)
+            | getattr(fcntl, "F_SEAL_SEAL", 1)
+        )
+        fcntl.fcntl(sealed_fd, getattr(fcntl, "F_ADD_SEALS", 1033), seals)
+    except OSError as error:
+        if sealed_fd is not None:
+            os.close(sealed_fd)
+        return None, None, f"dayzmake_sealed_image_unavailable: {absolute}: {error}\n"
+    finally:
+        if source_fd is not None:
+            os.close(source_fd)
+    return sealed_fd, f"/proc/self/fd/{sealed_fd}", ""
 
 
 def _response(ok: bool, size: int = 0) -> bytes:
@@ -140,8 +207,8 @@ def run_addon_builder(
     """The relay's answer to one validated ``ADDON_BUILDER`` frame."""
     if cancelled():
         return _response(False)
-    dayzmake, refusal = resolve_dayzmake()
-    if dayzmake is None:
+    sealed_fd, dayzmake, refusal = _sealed_dayzmake()
+    if dayzmake is None or sealed_fd is None:
         if output_sink is not None:
             output_sink("stderr", refusal.encode("utf-8", "replace"))
         return _response(False)
@@ -157,18 +224,23 @@ def run_addon_builder(
     log = temp / "dayzmake.log"
     try:
         with open(log, "wb") as stream:
-            child = subprocess.Popen(
-                build_argv(dayzmake, payload, str(pending)),
-                stdin=subprocess.DEVNULL,
-                stdout=stream,
-                stderr=subprocess.STDOUT,
-                cwd=str(temp),
-                env=build_environment(),
-                close_fds=True,
-                # Its own process group: a binarizing build runs Proton under dayzmake,
-                # and a cancel must end those too (the job object does on Windows).
-                start_new_session=True,
-            )
+            try:
+                child = subprocess.Popen(
+                    build_argv(dayzmake, payload, str(pending)),
+                    stdin=subprocess.DEVNULL,
+                    stdout=stream,
+                    stderr=subprocess.STDOUT,
+                    cwd=str(temp),
+                    env=build_environment(),
+                    close_fds=True,
+                    pass_fds=(sealed_fd,),
+                    # Its own process group: a binarizing build runs Proton under dayzmake,
+                    # and a cancel must end those too (the job object does on Windows).
+                    start_new_session=True,
+                )
+            finally:
+                os.close(sealed_fd)
+                sealed_fd = -1
             deadline = time.monotonic() + BUILD_DEADLINE_S
             while child.poll() is None:
                 if cancelled() or time.monotonic() > deadline:
