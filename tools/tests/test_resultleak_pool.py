@@ -163,6 +163,7 @@ def translate(text, name, parameters, method_names):
     namespace = {
         "MCPBotControl": SimpleNamespace(ShutdownAll=lambda *_args, **_kwargs: None),
         "MCPSurvivorDrive": SimpleNamespace(ShutdownAll=lambda *_args, **_kwargs: None),
+        "MCPInfectedDrive": SimpleNamespace(ShutdownAll=lambda *_args, **_kwargs: None),
     }
     exec(compile("\n".join(lines) + "\n", "<Enforce-source:" + name + ">", "exec"), namespace, namespace)
     return namespace[name]

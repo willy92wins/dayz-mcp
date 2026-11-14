@@ -60,7 +60,7 @@ Ficheros: `process_lifecycle.py`, `daemon.py`, `dayz_test_tool.py`, `dayz_test_w
   resuelven juntos (LL-324). Con él, el buzón queda en 25 entradas sin resolución; el reparto no cambia.
 - `fb-20260830-010517-9d46` — los modos de `dayz_test_run` viven espejados en 6 sitios sin derivar del dueño
   (`dayz_test_tool.py:17-18`). Parche ya redactado por Vaciado y entregado al par:
-  `%LOCALAPPDATA%\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\parche_modos_dayz_test_tool.py`
+  `%LOCALAPPDATA%\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\parche_modos_dayz_test_tool.py`
   (5470 B, 05:07). Exige rebuild del worker empaquetado; junto con el **punto 3 de `05 8f8c`** (`bad_dayz_test_request`
   sin motivo: `dayz_test_request.py` está en el contrato del bundle) forman UN lote «bundle».
 

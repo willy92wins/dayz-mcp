@@ -971,7 +971,7 @@ class AttestationAndVppTest(unittest.TestCase):
             )
             (named_permissions / "SuperAdmins").mkdir(parents=True)
             (named_permissions / "SuperAdmins" / "SuperAdmins.txt").write_text(
-                "76561198141021937\n", encoding="utf-8"
+                "76561198000000101\n", encoding="utf-8"
             )
             (named_permissions / "credentials.txt").write_text("seeded\n", encoding="utf-8")
             named = native_launcher_transaction.evaluate_vpp_preflight(payload, policy)
@@ -980,7 +980,7 @@ class AttestationAndVppTest(unittest.TestCase):
             legacy = root / "_server" / "profiles" / "VPPAdminTools" / "Permissions"
             (legacy / "SuperAdmins").mkdir(parents=True)
             (legacy / "SuperAdmins" / "SuperAdmins.txt").write_text(
-                "76561198141021937\n", encoding="utf-8"
+                "76561198000000101\n", encoding="utf-8"
             )
             (legacy / "credentials.txt").write_text("seeded\n", encoding="utf-8")
             for item in named_permissions.rglob("*"):

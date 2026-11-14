@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp import bridge_readiness, loopback, result_prune
 from dayz_mcp.server import ServerConfig, build_app
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator, command_requires_lease
@@ -35,11 +36,11 @@ class PublicGameplayToolTest(_ToolCase):
         state = loopback.ServerState("test-key")
         bind_both_peers(state)
         names = sorted(bridge_readiness._BRIDGE_COMMAND_TOOLS["client"])
-        state.record_poll("client", "12~1.30", instance=INST_CLIENT,
+        state.record_poll("client", f"{EXPECTED_BRIDGE_VERSION}~1.30", instance=INST_CLIENT,
                           source_pid=PID_CLIENT, caps=",".join(n for n in names if n != "gameplay_state"))
         self.assertEqual(state.enqueue_command("gameplay_state", {}, peer="client"),
                          (409, {"error": "bridge_capability_missing"}))
-        state.record_poll("client", "12~1.30", instance=INST_CLIENT,
+        state.record_poll("client", f"{EXPECTED_BRIDGE_VERSION}~1.30", instance=INST_CLIENT,
                           source_pid=PID_CLIENT, caps=",".join(names))
         status, body = state.enqueue_command("gameplay_state", {}, peer="client")
         self.assertEqual(status, 200, body)
@@ -110,12 +111,41 @@ class PublicCameraFocusToolTest(_ToolCase):
                     "camera_set_focus", dict(pose, focus_distance=1e9, focus_blur=0.0,
                                              fov=1.0, settle_ticks=4, timeout_s=2.0), _camera_answer(),
                 )
-                expected = dict(pose, focus_distance=1e9, focus_blur=0.0, fov=1.0, settle_ticks=4)
+                expected = dict(
+                    pose,
+                    focus_distance=1e9,
+                    focus_blur=0.0,
+                    focus_length=450.0,
+                    focus_length_near=100.0,
+                    focus_depth_offset=10.0,
+                    fov=1.0,
+                    settle_ticks=4,
+                )
                 if expected["cam_mode"] == "look_at":
                     expected["cam_mode"] = "lookat"
                 self.assertEqual(args, ("camera_set_focus", expected, "client", 2.0))
                 self.assertEqual(loopback.validate_command_args(args[0], args[1]), (True, None))
-                self.assertEqual(result["focus_applied"], {"distance": 1e9, "blur": 0.0})
+                self.assertEqual(
+                    result["focus_applied"],
+                    {"distance": 1e9, "blur": 0.0, "length": 450.0, "length_near": 100.0, "depth_offset": 10.0},
+                )
+        args, result = await self._forwarded(
+            "camera_set_focus",
+            dict(
+                POSE,
+                focus_distance=2.5,
+                focus_blur=0.75,
+                focus_length=700.0,
+                focus_length_near=450.0,
+                focus_depth_offset=12.0,
+            ),
+            _camera_answer(),
+        )
+        self.assertEqual(loopback.validate_command_args(args[0], args[1]), (True, None))
+        self.assertEqual(
+            result["focus_applied"],
+            {"distance": 2.5, "blur": 0.75, "length": 700.0, "length_near": 450.0, "depth_offset": 12.0},
+        )
         self.assertTrue(command_requires_lease("camera_set_focus"))
 
     async def test_bad_focus_and_camera_arguments_never_dispatch(self) -> None:
@@ -124,12 +154,17 @@ class PublicCameraFocusToolTest(_ToolCase):
                         {"focus_distance": 1e-46}, {"focus_distance": math.inf},
                         {"focus_distance": None}, {"focus_distance": True},
                         {"focus_blur": -1.0}, {"focus_blur": 1e9 + 1},
+                        {"focus_length": -1.0}, {"focus_length_near": 1e9 + 1},
+                        {"focus_depth_offset": True}, {"focus_depth_offset": False},
                         {"cam_mode": "bad"}, {"cam_pos": [1.0]}, {"fov": -1.0},
                         {"settle_ticks": 601}, {"timeout_s": -1.0}):
             with self.subTest(changes=changes):
                 error = await self._refused("camera_set_focus", dict(good, **changes))
                 if changes.get("focus_distance") == 1e9 + 1:
                     self.assertIn("bad_args", error)
+                for optional in ("focus_length", "focus_length_near", "focus_depth_offset"):
+                    if optional in changes:
+                        self.assertIn(f"bad_args: {optional} {changes[optional]!r}", error)
         for missing in ("focus_distance", "focus_blur"):
             args = dict(good)
             del args[missing]

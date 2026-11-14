@@ -4,12 +4,15 @@ The initial client-mode catalog is the session and lifecycle core plus the
 reads that need no lease: about 17 KB since fb-20260925-233937-b753 added the
 reads (11 KB before) and about 20 KB since loadout_get, server_perf,
 nav_path_query, players_visibility and scene_entities joined them (fb99,
-2427, 0131, 33c5, 165a), against about 88 KB for the whole catalog. The
+2427, 0131, 33c5, 165a) and about 23 KB with chat_read and ai_group_state
+(0205, 90f9), back to about 19 KB once the listing dropped the schema titles
+Pydantic generates (PX3 c), against about 88 KB for the whole catalog. The
 mutating world_*/vehicle_*/ui_* tools appear only after a lease is held.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -46,6 +49,7 @@ if sys.platform != "win32":
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from dayz_mcp.server import ServerConfig, build_app
+from dayz_mcp.tool_catalog import _drop_generated_titles
 from tests.camera_tool_helpers import _FakeClientRuntime
 from tests._tiers import slow_test
 
@@ -70,6 +74,50 @@ def _catalog_bytes(tools: list[object]) -> int:
 
 def _names(tools: list[object]) -> set[str]:
     return {tool.name for tool in tools}
+
+
+# Every keyword whose value holds subschemas, in JSON Schema 2020-12 and
+# draft-07, listed apart from tool_catalog's walk (PX6 c).
+_MAP_POSITIONS = (
+    "properties", "patternProperties", "$defs", "definitions",
+    "dependentSchemas", "dependencies",
+)
+_LIST_POSITIONS = ("anyOf", "oneOf", "allOf", "prefixItems", "items")
+_ONE_POSITIONS = (
+    "items", "additionalItems", "additionalProperties", "not", "if", "then",
+    "else", "propertyNames", "contains", "unevaluatedItems",
+    "unevaluatedProperties", "contentSchema",
+)
+
+
+def _schema_titles(schema: object, path: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
+    """Paths of the string "title" annotations in a schema's own positions."""
+    found: list[tuple[object, ...]] = []
+    if not isinstance(schema, dict):
+        return found
+    for key, value in schema.items():
+        if key == "title" and isinstance(value, str):
+            found.append(path)
+        elif key in _MAP_POSITIONS and isinstance(value, dict):
+            for name, sub in value.items():
+                found.extend(_schema_titles(sub, (*path, key, name)))
+        elif key in _LIST_POSITIONS and isinstance(value, list):
+            for index, sub in enumerate(value):
+                found.extend(_schema_titles(sub, (*path, key, index)))
+        elif key in _ONE_POSITIONS:
+            found.extend(_schema_titles(value, (*path, key)))
+    return found
+
+
+def _without_titles_at(schema: object, paths: list[tuple[object, ...]]) -> object:
+    """A copy of schema without the "title" at each of those paths."""
+    copied = copy.deepcopy(schema)
+    for path in paths:
+        node = copied
+        for step in path:
+            node = node[step]
+        del node["title"]
+    return copied
 
 
 async def _protocol_list_tools(app) -> list[object]:
@@ -123,6 +171,114 @@ class ProgressiveDisclosureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("world_spawn", names)
         self.assertNotIn("vehicle_control", names)
         self.assertNotIn("ui_dialog", names)
+
+    async def test_initial_catalog_drops_only_the_generated_schema_titles(self) -> None:
+        # PX3 c: the generated titles were about 4 KB of the 23 KB listing.
+        # Mutants killed: the compact listing keeping them, and the full
+        # listing (after the lease) losing them.
+        app, runtime = self._client_app()
+        compact = {tool.name: tool for tool in await app.list_tools()}
+        for name, tool in compact.items():
+            with self.subTest(tool=name):
+                self.assertEqual(_schema_titles(tool.inputSchema), [])
+        feedback = compact["pipeline_feedback"].inputSchema["properties"]
+        self.assertEqual(feedback["title"], {"maxLength": 120, "minLength": 1, "type": "string"})
+        runtime.active_lease_token = "lease-token-after-acquire"
+        full = {tool.name: tool for tool in await app.list_tools()}
+        self.assertIn(("properties", "group_id"), _schema_titles(full["ai_group_state"].inputSchema))
+        # PX6 c: the expected schema is the full one less the titles found,
+        # not _drop_generated_titles again, so a walk that drops more than
+        # those titles fails here.
+        for name, tool in compact.items():
+            with self.subTest(tool=name):
+                source = full[name].inputSchema
+                self.assertEqual(tool.inputSchema, _without_titles_at(source, _schema_titles(source)))
+
+    def test_drop_generated_titles_walks_only_schema_positions(self) -> None:
+        schema = {
+            "title": "exampleArguments",
+            "type": "object",
+            "properties": {
+                "title": {"title": "Title", "type": "string"},
+                "mode": {"title": "Mode", "enum": ["title"], "default": {"title": "x"}},
+                "pair": {"anyOf": [{"title": "A", "type": "integer"}, {"type": "null"}]},
+                "points": {"type": "array", "items": {"title": "Point", "type": "number"}},
+            },
+            "$defs": {"Inner": {"title": "Inner", "type": "object"}},
+        }
+        self.assertEqual(
+            _drop_generated_titles(schema),
+            {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "mode": {"enum": ["title"], "default": {"title": "x"}},
+                    "pair": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                    "points": {"type": "array", "items": {"type": "number"}},
+                },
+                "$defs": {"Inner": {"type": "object"}},
+            },
+        )
+        self.assertEqual(schema["properties"]["title"], {"title": "Title", "type": "string"})
+
+    def test_drop_generated_titles_walks_every_schema_position(self) -> None:
+        # PX6 c: the positions Pydantic does not write today. Each title
+        # there goes; the constraints beside it, a list of property names
+        # under "dependencies", and a "title" in an examples or const value
+        # stay.
+        schema = {
+            "type": "object",
+            "propertyNames": {"type": "string", "title": "Key"},
+            "contains": {"title": "Hit", "type": "integer"},
+            "dependentSchemas": {"mode": {"title": "ModeDeps", "required": ["speed"]}},
+            "dependencies": {
+                "speed": {"title": "SpeedDeps", "required": ["mode"]},
+                "pair": ["mode"],
+            },
+            "if": {"title": "If", "properties": {"mode": {"const": "fast"}}},
+            "then": {"title": "Then", "required": ["speed"]},
+            "else": {"title": "Else", "maxProperties": 2},
+            "additionalItems": {"title": "Extra", "type": "string"},
+            "unevaluatedItems": {"title": "Rest", "type": "boolean"},
+            "unevaluatedProperties": {"title": "Others", "type": "string"},
+            "contentSchema": {"title": "Payload", "type": "object"},
+            "examples": [{"title": "kept"}],
+            "const": {"title": "kept"},
+        }
+        expected = {
+            "type": "object",
+            "propertyNames": {"type": "string"},
+            "contains": {"type": "integer"},
+            "dependentSchemas": {"mode": {"required": ["speed"]}},
+            "dependencies": {"speed": {"required": ["mode"]}, "pair": ["mode"]},
+            "if": {"properties": {"mode": {"const": "fast"}}},
+            "then": {"required": ["speed"]},
+            "else": {"maxProperties": 2},
+            "additionalItems": {"type": "string"},
+            "unevaluatedItems": {"type": "boolean"},
+            "unevaluatedProperties": {"type": "string"},
+            "contentSchema": {"type": "object"},
+            "examples": [{"title": "kept"}],
+            "const": {"title": "kept"},
+        }
+        self.assertEqual(_drop_generated_titles(schema), expected)
+        self.assertEqual(
+            _schema_titles(schema),
+            [
+                ("propertyNames",),
+                ("contains",),
+                ("dependentSchemas", "mode"),
+                ("dependencies", "speed"),
+                ("if",),
+                ("then",),
+                ("else",),
+                ("additionalItems",),
+                ("unevaluatedItems",),
+                ("unevaluatedProperties",),
+                ("contentSchema",),
+            ],
+        )
+        self.assertEqual(_without_titles_at(schema, _schema_titles(schema)), expected)
 
     async def test_client_catalog_reveals_world_vehicle_ui_after_lease(self) -> None:
         app, runtime = self._client_app()

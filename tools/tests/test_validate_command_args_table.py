@@ -97,7 +97,13 @@ def _focus_args(
     else:
         args["cam_pos"] = [0.0, 2.0, 0.0]
         args[aim] = [5.0, 1.0, 5.0] if aim == "look_at" else [90.0, 0.0, 0.0]
-    args.update(focus_distance=2.0, focus_blur=1.5)
+    args.update(
+        focus_distance=2.0,
+        focus_blur=1.5,
+        focus_length=750.0,
+        focus_length_near=500.0,
+        focus_depth_offset=10.0,
+    )
     args.update(overrides)
     if drop:
         del args[drop]
@@ -148,7 +154,83 @@ _BATCH_ITEM: dict[str, object] = {
 }
 
 
+_AI_SPAWN: dict[str, object] = {
+    "faction": "West",
+    "count": 2,
+    "pos": [1.0, 2.0, 3.0],
+    "loadout": "",
+    "formation": "Vee",
+    "behaviour": "HOLD",
+    "waypoints": [],
+    "spawn_token": "a" * 32,
+}
+
+
 _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
+    # Expansion AI adapter (plan 3.1/3.6/4): flat waypoint triples, a
+    # 32-hex token, scene_id only when a scene is named.
+    "ai_group_spawn": (
+        ("valid", dict(_AI_SPAWN), (True, None)),
+        ("valid_scene", {**_AI_SPAWN, "scene_id": "xai"}, (True, None)),
+        ("valid_waypoints", {**_AI_SPAWN, "waypoints": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]}, (True, None)),
+        ("count_zero", {**_AI_SPAWN, "count": 0}, (False, "bad_args")),
+        ("count_nine", {**_AI_SPAWN, "count": 9}, (False, "bad_args")),
+        ("count_float", {**_AI_SPAWN, "count": 1.5}, (False, "bad_args")),
+        ("count_bool", {**_AI_SPAWN, "count": True}, (False, "bad_args")),
+        ("behaviour_lower", {**_AI_SPAWN, "behaviour": "hold"}, (False, "bad_args")),
+        ("waypoints_not_triples", {**_AI_SPAWN, "waypoints": [1.0, 2.0]}, (False, "bad_args")),
+        ("waypoints_nan", {**_AI_SPAWN, "waypoints": [1.0, float("nan"), 3.0]}, (False, "bad_args")),
+        ("waypoints_33", {**_AI_SPAWN, "waypoints": [0.0] * 99}, (False, "bad_args")),
+        ("waypoints_huge_int", {**_AI_SPAWN, "waypoints": [10**400, 0, 0]}, (False, "bad_args")),
+        ("pos_two", {**_AI_SPAWN, "pos": [1.0, 2.0]}, (False, "bad_args")),
+        ("token_upper", {**_AI_SPAWN, "spawn_token": "A" * 32}, (False, "bad_args")),
+        ("loadout_slash", {**_AI_SPAWN, "loadout": "a/b"}, (False, "bad_args")),
+        ("faction_empty", {**_AI_SPAWN, "faction": ""}, (False, "bad_args")),
+        ("faction_65", {**_AI_SPAWN, "faction": "a" * 65}, (False, "bad_args")),
+        ("scene_bad", {**_AI_SPAWN, "scene_id": "a*"}, (False, "bad_args")),
+        ("missing_token", {k: v for k, v in _AI_SPAWN.items() if k != "spawn_token"}, (False, "bad_args")),
+        ("extra_key", {**_AI_SPAWN, "extra": None}, (False, "bad_args")),
+    ),
+    "ai_group_order": (
+        ("valid_behaviour", {"group_id": 1, "behaviour": "HOLD"}, (True, None)),
+        ("valid_formation", {"group_id": 1, "formation": "Vee"}, (True, None)),
+        ("valid_waypoints", {"group_id": 1, "waypoints": [1.0, 2.0, 3.0]}, (True, None)),
+        ("valid_speed", {"group_id": 1, "speed": 3, "speed_set": True}, (True, None)),
+        ("lowercase_behaviour", {"group_id": 1, "behaviour": "hold"}, (False, "bad_args")),
+        ("group_id_zero", {"group_id": 0, "behaviour": "LOOP"}, (False, "bad_args")),
+        ("group_id_bool", {"group_id": True, "behaviour": "LOOP"}, (False, "bad_args")),
+        ("speed_four", {"group_id": 1, "speed": 4, "speed_set": True}, (False, "bad_args")),
+        ("speed_float", {"group_id": 1, "speed": 2.0, "speed_set": True}, (False, "bad_args")),
+        ("speed_set_false", {"group_id": 1, "speed": 2, "speed_set": False}, (False, "bad_args")),
+        ("speed_without_set", {"group_id": 1, "speed": 2}, (False, "bad_args")),
+        ("set_without_speed", {"group_id": 1, "speed_set": True}, (False, "bad_args")),
+        ("waypoints_not_triples", {"group_id": 1, "waypoints": [1.0, 2.0]}, (False, "bad_args")),
+        ("waypoints_empty", {"group_id": 1, "waypoints": []}, (False, "bad_args")),
+        ("waypoints_33", {"group_id": 1, "waypoints": [0.0] * 99}, (False, "bad_args")),
+        ("formation_too_long", {"group_id": 1, "formation": "x" * 65}, (False, "bad_args")),
+        ("extra_key", {"group_id": 1, "behaviour": "HOLD", "extra": 1}, (False, "bad_args")),
+        ("missing_group_id", {"behaviour": "HOLD"}, (False, "bad_args")),
+    ),
+    "ai_group_release": (
+        ("valid", {"spawn_token": "a" * 32}, (True, None)),
+        ("missing", {}, (False, "bad_args")),
+        ("short", {"spawn_token": "a" * 31}, (False, "bad_args")),
+        ("upper", {"spawn_token": "A" * 32}, (False, "bad_args")),
+        ("extra_key", {"spawn_token": "a" * 32, "group_id": 1}, (False, "bad_args")),
+    ),
+    # ai_group_state (90f9): exactly one of group_id and scene_id.
+    "ai_group_state": (
+        ("valid_group", {"group_id": 7}, (True, None)),
+        ("valid_scene", {"scene_id": "scene1"}, (True, None)),
+        ("missing", {}, (False, "bad_args")),
+        ("both_ids", {"group_id": 7, "scene_id": "scene1"}, (False, "bad_args")),
+        ("zero_group", {"group_id": 0}, (False, "bad_args")),
+        ("bool_group", {"group_id": True}, (False, "bad_args")),
+        ("float_group", {"group_id": 1.5}, (False, "bad_args")),
+        ("empty_scene", {"scene_id": ""}, (False, "bad_args")),
+        ("bad_scene", {"scene_id": "a/b"}, (False, "bad_args")),
+        ("extra_key", {"group_id": 7, "extra": None}, (False, "bad_args")),
+    ),
     "gameplay_state": (
         ("valid_empty", {}, (True, None)),
         ("extra_key", {"extra": None}, (False, "bad_args")),
@@ -2493,6 +2575,42 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         # carries it to a bridge that would drop it.
         ("focus_is_camera_set_focus_only", _focus_args(), (False, "bad_args")),
         (
+            "focus_length_alone_rejected",
+            {
+                "cam_mode": "orient",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "cam_orientation": [90.0, 0.0, 0.0],
+                "fov": 0.0,
+                "settle_ticks": 3,
+                "focus_length": 750.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "focus_length_near_alone_rejected",
+            {
+                "cam_mode": "orient",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "cam_orientation": [90.0, 0.0, 0.0],
+                "fov": 0.0,
+                "settle_ticks": 3,
+                "focus_length_near": 500.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "focus_depth_offset_alone_rejected",
+            {
+                "cam_mode": "orient",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "cam_orientation": [90.0, 0.0, 0.0],
+                "fov": 0.0,
+                "settle_ticks": 3,
+                "focus_depth_offset": 10.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
             "extra_key",
             {
                 "cam_mode": "orient",
@@ -2511,7 +2629,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("empty_cam_mode", {"cam_mode": ""}, (False, "bad_args")),
         ("extra_key", {"cam_mode": "get", "extra": None}, (False, "bad_args")),
     ),
-    # 702f: camera_set's five shapes, each with both focus arguments.
+    # 702f: camera_set's five shapes, each with all five OverrideDOF arguments.
     "camera_set_focus": (
         ("valid_orient", _focus_args(), (True, None)),
         ("valid_lookat", _focus_args("lookat", "look_at"), (True, None)),
@@ -2519,9 +2637,17 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("valid_free_look_at", _focus_args("free", "look_at"), (True, None)),
         ("valid_free_orientation", _focus_args("free", "cam_orientation"), (True, None)),
         ("valid_blur_zero", _focus_args(focus_blur=0.0), (True, None)),
+        (
+            "valid_optional_zeros",
+            _focus_args(focus_length=0.0, focus_length_near=0.0, focus_depth_offset=0.0),
+            (True, None),
+        ),
         ("valid_integer_distance", _focus_args(focus_distance=50), (True, None)),
         ("missing_blur", _focus_args(drop="focus_blur"), (False, "bad_args")),
         ("missing_distance", _focus_args(drop="focus_distance"), (False, "bad_args")),
+        ("missing_length", _focus_args(drop="focus_length"), (False, "bad_args")),
+        ("missing_length_near", _focus_args(drop="focus_length_near"), (False, "bad_args")),
+        ("missing_depth_offset", _focus_args(drop="focus_depth_offset"), (False, "bad_args")),
         (
             "camera_set_shape_without_focus",
             {
@@ -2534,6 +2660,9 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             (False, "bad_args"),
         ),
         ("blur_null", _focus_args(focus_blur=None), (False, "bad_args")),
+        ("length_null", _focus_args(focus_length=None), (False, "bad_args")),
+        ("length_near_null", _focus_args(focus_length_near=None), (False, "bad_args")),
+        ("depth_offset_null", _focus_args(focus_depth_offset=None), (False, "bad_args")),
         ("distance_zero", _focus_args(focus_distance=0.0), (False, "bad_args")),
         ("distance_negative", _focus_args(focus_distance=-2.0), (False, "bad_args")),
         ("distance_inf", _focus_args(focus_distance=float("inf")), (False, "bad_args")),
@@ -2543,15 +2672,38 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("blur_negative", _focus_args(focus_blur=-0.1), (False, "bad_args")),
         ("blur_inf", _focus_args(focus_blur=float("inf")), (False, "bad_args")),
         ("blur_bool", _focus_args(focus_blur=False), (False, "bad_args")),
+        ("length_negative", _focus_args(focus_length=-0.1), (False, "bad_args")),
+        ("length_inf", _focus_args(focus_length=float("inf")), (False, "bad_args")),
+        ("length_nan", _focus_args(focus_length=float("nan")), (False, "bad_args")),
+        ("length_bool", _focus_args(focus_length=True), (False, "bad_args")),
+        ("length_near_negative", _focus_args(focus_length_near=-0.1), (False, "bad_args")),
+        ("length_near_inf", _focus_args(focus_length_near=float("inf")), (False, "bad_args")),
+        ("length_near_nan", _focus_args(focus_length_near=float("nan")), (False, "bad_args")),
+        ("length_near_bool", _focus_args(focus_length_near=False), (False, "bad_args")),
+        ("depth_offset_negative", _focus_args(focus_depth_offset=-0.1), (False, "bad_args")),
+        ("depth_offset_inf", _focus_args(focus_depth_offset=float("inf")), (False, "bad_args")),
+        ("depth_offset_nan", _focus_args(focus_depth_offset=float("nan")), (False, "bad_args")),
+        ("depth_offset_bool", _focus_args(focus_depth_offset=True), (False, "bad_args")),
         # The tool's bounds (camera_path.focus_distance and focus_blur): at most
         # 1e9, and above 0 still as the bridge's 32-bit float.
         ("valid_distance_at_the_bound", _focus_args(focus_distance=1e9), (True, None)),
         ("valid_distance_least_float", _focus_args(focus_distance=1e-45), (True, None)),
         ("valid_blur_least_float", _focus_args(focus_blur=1e-45), (True, None)),
+        (
+            "valid_optionals_at_bounds",
+            _focus_args(focus_length=1e9, focus_length_near=1e-45, focus_depth_offset=1e9),
+            (True, None),
+        ),
         ("distance_1e100", _focus_args(focus_distance=1e100), (False, "bad_args")),
         ("distance_1e-46", _focus_args(focus_distance=1e-46), (False, "bad_args")),
         ("blur_1e100", _focus_args(focus_blur=1e100), (False, "bad_args")),
         ("blur_1e-46", _focus_args(focus_blur=1e-46), (False, "bad_args")),
+        ("length_1e100", _focus_args(focus_length=1e100), (False, "bad_args")),
+        ("length_1e-46", _focus_args(focus_length=1e-46), (False, "bad_args")),
+        ("length_near_1e100", _focus_args(focus_length_near=1e100), (False, "bad_args")),
+        ("length_near_1e-46", _focus_args(focus_length_near=1e-46), (False, "bad_args")),
+        ("depth_offset_1e100", _focus_args(focus_depth_offset=1e100), (False, "bad_args")),
+        ("depth_offset_1e-46", _focus_args(focus_depth_offset=1e-46), (False, "bad_args")),
         ("alias_never_on_the_wire", _focus_args("look_at", "look_at"), (False, "bad_args")),
         ("extra_key", _focus_args(extra=None), (False, "bad_args")),
     ),
@@ -2653,6 +2805,17 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("null", {"visible": None}, (False, "bad_args")),
         ("missing_visible", {}, (False, "bad_args")),
         ("extra_key", {"visible": True, "extra": None}, (False, "bad_args")),
+    ),
+    # beb3: active is a JSON bool and the only key.
+    "dev_free_camera_set": (
+        ("valid_on", {"active": True}, (True, None)),
+        ("valid_off", {"active": False}, (True, None)),
+        ("int_one", {"active": 1}, (False, "bad_args")),
+        ("int_zero", {"active": 0}, (False, "bad_args")),
+        ("string_true", {"active": "true"}, (False, "bad_args")),
+        ("null", {"active": None}, (False, "bad_args")),
+        ("missing_active", {}, (False, "bad_args")),
+        ("extra_key", {"active": True, "extra": None}, (False, "bad_args")),
     ),
     "engine_set": (
         ("valid_start", {"mode": "start"}, (True, None)),
@@ -2887,6 +3050,20 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("missing_emote", {"wait_s": 10.0}, (False, "bad_args")),
         ("object_id", {"emote": "sita", "wait_s": 10.0, "object_id": 1}, (False, "bad_args")),
         ("extra_key", {"emote": "sita", "wait_s": 10.0, "extra": None}, (False, "bad_args")),
+    ),
+    # ai_emote (36fa NPC): actor_emote's catalog and bounds plus object_id.
+    "ai_emote": (
+        ("valid", {"object_id": 1, "emote": "nod", "wait_s": 10.0}, (True, None)),
+        ("valid_end", {"object_id": 7, "emote": "end", "wait_s": 0.5}, (True, None)),
+        ("wait_at_maximum", {"object_id": 1, "emote": "sita", "wait_s": 30.0}, (True, None)),
+        ("unknown_emote", {"object_id": 1, "emote": "nope", "wait_s": 10.0}, (False, "bad_args")),
+        ("object_id_zero", {"object_id": 0, "emote": "nod", "wait_s": 10.0}, (False, "bad_args")),
+        ("object_id_bool", {"object_id": True, "emote": "nod", "wait_s": 10.0}, (False, "bad_args")),
+        ("object_id_string", {"object_id": "1", "emote": "nod", "wait_s": 10.0}, (False, "bad_args")),
+        ("missing_object_id", {"emote": "nod", "wait_s": 10.0}, (False, "bad_args")),
+        ("wait_below", {"object_id": 1, "emote": "sita", "wait_s": 0.49}, (False, "bad_args")),
+        ("wait_nan", {"object_id": 1, "emote": "sita", "wait_s": float("nan")}, (False, "bad_args")),
+        ("extra_key", {"object_id": 1, "emote": "sita", "wait_s": 10.0, "extra": None}, (False, "bad_args")),
     ),
     # survivor_drive_release (c801), internal: the id of one drive command and
     # its survivor's object_id, both required.

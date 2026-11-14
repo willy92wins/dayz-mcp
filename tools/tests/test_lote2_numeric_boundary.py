@@ -130,9 +130,24 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 1 from 035a (vehicle_telemetry pos; timeout_s was already counted).
         # + 1 from B3 (player_find timeout_s; name is a string).
         # + 12 from 263-T (gameplay_state, camera_path_release, camera_set_focus).
+        # + 1 from 173a (ai_group_spawn timeout_s; count is untyped so 1.5/true
+        # read bad_args, pos and waypoints are lists, the rest strings).
+        # + 2 from 3ca5 (ai_group_order group_id/timeout_s; behaviour,
+        # formation and speed are strings and waypoints a list).
+        # + 2 from 90f9 (ai_group_state group_id/timeout_s; scene_id is a
+        # string, not in this census).
+        # + 1 from 36fa NPC (actor_emote object_id; no new tool).
         # + 3 from 0205 (chat_read marker/max_lines/timeout_s).
         # + 1 from 726c (ui_pause timeout_s).
-        self.assertEqual(len(rows), 242)
+        # + 6 from 702f OverrideDOF (camera_set and camera_set_focus focus_length/focus_length_near/focus_depth_offset).
+        # + 1 from beb3 (dev_free_camera_set timeout_s; active is a bool).
+        self.assertEqual(len(rows), 255)
+        self.assertIn(("actor_emote", "object_id", "int"), rows)
+        self.assertIn(("ai_group_order", "group_id", "int"), rows)
+        self.assertIn(("ai_group_order", "timeout_s", "float"), rows)
+        self.assertIn(("ai_group_state", "group_id", "int"), rows)
+        self.assertIn(("ai_group_state", "timeout_s", "float"), rows)
+        self.assertIn(("dev_free_camera_set", "timeout_s", "float"), rows)
         self.assertIn(("chat_read", "marker", "int"), rows)
         self.assertIn(("chat_read", "max_lines", "int"), rows)
         self.assertIn(("chat_read", "timeout_s", "float"), rows)
@@ -166,8 +181,15 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("survivor_drive", "heading", "float"), rows)
         self.assertIn(("survivor_drive", "timeout_s", "float"), rows)
         self.assertIn(("camera_path_play", "timeout_s", "float"), rows)
-        self.assertIn(("camera_set", "focus_distance", "float"), rows)
-        self.assertIn(("camera_set", "focus_blur", "float"), rows)
+        for tool in ("camera_set", "camera_set_focus"):
+            for name in (
+                "focus_distance",
+                "focus_blur",
+                "focus_length",
+                "focus_length_near",
+                "focus_depth_offset",
+            ):
+                self.assertIn((tool, name, "float"), rows)
         self.assertIn(("hud_set", "timeout_s", "float"), rows)
         self.assertIn(("hands_attach", "object_id", "int"), rows)
         self.assertIn(("hands_attach", "timeout_s", "float"), rows)

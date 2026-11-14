@@ -30,7 +30,7 @@ fallo que este encargo está diseñado para evitar.
 
   - Workspace: el directorio en el que estás. Contiene `tools/`, `addon/` y `gate/`.
   - Intérprete, exacto y sin alternativa:
-      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+      %USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
   - **Esa venv NO tiene pytest.** La suite es `unittest`. Un comando con `pytest` falla con
     "No module named pytest" y no significa nada sobre tu código.
   - Para importar el paquete: `cd tools` y `PYTHONPATH=.`

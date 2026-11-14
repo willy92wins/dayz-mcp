@@ -1,8 +1,8 @@
-Set-Location -LiteralPath 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools'
+Set-Location -LiteralPath '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools'
 $env:PYTHONIOENCODING='utf-8'
 $env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
-& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -m unittest tests.test_night0909_entity_wait -v
+$env:PYTHONPATH='%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
+& '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -m unittest tests.test_night0909_entity_wait -v
 
 test_absence_can_satisfy_explicit_found_false (tests.test_night0909_entity_wait.EntityWaitTest.test_absence_can_satisfy_explicit_found_false) ... ok
 test_absence_cannot_satisfy_zero_cargo (tests.test_night0909_entity_wait.EntityWaitTest.test_absence_cannot_satisfy_zero_cargo) ... ok

@@ -99,7 +99,7 @@ WRITE-SET, y nada fuera de él:
 PROHIBIDO: `tools/dayz_mcp/`; `gate/`; `addon/`; `unittest.skip`/`expectedFailure`; borrar o
 renombrar tests salvo P-I5; tocar `allowed_red.txt`; red.
 
-Intérprete: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`,
+Intérprete: `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`,
 desde `tools/` con `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1`. Tus mutantes van a una copia bajo
 `%TEMP%`, nunca al workspace. La versión anterior de los tests está en `../../ws-frozen-r1/tools/tests/`.
 

@@ -155,7 +155,7 @@ The fixture-suite attempt ran **33 tests, with 27 environment errors and two ski
 ## PREMISE
 
 - **`REPORT.md` is absent.** The implementer’s report could not be reviewed.
-- **Reseal instructions conflict.** `C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\brief_r1.md:4` explicitly prohibits implementer resealing and assigns it to deployment; its embedded specification requires resealing for acceptance. This needs an explicit acceptance-stage resolution. An old bundle’s source pins already fail against this tree with `invalid_native_launcher_bundle__dayz_test_worker_sha256`, independently reproduced.
+- **Reseal instructions conflict.** `%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\brief_r1.md:4` explicitly prohibits implementer resealing and assigns it to deployment; its embedded specification requires resealing for acceptance. This needs an explicit acceptance-stage resolution. An old bundle’s source pins already fail against this tree with `invalid_native_launcher_bundle__dayz_test_worker_sha256`, independently reproduced.
 - **The supplied patch omits the root README change present in this tree.** Therefore, applying `DIFF.patch` alone does not reproduce every reviewed change.
 - The injected October 1 LIVE-STATE is older than this batch and was not treated as its current baseline.
 

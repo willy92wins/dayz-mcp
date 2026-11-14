@@ -13,7 +13,7 @@ the same family of findings reappeared in every round, in the single-role warnin
 | r4 | a legacy `[Logout]` completion bypasses the trailing-block check |
 | r5 (orchestrator fix) | a later confirmed connection inherits an older legacy close; a neutral `[Login]` read before a legacy close does not stop the early return |
 
-What worked and stays as evidence in the batch workspace (`C:\Users\guill\dzmcp_gauntlet\r2a_855c_2986\ws`, not merged):
+What worked and stays as evidence in the batch workspace (`%USERPROFILE%\dzmcp_gauntlet\r2a_855c_2986\ws`, not merged):
 the neutral cursor ([Login]/[StateMachine] + `<CREATE NEW CHAR>`/`<LOAD EXISTING CHAR>` + correlated
 `[Disconnect]: Finish`), the 1.29 and 1.30 fixtures, and the close's logout watcher. The logout watcher behaved conservatively in the specific trailing-block reproduction checked in r3 and the reconnect reproduction rechecked in r4; live acceptance remains unverified.
 

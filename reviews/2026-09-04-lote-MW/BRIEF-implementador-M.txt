@@ -62,7 +62,7 @@ S1. ENTORNO - verificado hoy, no lo asumas de otra forma
     `addon/` esta SOLO para que los tests que leen `MCPBridge.c` encuentren su raiz: es de
     solo lectura y nada de este lote lo modifica.
   - Interprete, exacto y sin alternativa:
-      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+      %USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
   - **Esa venv NO tiene pytest.** La suite es `unittest`. Un test escrito como funcion suelta
     `def test_*` a nivel de modulo NO se colecciona: escribe clases `unittest.TestCase` /
     `unittest.IsolatedAsyncioTestCase`.

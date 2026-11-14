@@ -4,33 +4,33 @@ Correccion R2 completada sobre la ronda 1 existente. Gate final: 42 tests, OK (s
 
 | Ruta absoluta | Bytes antes -> despues | Cambio |
 |---|---:|---|
-| `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\host_config.py` | 46293 -> 46471 | Restituye la identidad inicial en relectura/reopen; conserva el parser estricto y la equivalencia semantica del contenido. |
-| `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_mcp_host_timeouts.py` | 42504 -> 44085 | Renombra el control positivo del salto de linea; anade un hermano negativo para ambos hosts y ambas lecturas finales. El test de rebind queda intacto. |
-| `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_provenance_gate.py` | 12339 -> 12711 | El double de deriva modifica bytes manteniendo identidad; conserva el reemplazo real entre peticiones y comprueba una unica llamada de transporte en T1. |
-| `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\host_config.py.r2-before` | 0 -> 46293 | Preimagen exacta de host_config al inicio de R2. |
-| `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\test_mcp_host_timeouts.py.r2-before` | 0 -> 42504 | Preimagen exacta de los tests del host al inicio de R2. |
-| `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\test_provenance_gate.py.r2-before` | 0 -> 12339 | Preimagen exacta de T1/T2/T3 al inicio de R2. |
-| `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\r2-baseline.json` | 0 -> 1161 | Bytes y SHA256 iniciales de fuentes, ficheros preservados e indice. |
-| `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\r2-baseline-gate.log` | 0 -> 9926 | Ejecucion previa completa: reproduce los dos fallos del brief. |
-| `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\r2-gate.log` | 0 -> 8600 | Comando, entorno, salida completa y exit code del gate final. |
-| `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\r2-changes.patch` | 0 -> 7060 | Diff exclusivo R1 -> R2 contra las preimagenes, sin mezclar otras lanes. |
-| `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\r2-verification.log` | 0 -> 1976 | Diff-check, hashes, preservacion del indice y del test de rebind. |
-| `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\STATE-r2.md` | 0 -> 12505 | Este informe A-E, escrito por tramos y verificado tras cada escritura. |
-| `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\DONE-r2` | 0 -> 0 | Marcador vacio de entrega completada. |
+| `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\host_config.py` | 46293 -> 46471 | Restituye la identidad inicial en relectura/reopen; conserva el parser estricto y la equivalencia semantica del contenido. |
+| `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_mcp_host_timeouts.py` | 42504 -> 44085 | Renombra el control positivo del salto de linea; anade un hermano negativo para ambos hosts y ambas lecturas finales. El test de rebind queda intacto. |
+| `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_provenance_gate.py` | 12339 -> 12711 | El double de deriva modifica bytes manteniendo identidad; conserva el reemplazo real entre peticiones y comprueba una unica llamada de transporte en T1. |
+| `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\host_config.py.r2-before` | 0 -> 46293 | Preimagen exacta de host_config al inicio de R2. |
+| `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\test_mcp_host_timeouts.py.r2-before` | 0 -> 42504 | Preimagen exacta de los tests del host al inicio de R2. |
+| `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\test_provenance_gate.py.r2-before` | 0 -> 12339 | Preimagen exacta de T1/T2/T3 al inicio de R2. |
+| `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\r2-baseline.json` | 0 -> 1161 | Bytes y SHA256 iniciales de fuentes, ficheros preservados e indice. |
+| `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\r2-baseline-gate.log` | 0 -> 9926 | Ejecucion previa completa: reproduce los dos fallos del brief. |
+| `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\r2-gate.log` | 0 -> 8600 | Comando, entorno, salida completa y exit code del gate final. |
+| `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\r2-changes.patch` | 0 -> 7060 | Diff exclusivo R1 -> R2 contra las preimagenes, sin mezclar otras lanes. |
+| `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\r2-verification.log` | 0 -> 1976 | Diff-check, hashes, preservacion del indice y del test de rebind. |
+| `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\STATE-r2.md` | 0 -> 12505 | Este informe A-E, escrito por tramos y verificado tras cada escritura. |
+| `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\provenance-2026-09-08\DONE-r2` | 0 -> 0 | Marcador vacio de entrega completada. |
 
-**[1] Bundle pendiente, declarado sin arreglar:** `host_config.py` esta en `PACKAGED_MODULES` (`tools/build_native_launcher.py:53-72`, entrada en :62). Necesita resellado posterior para incorporar estos bytes; NO se ejecuto el build ni se modifico el bundle. El rojo `test_closure_manifest_is_canonical_exact_and_matches_live_bytes` fue comunicado por el receptor y es coherente con su comprobacion en `tools/tests/test_native_launcher_bundle.py:161-166`; no lo he vuelto a ejecutar. Su fichero `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py` permanece en 36034 -> 36034 bytes y con el mismo SHA256.
+**[1] Bundle pendiente, declarado sin arreglar:** `host_config.py` esta en `PACKAGED_MODULES` (`tools/build_native_launcher.py:53-72`, entrada en :62). Necesita resellado posterior para incorporar estos bytes; NO se ejecuto el build ni se modifico el bundle. El rojo `test_closure_manifest_is_canonical_exact_and_matches_live_bytes` fue comunicado por el receptor y es coherente con su comprobacion en `tools/tests/test_native_launcher_bundle.py:161-166`; no lo he vuelto a ejecutar. Su fichero `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py` permanece en 36034 -> 36034 bytes y con el mismo SHA256.
 
-Conservados byte a byte desde el arranque: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\control_client.py` (31868 -> 31868), incluido `_policy_revalidation_cause`; `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\daemon_policy.py` (13400 -> 13400); el constructor nativo y `.git/index` (hashes en r2-verification.log). Sin git add, commit ni stash, por prohibicion expresa y revision pendiente de Claude. STATE.md/DONE y demas evidencia de R1 no se sobrescribieron; se usan los nombres R2 especificos del entregable.
+Conservados byte a byte desde el arranque: `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\control_client.py` (31868 -> 31868), incluido `_policy_revalidation_cause`; `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\daemon_policy.py` (13400 -> 13400); el constructor nativo y `.git/index` (hashes en r2-verification.log). Sin git add, commit ni stash, por prohibicion expresa y revision pendiente de Claude. STATE.md/DONE y demas evidencia de R1 no se sobrescribieron; se usan los nombres R2 especificos del entregable.
 
 ## B - Resultado de las pruebas
 
 Ejecutado dos veces, antes y despues de la correccion, mediante subprocess con este comando literal:
 
 ```text
-cwd = C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools
-PYTHONPATH = C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev
+cwd = %USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools
+PYTHONPATH = %USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev
 PYTHONDONTWRITEBYTECODE = 1
-"C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m unittest tests.test_mcp_host_timeouts tests.test_provenance_gate -v
+"%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m unittest tests.test_mcp_host_timeouts tests.test_provenance_gate -v
 ```
 
 Antes, salida literal de r2-baseline-gate.log (dos fallos: rebind y rechazo indebido del salto de linea):

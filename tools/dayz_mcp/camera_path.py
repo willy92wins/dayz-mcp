@@ -7,8 +7,8 @@ Every bound below mirrors theirs, so a request this module builds is one the
 bridge accepts, and the loopback ingress checks the same wire shape with
 validate_command_args. The bridge reads every number as a 32-bit float, so
 the times are compared, and fov is checked above 0, as that float holds them.
-camera_set_focus's focus_distance and focus_blur (inbox 702f) are checked here
-too, with the same bound and the same float, by the tool and by the ingress.
+camera_set_focus's five OverrideDOF values (inbox 702f) are checked here too,
+with the same bound and the same float, by the tool and by the ingress.
 """
 from __future__ import annotations
 

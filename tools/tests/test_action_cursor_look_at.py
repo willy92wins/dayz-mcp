@@ -11,6 +11,7 @@ import math
 import time
 import unittest
 
+from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp.action_cursor import (
     SLOT_NAMES,
     CursorContractError,
@@ -371,14 +372,14 @@ def _status(run_id: str = "run-a", generation: str = "gen-1") -> dict:
             "run_id": run_id,
             "instance_prefix": "abcd1234",
             "binding_token": "client-token",
-            "version": "12~1.29",
+            "version": f"{EXPECTED_BRIDGE_VERSION}~1.29",
             "capabilities": announced,
         },
         "server_peer": {
             "run_id": run_id,
             "instance_prefix": "abcd1234",
             "binding_token": "server-token",
-            "version": "12~1.29",
+            "version": f"{EXPECTED_BRIDGE_VERSION}~1.29",
             "capabilities": announced,
         },
     }
@@ -530,7 +531,7 @@ class LookAtModeTests(unittest.TestCase):
         state.install_bound_peer(instance=server_id, role="server", pid=12, run_id="r", creation_time_utc=created)
         state.record_poll(
             "client",
-            version="12~1.29.0",
+            version=f"{EXPECTED_BRIDGE_VERSION}~1.29.0",
             instance=client_id,
             source_pid=11,
             source_creation_time=created,
@@ -538,7 +539,7 @@ class LookAtModeTests(unittest.TestCase):
         )
         state.record_poll(
             "server",
-            version="12~1.29.0",
+            version=f"{EXPECTED_BRIDGE_VERSION}~1.29.0",
             instance=server_id,
             source_pid=12,
             source_creation_time=created,
@@ -682,7 +683,7 @@ def _bind_run(state: ServerState, client_id: str, client_pid: int) -> str:
         state.install_bound_peer(instance=server_id, role="server", pid=12, run_id="r", creation_time_utc=created)
     state.record_poll(
         "client",
-        version="12~1.29.0",
+        version=f"{EXPECTED_BRIDGE_VERSION}~1.29.0",
         instance=client_id,
         source_pid=client_pid,
         source_creation_time=created,
@@ -691,7 +692,7 @@ def _bind_run(state: ServerState, client_id: str, client_pid: int) -> str:
     )
     state.record_poll(
         "server",
-        version="12~1.29.0",
+        version=f"{EXPECTED_BRIDGE_VERSION}~1.29.0",
         instance=server_id,
         source_pid=12,
         source_creation_time=created,
@@ -773,7 +774,7 @@ class Round4RegressionTests(unittest.TestCase):
             self.assertIsNotNone(command_id)
             status, polled = state.record_poll(
                 "client",
-                version="12~1.29.0",
+                version=f"{EXPECTED_BRIDGE_VERSION}~1.29.0",
                 instance=client_id,
                 source_pid=11,
                 source_creation_time=created,
@@ -824,7 +825,7 @@ class BrokerFenceTests(unittest.IsolatedAsyncioTestCase):
 
         second = "11111111-2222-4222-8222-222222222222"
         created = "2026-08-18T00:00:00.000000Z"
-        version = "12~1.29.0"
+        version = f"{EXPECTED_BRIDGE_VERSION}~1.29.0"
 
         def announce(state, client: str, pid: int) -> None:
             state.record_poll(
@@ -927,7 +928,7 @@ class BrokerFenceTests(unittest.IsolatedAsyncioTestCase):
         from tests.broker_binding_helpers import ProbeLifecycle as _Lifecycle
 
         created = "2026-08-18T00:00:00.000000Z"
-        version = "12~1.29.0"
+        version = f"{EXPECTED_BRIDGE_VERSION}~1.29.0"
         fixture = self._open(coordination=True)
         fixture.state.lifecycle = _Lifecycle("run-broker")
         fixture.bind(INST_SERVER, "server", PID_SERVER, run_id="run-broker")

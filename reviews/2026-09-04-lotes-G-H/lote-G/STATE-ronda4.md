@@ -2,7 +2,7 @@
 
 N1/N5 — el enqueue ya no tira el `run_id` del binding. Lo captura bajo `ServerState._lock` y lo pasa a `record_command_activity(run_id)` en las dos ramas; el respaldo por dueño/cardinalidad queda solo si no hay identidad exacta.
 
-- `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-G\ws\tools\dayz_mcp\loopback.py:223-228` `_binding_run_id`
+- `%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-G\ws\tools\dayz_mcp\loopback.py:223-228` `_binding_run_id`
 - `:1535-1580` rama normal: `commanded_run_id` bajo el lock, luego `_note_run_command_activity(..., run_id=)`
 - `:1645-1701` rama `_enqueue_exec_enforce`, igual
 - `:1706-1726` `_note_run_command_activity`: identidad exacta → `record_command_activity`; si no hay, `record_box_command_activity`

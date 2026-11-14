@@ -24,7 +24,7 @@ Ninguna lane recibió `--skill`: trato idéntico.
 
 | # | lane | encargo | resultado |
 |---|---|---|---|
-| 1 | flash-next | triaje, brief **sin** fronteras | **NO ENTREGA.** 14 turnos, 900 llamadas a `ipython`, se fue a listar `C:\Users\guill` (`.claude`, `.cursor`, `.grok`…). Abortado a ~6 min |
+| 1 | flash-next | triaje, brief **sin** fronteras | **NO ENTREGA.** 14 turnos, 900 llamadas a `ipython`, se fue a listar `%USERPROFILE%` (`.claude`, `.cursor`, `.grok`…). Abortado a ~6 min |
 | 2 | flash-next | triaje, **+4 líneas de frontera** | **ENTREGA. 25 s, 1 turno, 7.001 tokens, `stopReason: stop`** |
 | 3 | agy | triaje | **ENTREGA. 10,8 s, 1 turno** |
 | 4 | agy | recortes, `--mode plan` | **NO ENTREGA.** `denied_actions: [{action: command}]`, `response: ""` |
@@ -84,5 +84,5 @@ Las tres propuestas de recorte de agy (corrida 5), **verificadas una a una abrie
 
 ## Pendiente de limpiar
 
-Worktree en `C:\Users\guill\AppData\Local\Temp\piloto-mcp` (con junction al venv) y salidas en
+Worktree en `%USERPROFILE%\AppData\Local\Temp\piloto-mcp` (con junction al venv) y salidas en
 `piloto-out`. `git worktree remove` cuando ya no haga falta.

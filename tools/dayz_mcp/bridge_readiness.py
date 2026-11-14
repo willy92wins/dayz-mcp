@@ -8,6 +8,7 @@ server.py imports every name back, so dayz_mcp.server.<name> is the same object.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from dayz_mcp.agent_loop import next_step
@@ -334,6 +335,266 @@ def server_arg_contract_hash() -> str:
 EXPECTED_SERVER_ARG_CONTRACT_HASH = server_arg_contract_hash()
 
 
+# Expansion AI adapter contract (expansion-ai-adapter plan 2.2): a separate
+# contract so the adapter never changes SERVER_ARG_CONTRACT or ach=. The
+# adapter announces its hash as poll xai=. Keys are the full arg sets spawn,
+# order, state and release will use, fixed here so later PRs do not change
+# the hash. Inherited keys keep their base types (pos, object_id, speed,
+# speed_set, scene_id in MCPMessages.c MCPArgs).
+EXPANSION_AI_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
+    "ai_emote": ("emote", "object_id", "wait_s"),
+    "ai_group_order": ("behaviour", "formation", "group_id", "speed", "speed_set", "waypoints"),
+    "ai_group_release": ("spawn_token",),
+    "ai_group_spawn": (
+        "behaviour",
+        "count",
+        "faction",
+        "formation",
+        "loadout",
+        "pos",
+        "scene_id",
+        "spawn_token",
+        "waypoints",
+    ),
+    "ai_group_state": ("group_id", "scene_id"),
+}
+
+# Adapter verbs are optional in the census: a run without Expansion stays
+# match when they are not announced (plan 2.2).
+EXPANSION_AI_COMMANDS = frozenset(EXPANSION_AI_ARG_CONTRACT)
+# Public adapter tools registered so far; each adapter PR adds its own, so a
+# census without them never makes the comparator demand an unshipped tool.
+EXPANSION_AI_TOOLS = frozenset({
+    "ai_group_order",
+    "ai_group_spawn",
+    "ai_group_state",
+})
+
+
+def expansion_ai_arg_contract_canonical() -> str:
+    """Stable, newline-joined `cmd=k1,k2` lines (keys sorted, cmds sorted)."""
+
+    return "\n".join(
+        f"{cmd}={','.join(keys)}"
+        for cmd, keys in sorted(EXPANSION_AI_ARG_CONTRACT.items())
+    )
+
+
+def expansion_ai_arg_contract_hash() -> str:
+    """First 16 hex chars of sha256(canonical). Must match MCPExpansionAI.c."""
+
+    import hashlib
+
+    return hashlib.sha256(
+        expansion_ai_arg_contract_canonical().encode("utf-8")
+    ).hexdigest()[:16]
+
+
+EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH = expansion_ai_arg_contract_hash()
+
+# Adapter verb announcement (r1 H3, #321): the adapter does NOT add its verb
+# names to caps= (the saturated poll would pass 1024 chars). Its poll carries
+# &xai=<16 hex>.<bitmask> instead, one bit per verb in the order below. The
+# bit order is part of the adapter contract: append only, never reorder. The
+# broker expands the mask to names before storing the census, so admission
+# and the capability comparator keep seeing names. Provisional deviation
+# from plan 2.2, pending confirmation (docs/expansion-ai-adapter.md).
+EXPANSION_AI_VERB_BITS: tuple[str, ...] = (
+    "ai_group_release",
+    "ai_group_spawn",
+    "ai_group_order",
+    "ai_group_state",
+    "ai_emote",
+)
+_XAI_ANNOUNCE = re.compile(r"\A([0-9a-f]{16})\.(0|[1-9][0-9]{0,3})\Z")
+
+
+# Capability census as a bitmask (capsbits): both bridges announce their
+# census on every poll as cm=<epoch>.<hex> instead of the name list, so the
+# poll URL stays far below the engine limit however many verbs are added.
+# This module is the single source of the bit order: bit i is the name at
+# index i. Append only from now on: a new verb goes at the end, a retired
+# verb keeps its slot (its bit is simply never set again); never reorder,
+# never reuse a slot. A non-append change ships as a new epoch while the
+# epoch-1 table below stays decodable.
+CAPABILITY_MASK_EPOCH = 1
+CAPABILITY_MASK_MAX_BITS = 256
+SERVER_CAPABILITY_BITS: tuple[str, ...] = (
+    "action_cursor_ids",
+    "bot_start",
+    "bot_stop",
+    "entities_query",
+    "exec_enforce",
+    "hands_attach",
+    "hands_take",
+    "infected_drive",
+    "inventory_attach",
+    "inventory_give",
+    "inventory_move",
+    "lease_close",
+    "loadout_apply",
+    "loadout_clear",
+    "loadout_get",
+    "nav_path_query",
+    "notify_players",
+    "object_anim",
+    "object_delete",
+    "object_doors",
+    "object_inspect",
+    "object_resolve",
+    "object_set_health",
+    "player_godmode",
+    "player_heal",
+    "player_kill",
+    "player_teleport",
+    "players_visibility",
+    "query_all_players",
+    "query_get_in_condition",
+    "query_player_state",
+    "scene_clear",
+    "scene_entities",
+    "scene_raycast",
+    "server_perf",
+    "surface_query",
+    "survivor_drive",
+    "survivor_drive_release",
+    "telemetry_read",
+    "vehicle_door",
+    "vehicle_enter",
+    "vehicle_prepare_fixture",
+    "weapon_state",
+    "world_spawn",
+    "world_spawn_batch",
+    "world_time_get",
+    "world_time_set",
+    "world_weather_set",
+)
+CLIENT_CAPABILITY_BITS: tuple[str, ...] = (
+    "action_cursor",
+    "action_hold",
+    "action_hold_cancel",
+    "action_use",
+    "action_use_component",
+    "action_use_door",
+    "action_use_target",
+    "actor_emote",
+    "anim_timeline",
+    "camera_get",
+    "camera_path_play",
+    "camera_path_release",
+    "camera_set",
+    "camera_set_focus",
+    "chat_read",
+    "dev_free_camera_set",
+    "engine_set",
+    "gameplay_state",
+    "hud_set",
+    "input_describe",
+    "input_trigger",
+    "key_press",
+    "lease_close_client",
+    "player_look_at",
+    "player_look_at_release",
+    "player_move",
+    "player_respawn",
+    "player_trace",
+    "player_view_set",
+    "restore_gameplay",
+    "ui_click",
+    "ui_dialog",
+    "ui_focus",
+    "ui_pause",
+    "ui_reload_layout",
+    "ui_set_text",
+    "ui_tree",
+    "vehicle_control",
+    "vehicle_get_in_client",
+    "vehicle_release",
+    "vehicle_telemetry",
+    "vehicle_trace",
+    "weapon_aim",
+    "weapon_fire",
+    "weapon_raise",
+    "weapon_sights",
+)
+CAPABILITY_MASK_TABLES: dict[str, dict[int, tuple[str, ...]]] = {
+    "server": {CAPABILITY_MASK_EPOCH: SERVER_CAPABILITY_BITS},
+    "client": {CAPABILITY_MASK_EPOCH: CLIENT_CAPABILITY_BITS},
+}
+_CAPABILITY_MASK = re.compile(r"\A([1-9][0-9]{0,2})\.([0-9a-f]+)\Z")
+
+
+def encode_capability_mask(peer: str, names) -> str:
+    """Encode a census as ``"<epoch>.<hex>"`` for *peer* at the current epoch.
+
+    Raises ValueError on an unknown peer or a name with no bit. The Enforce
+    side sends a precomputed constant; this encoder is for tests and docs.
+    """
+
+    tables = CAPABILITY_MASK_TABLES.get(peer)
+    if tables is None:
+        raise ValueError(f"unknown capability-mask peer: {peer!r}")
+    table = tables[CAPABILITY_MASK_EPOCH]
+    index = {name: bit for bit, name in enumerate(table)}
+    bits = 0
+    for name in names:
+        if name not in index:
+            raise ValueError(f"capability name has no bit for {peer}: {name!r}")
+        bits |= 1 << index[name]
+    return f"{CAPABILITY_MASK_EPOCH}.{bits:x}"
+
+
+def parse_capability_mask(peer: str, raw: str | None) -> tuple[tuple[str, ...] | None, str]:
+    """Decode a ``cm=`` announcement into names plus the reason it is usable.
+
+    Grammar: ``<epoch>.<hex>``, epoch decimal ``[1-9][0-9]{0,2}``, hex
+    lowercase canonical (no leading zeros, ``0`` the only zero form), at
+    most ``CAPABILITY_MASK_MAX_BITS // 4`` digits. Bits at or beyond the
+    table length are ignored (a newer PBO this daemon cannot call anyway).
+    """
+
+    match = _CAPABILITY_MASK.match(raw or "")
+    if match is None:
+        return None, "malformed"
+    hex_part = match.group(2)
+    if len(hex_part) > CAPABILITY_MASK_MAX_BITS // 4:
+        return None, "malformed"
+    if len(hex_part) > 1 and hex_part.startswith("0"):
+        return None, "malformed"
+    epoch = int(match.group(1))
+    tables = CAPABILITY_MASK_TABLES.get(peer) or {}
+    table = tables.get(epoch)
+    if table is None:
+        return None, "unknown_epoch"
+    bits = int(hex_part, 16)
+    names = tuple(
+        name for index, name in enumerate(table) if bits & (1 << index)
+    )
+    if not names:
+        return None, "empty"
+    return names, "ok"
+
+
+def parse_xai(raw: str | None) -> tuple[str | None, tuple[str, ...]]:
+    """'<hash>.<mask>' -> (hash, verbs); anything else -> (None, ()).
+
+    Known bits always expand, so the verb check of plan 2.2 passes and a
+    version skew reads adapter_contract_mismatch, not adapter_not_loaded.
+    A bit this broker does not know voids the hash (fail closed).
+    """
+
+    match = _XAI_ANNOUNCE.match(raw or "")
+    if match is None:
+        return None, ()
+    bits = int(match.group(2))
+    verbs = tuple(
+        name for index, name in enumerate(EXPANSION_AI_VERB_BITS) if bits & (1 << index)
+    )
+    if bits >> len(EXPANSION_AI_VERB_BITS):
+        return None, verbs
+    return match.group(1), verbs
+
+
 # peer + command -> the public tool that fronts it, or None when the command is
 # deliberately not exposed. Hand written from the two Enforce dispatchers
 # (MCPBridge.c SERVER_CAPABILITIES, MCPClientBridge.c CLIENT_POLL_CAPS).
@@ -347,10 +608,16 @@ EXPECTED_SERVER_ARG_CONTRACT_HASH = server_arg_contract_hash()
 # poll instead of on the first failed call.
 _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
     "server": {
+        "ai_emote": "actor_emote",
+        "ai_group_order": "ai_group_order",
+        "ai_group_release": None,  # internal: the broker's abandoned-spawn cleanup
+        "ai_group_spawn": "ai_group_spawn",
+        "ai_group_state": "ai_group_state",
         "bot_start": "bot_start",
         "bot_stop": "bot_stop",
         "entities_query": "entities_query",
         "exec_enforce": None,  # not a public tool by decision
+        "lease_close": None,  # internal: broker lease close, not a public tool
         "hands_attach": "hands_attach",
         "hands_take": "hands_take",
         "infected_drive": "infected_drive",
@@ -411,12 +678,14 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "camera_set": "camera_set",
         "camera_set_focus": "camera_set_focus",
         "chat_read": "chat_read",
+        "dev_free_camera_set": "dev_free_camera_set",
         "engine_set": "engine_set",
         "gameplay_state": "gameplay_state",
         "hud_set": "hud_set",
         "input_describe": "input_describe",
         "input_trigger": "input_trigger",
         "key_press": "key_press",
+        "lease_close_client": None,  # internal: broker lease close, not a public tool
         "player_look_at": "player_look_at",
         "player_look_at_release": None,
         "player_move": "player_move",
@@ -497,8 +766,17 @@ def _compare_bridge_capabilities(
     # Report the same capability requirement here instead of a false match.
     if peer == "client" and "camera_path_release" not in announced_set:
         announced_tools.discard("camera_path_play")
+    optional_tools = {
+        mapping[item]
+        for item in EXPANSION_AI_COMMANDS
+        if mapping.get(item)
+    }
     not_announced = sorted(
-        tool for tool in registered_bridge_tools if tool not in announced_tools
+        tool
+        for tool in registered_bridge_tools
+        if tool not in announced_tools
+        and tool not in EXPANSION_AI_TOOLS
+        and tool not in optional_tools
     )
     agrees = not (unmapped or missing_tool or not_announced)
     announced_hash = block.get("announced_arg_contract_hash")

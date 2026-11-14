@@ -748,6 +748,66 @@ class CrashRecoveryTest(_Case):
         self.assertEqual(_load(config), original)
         self.assertEqual(fresh.profile_release_errors, [])
 
+    def test_pruned_exited_run_is_recovered_from_targets_after_compaction(self) -> None:
+        profiles = self._profiles()
+        config = profiles / "dayz_mcp.json"
+        original = _installer(note="keep-me")
+        _write(config, original)
+        abandoned = _state()
+        abandoned.prepare(_RUN, "server", str(profiles))
+        self.assertEqual(_load(config)["profile"], "test")
+        runtime = self._tmp() / "runtime"
+        runtime.mkdir()
+        runs_path = runtime / "runs.json"
+
+        def manifest(run_id: str, folder: Path) -> bytes:
+            record = RunRecord(
+                run_id, None, None, "EXITED", "b1p2", "@DayZ_MCP", str(folder), "", []
+            )
+            return (
+                json.dumps(
+                    {"version": 1, "runs": [dataclasses.asdict(record)]},
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                + b"\n"
+            )
+
+        # Only the first slot names the abandoned profiles; the nine others
+        # and the new EXITED run name folders of their own.
+        others = [self._profiles(f"profiles-{index}") for index in range(2, 12)]
+        (runtime / "runs.json.bak-preprune").write_bytes(manifest(_RUN, profiles))
+        for index in range(2, 11):
+            (runtime / f"runs.json.bak-preprune.{index}").write_bytes(
+                manifest(f"run-{index}", others[index - 2])
+            )
+        runs_path.write_bytes(manifest("run-new", others[-1]))
+        paths = RuntimePaths(
+            runtime, runtime / "audit", runtime / "coordination.json", runs_path
+        )
+        before = _state()._lifecycle_restore_targets(
+            SimpleNamespace(manifest=RunManifestStore(paths, read_only=True))
+        )
+        self.assertEqual(len(before), 11)
+
+        store = RunManifestStore(paths)
+
+        self.assertEqual(store.list_runs(), [])
+        for index in range(2, 11):
+            self.assertFalse((runtime / f"runs.json.bak-preprune.{index}").exists())
+        self.assertNotIn(
+            _RUN, (runtime / "runs.json.bak-preprune").read_text(encoding="utf-8")
+        )
+        self.assertIn(
+            _RUN,
+            (runtime / "runs.json.bak-preprune.targets").read_text(encoding="utf-8"),
+        )
+        after = _state()._lifecycle_restore_targets(SimpleNamespace(manifest=store))
+        self.assertEqual(after, before)
+        fresh = _state()
+        fresh.lifecycle = SimpleNamespace(manifest=store)
+        self.assertEqual(_load(config), original)
+        self.assertEqual(fresh.profile_release_errors, [])
+
     def test_startup_recovery_does_not_clear_a_live_holder(self) -> None:
         profiles = self._profiles()
         config = profiles / "dayz_mcp.json"

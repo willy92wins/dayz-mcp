@@ -1679,8 +1679,8 @@ class LoadoutEnforceTest(unittest.TestCase):
             f'SERVER_ARG_CONTRACT_HASH = "{server.EXPECTED_SERVER_ARG_CONTRACT_HASH}"',
             self.source,
         )
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', self.messages)
-        self.assertEqual(EXPECTED_BRIDGE_VERSION, "12")
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', self.messages)
+        self.assertEqual(EXPECTED_BRIDGE_VERSION, "13")
 
     def test_the_caps_mirror_the_tool_s_caps(self) -> None:
         items = re.search(r"protected const int LOADOUT_MAX_ITEMS = (\d+);", self.source)
@@ -1818,7 +1818,8 @@ class LoadoutEnforceTest(unittest.TestCase):
                 branch = _if_body(body, 'job.kind == "loadout_clear"')
                 self.assertEqual(
                     [line.strip() for line in branch.strip().splitlines()],
-                    [f"PostLoadoutClearJob(job, {complete});", "return;"],
+                    # §2.7 step 6: refs transfer to the register before the post.
+                    ["RegisterDeletionRefs(job);", f"PostLoadoutClearJob(job, {complete});", "return;"],
                 )
         # The first round's "loadout" job kind is gone.
         self.assertNotIn('job.kind == "loadout"', _without_comments(self.source))

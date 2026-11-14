@@ -285,8 +285,8 @@ class LoopbackTest(unittest.TestCase):
             self.assertEqual(sleeps.calls, [0.08])
         polls = [line for line in logs if line.startswith("HIT GET /poll ")]
         self.assertEqual(len(polls), 2, logs)
-        self.assertTrue(polls[0].endswith(" delay_ms=80"), polls[0])
-        self.assertTrue(polls[1].endswith(" delay_ms=0"), polls[1])
+        self.assertIn(" delay_ms=80 census=none plen=", polls[0])
+        self.assertIn(" delay_ms=0 census=none plen=", polls[1])
 
     def test_last_poll_and_version_hook(self) -> None:
         status, body = self.request("GET", "/poll", query={"peer": "client", "ver": "4~1.29.0"})

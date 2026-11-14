@@ -141,6 +141,7 @@ Cada rechazo antes de crear trae `created: false` y `args_read`: la facción, `c
 - Si `group_id` no está en el registro, o el grupo está `releasing`, `not_found` sin cambiar nada.
 - Valida todo antes de aplicar ningún campo: la formación como en el spawn, `behaviour`, `waypoints` y `speed`.
 - Aplica solo los campos presentes; la formación, con `SetFormation` (`eAIGroup.c:933`). `speed` cambia la preferencia `normal` de cada miembro vivo: fuera de un HOLD la aplica con `SetMovementSpeedLimits(normal, amenaza)`, y en un HOLD solo la guarda.
+- Una lista de `waypoints` vacía es, en el bridge, la ausencia de `waypoints`: el lector JSON del juego entrega así la clave ausente (ronda B en el juego). Un `behaviour` solo conserva la ruta. La tool y el broker rechazan la lista vacía explícita (§4).
 - La respuesta trae todo leído después del cambio: `behaviour` (`GetWaypointBehaviour`, `eAIGroup.c:304`), `formation` (`GetFormation`, :903), `formation_state` (`GetFormationState`, :624), el número de waypoints, `waypoint_index` (`m_CurrentWaypointIndex`, :37) y los dos límites de cada miembro (`eAIBase.c:5926`, :5931).
 - Trae además `in_combat`, de `group.IsInCombat()` (`eAIGroup.c:1123`). Con `true`, añade `combat_may_override: true`: la FSM de combate puede ignorar la orden (ficha 3ca5; `eAIState_Fighting.c:18`).
 
@@ -170,6 +171,7 @@ Es de solo lectura: entra en `READ_ONLY_COMMANDS` (§4), no lleva lease, no camb
 2. Un solo job de emote por miembro: con otro abierto sobre él, también para `end`, `emote_rejected`, como #266 (MCPClientBridge.c, #266 @c4502d1, pendiente de merge).
 3. Con una petición de Expansion pendiente, o con `IsEmotePlaying()` cierto (emotemanager.c:1328, que cuenta la petición vanilla y la reproducción), `emote_rejected`, como #266 (MCPClientBridge.c, #266 @c4502d1, pendiente de merge). Así nada suena al pedir, y lo que vea el job después es suyo.
 4. Con `m_eAI_IsFightingFSM` (`eAIBase.c:71`), `group.IsInCombat()` o `GetThreatToSelf(true) > 0.2` (`eAIBase.c:2028`; la guarda de `eAIState_PlayEmote.c:13`, con el umbral en :27), `emote_rejected` y no pide nada.
+4b. Con la simulación del miembro desactivada (`GetIsSimulationDisabled()`, vanilla `3_game/entities/entity.c:6`) o con su FSM en `Dormant` (leído con `GetFSM()`, `GetState()` y `GetName()`, la cadena de `ai_group_state`), `npc_dormant` y no pide nada. Desde `Dormant` no hay transición a `PlayEmote` (`Master.xml:432-433`), ese estado desactiva la simulación (`eAIState_Dormant.c:8`) y una petición de emote no lo despierta, así que una petición escrita aquí seguiría pendiente pasado `wait_s` (ronda en el juego, caso 48). La respuesta lleva `emote_pending: false`, porque el punto 3 ya excluye las dos capas.
 5. La única escritura: `Expansion_SetEmote(id, true, wait_s × 1000)` (`eAIBase.c:10862`). No se llama a `Expansion_PlayEmote`, que se saltaría la guarda (informe §6). El retraso solo cancela poses estáticas (§8, pregunta 1).
 
 **El job solo lee el `EmoteManager` del miembro** (`GetEmoteManager()`, vanilla `playerbase.c:1892`) y su petición de Expansion:
@@ -185,6 +187,8 @@ Es de solo lectura: entra en `READ_ONLY_COMMANDS` (§4), no lleva lease, no camb
 - si no reproduce pero hay una petición de Expansion: `Expansion_SetEmote(0)` la deja a cero (respuesta 4) y contesta en el dispatch `emote_state: "cancelled"`, con `emote_pending` leído después de escribir;
 - si solo queda la petición vanilla, que está en vuelo: `emote_rejected` con `emote_pending: true`, sin escribir nada; el `end` se puede repetir;
 - si no hay nada: `no_emote_playing` (MCPClientBridge.c, #266 @c4502d1, pendiente de merge).
+
+El dispatch retira el autocancel pendiente del miembro en la call queue de sistema (`ScriptCallQueue.Remove`, vanilla `2_gamelib/tools.c:65`; `eAIBase.c:10914`) antes de un `end` o de un emote nuevo.
 
 **Los ids de emote** son los de `EmoteConstants` (vanilla `3_game/constants.c:366`; `ID_EMOTE_NOD` en :404), con los mismos nombres que `ActorEmoteId` de #266 (MCPClientBridge.c, #266 @c4502d1, pendiente de merge).
 
@@ -207,6 +211,7 @@ Es de solo lectura: entra en `READ_ONLY_COMMANDS` (§4), no lleva lease, no camb
 **Además:**
 - Con un token desconocido, ok con `released: 0`: el spawn abandonado pudo no llegar a crear nada.
 - Tras un `scene_clear` de #262, el helper sigue pidiendo el borrado del grupo si estaba `active`; la prueba conserva tanto los miembros cuyo borrado aún esté pendiente como el grupo. Solo cuando los miembros han desaparecido queda por censar el grupo.
+- Lo que un miembro suelta al morir queda fuera: vanilla deja en el suelo lo que lleva en las manos, casi siempre el arma del loadout (`DeathDropHandEntity`, llamado desde `OnSimulationEnd`; vanilla `4_world/entities/dayzplayerimplement.c:17` y :635), como un objeto aparte, con el lifetime de cadáver (:646). El adaptador no puede atribuírselo, así que ni el release ni el cierre lo borran ni lo cuentan como residuo; la prueba del cierre solo mira miembros y grupo.
 - La respuesta va en `ai_group`.
 
 ## 4. Tools (Python)
@@ -222,9 +227,11 @@ Es de solo lectura: entra en `READ_ONLY_COMMANDS` (§4), no lleva lease, no camb
   - `scene_id`, con la regla de #262.
 - La facción, la formación y el loadout los valida el servidor, que conoce los de verdad. Una lista fija en Python rechazaría una formación nueva de Expansion.
 - Va al peer servidor con lease y genera el `spawn_token`.
+- Un rechazo del bridge llega al agente con su informe en el mensaje del error (`bridge_errors._ai_group_spawn_detail`, ronda B): `field`, `allowed` y `args_read` con `bad_args`, `living` y `limit` con `ai_limit_reached`, y `created`. Solo cruzan nombres de una lista fija y valores comprobados, con topes.
 
 **`ai_group_order(group_id, behaviour=None, waypoints=None, formation=None, speed=None, timeout_s)`**
 - Con lease. Sin ningún campo, da `bad_args`. `speed` es `walk`, `jog` o `sprint`, y viaja como 1, 2 o 3 con `speed_set` (§3.3).
+- `waypoints` lleva de 1 a 32 puntos: la lista vacía explícita da `bad_args` en la tool y en el broker. Un `bad_args` del bridge por un campo llega con ese `field` y, para `behaviour` y `formation`, `allowed` en el mensaje del error (`bridge_errors._ai_group_order_detail`, ronda B); una orden que llega al bridge sin ningún campo que aplicar da `bad_args` sin más.
 
 **`ai_group_state(group_id=None, scene_id=None, timeout_s)`**
 - Uno de los dos y no los dos. Sin lease: `ai_group_state` entra en `READ_ONLY_COMMANDS` (main @de12fd6b, `session_coordination.py`). Todo comando que no esté ahí pide lease (`session_coordination.py::command_requires_lease` y `authorize`, main @de12fd6b), y sin token da `lease_required`. #262 ya integró `scene_entities` en esa lista de main @de12fd6b.

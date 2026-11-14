@@ -2,9 +2,9 @@
 
 **Decision: implementation-ready specification for `player_kill`.** Add a server-authoritative, lease-gated kill by explicit UID. Keep `player_respawn` as the separate client respawn operation.
 
-Repository paths below are relative to `C:\Users\guill\dzmcp_gauntlet\base`, the export declared to be `6671fd2`. Vanilla citations use:
+Repository paths below are relative to `%USERPROFILE%\dzmcp_gauntlet\base`, the export declared to be `6671fd2`. Vanilla citations use:
 
-- **V29:** `C:\Users\guill\OneDrive\Documentos\DayZ Projects\scripts`
+- **V29:** `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\scripts`
 - **V30:** `E:\DayZ-Exp-Extract\1.30.164014\exp\scripts\scripts`
 
 API calls marked **[EXACT]** were read in those sources. Proposed contracts and implementation behavior are **[DESIGN]**.
@@ -141,7 +141,7 @@ Every reference to `Bot`, `m_Bot`, bot events and movement-override symbols must
 
 On 1.29, the common dispatch handler validates the wire shape, then returns `bot_unavailable` **before any dummy initialization or mutation**. No runtime version check surrounds an otherwise compiled unknown symbol.
 
-Historical module defines for 1.30 were recorded at `C:\Users\guill\ObsidianVault\AI\10_Projects\DayZ_MCP\lanes\2026-09-26-roboclient-130\evidence_extracts.txt:4-7`. That is historical evidence, not verification of the currently running instance.
+Historical module defines for 1.30 were recorded at `%USERPROFILE%\ObsidianVault\AI\10_Projects\DayZ_MCP\lanes\2026-09-26-roboclient-130\evidence_extracts.txt:4-7`. That is historical evidence, not verification of the currently running instance.
 
 If the current 1.30 instance lacks any required macro, it also returns `bot_unavailable`. If actual compile gates invalidate the common-PBO approach, use a common cross-version stub plus a separately loaded 1.30 adapter addon, with distinct deployment identities. Do not substitute runtime exception handling.
 

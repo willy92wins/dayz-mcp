@@ -10,7 +10,7 @@ Round-one **F2’s iterator exception is fixed**: publication copies the table u
 
 **F3 — P2 — Overlapping status readers can erase an already observed client death.**
 
-Location: [tools/dayz_mcp/process_lifecycle.py:2339](C:/Users/guill/dzmcp_gauntlet/g4_client_lifecycle/ws/tools/dayz_mcp/process_lifecycle.py:2339). The earlier observation lookup occurs at `:2383`; preservation uses that snapshot at `:2432–2446`.
+Location: [tools/dayz_mcp/process_lifecycle.py:2339](%USERPROFILE%/dzmcp_gauntlet/g4_client_lifecycle/ws/tools/dayz_mcp/process_lifecycle.py:2339). The earlier observation lookup occurs at `:2383`; preservation uses that snapshot at `:2432–2446`.
 
 Lookup and insertion are individually locked, but the observation update is not atomic. A delayed reader unconditionally replaces evidence published while its probe was running.
 

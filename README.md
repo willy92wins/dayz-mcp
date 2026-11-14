@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 109 typed
+game, put the world into a state, act, and read back what the engine did — 113 typed
 tools, server-authoritative, no keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
@@ -30,7 +30,7 @@ frame, raycast a placement, record a 20 Hz drive trace as a regression fixture
 |---|---|---|
 | **Build + launch** | `dayz_test_run(project, mode, build=True, …)` | Packs the mod with AddonBuilder, starts a diag server and/or client with it loaded, waits for readiness. Managed run, returns a `run_id`. |
 | **Set up the scene** | `world_spawn`, `world_spawn_batch`, `player_teleport`, `player_heal`, `player_godmode`, `object_set_health`, `vehicle_enter`, `inventory_attach`, `inventory_give`, `loadout_apply`, `hands_attach`, `hands_take`, `world_time_set`, `world_weather_set`, `engine_set` | Put the world into the state the test needs — deterministically, from script. Heal a player at once, seated or not, or switch its godmode. Set one object's Health and read it back. Spawn up to 200 objects in one call, sent in groups of `per_tick` that the bridge each creates in one server tick, every one registered under a scene when given a `scene_id`. |
-| **Act** | `vehicle_control`, `object_anim`, `vehicle_door`, `camera_set`, `camera_path_play`, `hud_set`, `player_view_set`, `notify_players`, `weapon_raise`, `weapon_aim`, `weapon_fire`, `weapon_sights`, `input_trigger`, `player_move`, `actor_emote`, `survivor_drive` | Drive, animate, open or close a car door, frame the shot (focus included), move the camera along a keyed path, hide the HUD, set the local player's first or third person view, raise, aim and fire the local weapon, click, hold or press a key through the script key handlers, walk the on-foot player in a direction or to a point, play an emote on it, and walk a spawned survivor on the server. |
+| **Act** | `vehicle_control`, `object_anim`, `vehicle_door`, `camera_set`, `camera_path_play`, `dev_free_camera_set`, `hud_set`, `player_view_set`, `notify_players`, `weapon_raise`, `weapon_aim`, `weapon_fire`, `weapon_sights`, `input_trigger`, `player_move`, `actor_emote`, `survivor_drive` | Drive, animate, open or close a car door, frame the shot (focus included), move the camera along a keyed path, turn DayZDiag's free camera on or off, hide the HUD, set the local player's first or third person view, raise, aim and fire the local weapon, click, hold or press a key through the script key handlers, walk the on-foot player in a direction or to a point, play an emote on it, and walk a spawned survivor on the server. |
 | **Iterate the UI** | `ui_reload_layout`, `ui_tree`, `ui_dialog`, `ui_pause`, `capture_screenshot` | Reload a `.layout` written into the client's profile directory and read back the rectangles the engine computed for it. The file is re-read on every call, so a panel can be edited and re-measured in seconds instead of one repack-and-boot per change. `ui_dialog` is the client modal (acknowledge/confirm/form) for the local player; `ui_pause` opens the client pause menu like Esc. |
 | **Observe** | `wait_for`, `logs_since`, `chat_read`, `query_player_state`, `weapon_state`, `object_inspect`, `object_doors`, `loadout_get`, `input_describe`, `world_time_get`, `scene_entities`, `vehicle_telemetry`, `vehicle_trace`, `player_trace`, `anim_timeline`, `scene_raycast`, `surface_query`, `server_perf`, `nav_path_query`, `players_visibility`, `capture_screenshot` | Structured state from the server, log tails and client chat lines since a cursor, 20 Hz vehicle and on-foot player traces, client action/animation-phase timelines, raycasts, frames. Building door flags, registered input bindings, the in-game clock, what a scene holds, the server frame rate with its entity counts, a navmesh path and which players could see a point are reads. Data an agent can assert on, not pixels to squint at. |
 | **Reset + repeat** | `scene_clear`, `restore_gameplay`, `dayz_test_stop`, `session_acquire_wait`, `session_release`, `session_status` | Delete the objects a scene spawned, as `object_delete` deletes one (or nothing, when one shares a hierarchy with another scene's), return the world to normal, stop the managed run, hand the game to the next session. |
@@ -105,10 +105,10 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` writes nothing unless the client starts with `-autotest` (T165276),
 and dayz-mcp does not start it that way yet, so frames come from an external window grab of the rendered client, which only reads pixels.
 
-**109 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**113 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
-`action_cursor`, `action_hold`, `action_use`, `actor_emote`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_path_play`, `camera_path_release`, `camera_set`, `camera_set_focus`, `capture_screenshot`, `chat_read`, `gameplay_state`,
-`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `hud_set`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `inventory_move`, `key_press`,
+`action_cursor`, `action_hold`, `action_use`, `actor_emote`, `ai_group_order`, `ai_group_spawn`, `ai_group_state`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_path_play`, `camera_path_release`, `camera_set`, `camera_set_focus`, `capture_screenshot`, `chat_read`, `gameplay_state`,
+`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `dev_free_camera_set`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `hud_set`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `inventory_move`, `key_press`,
 `lease_acquire`, `list_projects`, `loadout_apply`, `loadout_get`, `logs_since`, `nav_path_query`, `notify_players`, `object_anim`,
 `object_delete`, `object_doors`, `object_inspect`, `object_resolve`, `object_set_health`, `pipeline_feedback`, `pipeline_inbox`,
 `pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_find`, `player_godmode`, `player_heal`, `player_kill`, `player_look_at`, `player_move`, `player_respawn`, `player_teleport`, `player_trace`, `player_view_set`, `players_visibility`, `bot_start`, `bot_stop`, `query_all_players`, `query_get_in_condition`,
@@ -138,7 +138,9 @@ its id as `camera_path.replaced_command_id`; `busy` still rejects an exclusive
 job. The daemon settles lease tracking on the client's terminal `finished`
 report. Explicit mode=stop keeps its existing last-pose behavior.
 `camera_path_release(command_id)` is public and requires the same lease as play;
-the daemon also uses it internally for lease cleanup. A matching command_id
+the daemon also sends it internally when it abandons a delivered play (a
+cancelled or timed-out call), but not at lease end, where the client's lease
+close stops the path. A matching command_id
 aborts the path and releases camera/gameplay (`matched=true`); a stale id cannot
 stop its successor (`matched=false`). The LIVE tool pack still excludes it.
 `camera_set_focus` exposes the existing camera setter with required focus
@@ -184,11 +186,17 @@ DayZ-MCP is a local control and observation surface, not a hosted knowledge serv
 
 **No OS keystrokes, no OCR, no second game process.** Control is `CreateObjectEx` / `StartCommand_Vehicle` (`dayz-mcp-architecture.md:79`, `dayz-mcp-architecture.md:84`) / `MissionServer` reads. No OS input (`product-spec.md:160-161`). Several agent sessions share one running instance through one daemon (`product-spec.md:164-166`).
 
+**Measured in game on 2026-11-11** (DayZDiag 1.30.164289, v1.5; runs `9b4390c2`, `44497a99` and `d47db64b`):
+
+- Navmesh: a probe mod drove `AIWorld.FindPath`, `RaycastNavMesh`, `SampleNavmeshPosition` and `PGFilter.SetCost` (`aiworld.c`), with `AIWorld` from `GetGame().GetWorld().GetAIWorld()` and `new PGFilter()`; a filter without `SetFlags` includes 65535 and excludes 32768. At run time the `PGPolyFlags` members are bit values (WALK=1, DISABLED=2, DOOR=4, INSIDE=8, SWIM=16, SWIM_SEA=32). `RaycastNavMesh` is false on a clear line and true with the hit point and the edge normal. `SampleNavmeshPosition`'s radius bounds only the horizontal move: with an all-flags filter, a sea point snapped 58 m down to the seabed. `SetCost` on BUILDING and OBJECTS changed a 618 m path, on ROADWAY it changed nothing, and TERRAIN at 100 made `FindPath` return true with a path that stops short. `nav_path_query` has three known defects (inbox d5d6): its masks shift those bits again (include 137, exclude 32770), it answers ok with a path that stops short of the destination, and each call leaks one `PGFilter`.
+- Survivor locomotion: `survivor_drive` on a `SurvivorM_Mirek` moves on the requested heading, at 1.53 m/s walking and 6.75 m/s sprinting forward and 4.08 m/s jogging sideways, but the body keeps the heading it spawned with, so a drive behind it walks backwards at 1.26 m/s and cannot sprint (2.98 m/s) (inbox 851c). Fifty driven survivors at once took the server from 2433 to 1899 average fps (minimum 1273), and all fifty moved. Driven point by point along a `nav_path_query` path, a survivor stays within 0.3 to 1.2 m of it on flat ground but sticks at steps and stairs. The vanilla bot FSM (`bot_start`) starts and stops all ten actions; on the server, four inventory actions raise vanilla Virtual Machine Exceptions, two of them about 30 a second, and `PLAYER_BOT_RANDOMIZE_MOVEMENT` only moves forward (inbox 6b52).
+- `infected_drive`: one call moves the infected for 1.6 to 8.5 s, then it stops (inbox 7c86). Re-sent every second, `speed` 0.5, 1, 1.5, 2, 2.5, 3 and 4 gave 0.24, 0.45, 0.52, 2.0, 4.9, 5.5 and 5.9 m/s, within 0.5° of the heading; with the player 1 m away it barely moves.
+
 **Not tested:**
 
-- Navmesh follow: `AIWorld.FindPath`, `RaycastNavMesh`, `SampleNavmeshPosition`, `PGFilter.SetCost` (all in `aiworld.c`; the four protos are adjacent but none has been driven). `AIWorld` has a private constructor (`aiworld.c`, `private void AIWorld()`); `new PGFilter()` has not been instantiated in-game.
-- Survivor locomotion overrides: `HumanInputController.OverrideMovementSpeed` / `OverrideMovementAngle` / `OverrideAimChangeX` / `OverrideAimChangeY` (`human.c:253-262`) and the vanilla bot FSM under `4_world/systems/bot/`. Whether a synthetic survivor population is viable is open.
-- Calibrating `infected_drive` `speed` to m/s.
+- `OverrideAimChangeX` / `OverrideAimChangeY` on a spawned survivor; on the player they are driven by `player_look_at` and `weapon_aim`.
+- A manual gearbox below idle: a CivilianSedan's rpm never fell below its idle of 900.
+- The DayZDiag free camera: `PluginKeyBinding` reads the physical key state, so `input_trigger` cannot toggle it; `dev_free_camera_set` turns it on and off with `PluginDeveloper.ToggleFreeCameraBackPos` instead, and has not been tried in game yet.
 
 ## What you need
 

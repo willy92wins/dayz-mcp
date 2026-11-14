@@ -1,8 +1,8 @@
-Set-Location -LiteralPath 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools'
+Set-Location -LiteralPath '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools'
 $env:PYTHONIOENCODING='utf-8'
 $env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
-& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -m unittest tests.test_object_inspect -v
+$env:PYTHONPATH='%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
+& '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -m unittest tests.test_object_inspect -v
 
 test_app_tool_registered_and_forwards (tests.test_object_inspect.ObjectInspectAppToolTest.test_app_tool_registered_and_forwards) ... ok
 test_missing_memory_point_is_exists_false_with_ok_true (tests.test_object_inspect.ObjectInspectEnforceContractTest.test_missing_memory_point_is_exists_false_with_ok_true) ... ok

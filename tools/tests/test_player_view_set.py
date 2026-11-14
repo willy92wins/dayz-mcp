@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp import bridge_errors, loopback, result_prune, server
 from dayz_mcp.result_prune import PRUNABLE_FIELDS, prune_unfilled_fields
 from dayz_mcp.server import (
@@ -82,7 +83,7 @@ RUNNER_METHODS = (
     "protected void ProcessJobs(MCPJobRunnerOwner owner)",
 )
 # The job kinds HasExclusiveJob leaves out; the tool description names them.
-NON_EXCLUSIVE_KINDS = ("ui_dialog", "weapon_action", "input_trigger", "player_move", "actor_emote")
+NON_EXCLUSIVE_KINDS = ("ui_dialog", "weapon_action", "input_trigger", "player_move", "actor_emote", "dev_free_camera_set")
 EXCLUSION_CLAUSE = (
     "busy while an exclusive client job runs, such as camera_set or player_look_at (a "
     + ", ".join(NON_EXCLUSIVE_KINDS[:-1])
@@ -769,7 +770,7 @@ class PlayerViewSetAdmissionTest(unittest.TestCase):
     def _poll(self, caps: list[str]) -> dict:
         status, body = self.state.record_poll(
             "client",
-            "12~1.29",
+            f"{EXPECTED_BRIDGE_VERSION}~1.29",
             instance=INST_CLIENT,
             source_pid=PID_CLIENT,
             caps=",".join(caps),
@@ -862,7 +863,7 @@ class PlayerViewSetCensusTest(unittest.TestCase):
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
         self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b800b7c7ee0674c")
         self.assertEqual(server.server_arg_contract_hash(), "3b800b7c7ee0674c")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
         registered = frozenset(tool for tool in _BRIDGE_COMMAND_TOOLS["client"].values() if tool)
@@ -1158,7 +1159,7 @@ class PlayerViewSetEnforceRunTest(unittest.TestCase):
         self.assertEqual(model.replies()[1], (8, False, "no_player", "", ""))
         self.assertEqual(model.handled, [COMMAND])
 
-    def test_the_five_kinds_left_out_of_exclusive_jobs_do_not_refuse(self) -> None:
+    def test_the_six_kinds_left_out_of_exclusive_jobs_do_not_refuse(self) -> None:
         exclusive = _method_body(_source(CLIENT_PATH), EXCLUSIVE)
         left_out = re.findall(r'(?:CountExcluding|CountOfKind)\("(\w+)"\)', exclusive)
         self.assertEqual(sorted(left_out), sorted(NON_EXCLUSIVE_KINDS))

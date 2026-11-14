@@ -125,6 +125,38 @@ class MCPJobRunner
 		}
 	}
 
+	// Lease close: every job posts through its timeout path, as at its deadline.
+	void AbortAll(MCPJobRunnerOwner owner)
+	{
+		if (!m_Jobs || !owner)
+		{
+			return;
+		}
+
+		array<int> ids = new array<int>();
+		int i = 0;
+		int total = m_Jobs.Count();
+		while (i < total)
+		{
+			ids.Insert(m_Jobs.GetKey(i));
+			i = i + 1;
+		}
+
+		i = 0;
+		while (i < ids.Count())
+		{
+			MCPJob job = m_Jobs.Get(ids.Get(i));
+			if (job)
+			{
+				owner.MCP_PostJobTimeout(job);
+				owner.MCP_ClearJobRefs(job);
+				m_Jobs.Remove(ids.Get(i));
+			}
+
+			i = i + 1;
+		}
+	}
+
 	protected void ProcessJobs(MCPJobRunnerOwner owner)
 	{
 		if (!m_Jobs || !owner)

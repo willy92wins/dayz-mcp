@@ -153,9 +153,8 @@ class ProcessLifecycleStatusPruneTest(unittest.TestCase):
             [process(pid)] if pid is not None else [],
         )
 
-    def _write_manifest(self, runs: list[RunRecord]) -> bytes:
-        self.paths.runs_path.parent.mkdir(parents=True, exist_ok=True)
-        raw = (
+    def _manifest_raw(self, runs: list[RunRecord]) -> bytes:
+        return (
             json.dumps(
                 {
                     "version": 1,
@@ -166,8 +165,67 @@ class ProcessLifecycleStatusPruneTest(unittest.TestCase):
             ).encode("utf-8")
             + b"\n"
         )
+
+    def _write_manifest(self, runs: list[RunRecord]) -> bytes:
+        self.paths.runs_path.parent.mkdir(parents=True, exist_ok=True)
+        raw = self._manifest_raw(runs)
         self.paths.runs_path.write_bytes(raw)
         return raw
+
+    def _exited(self, run_id: str, profiles: str) -> RunRecord:
+        """An EXITED run whose absolute profiles and mission the loopback restores."""
+        return RunRecord(
+            run_id,
+            None,
+            None,
+            "EXITED",
+            "fixture",
+            "@Fixture",
+            str(self.root / profiles),
+            str(self.root / "mission"),
+            [],
+        )
+
+    def _slot(self, index: int) -> Path:
+        name = "runs.json.bak-preprune" + ("" if index == 1 else f".{index}")
+        return self.paths.runs_path.with_name(name)
+
+    def _targets(self) -> Path:
+        return self.paths.runs_path.with_name("runs.json.bak-preprune.targets")
+
+    def _fill_slots(self, per_slot: list[list[RunRecord]]) -> None:
+        self.paths.runs_path.parent.mkdir(parents=True, exist_ok=True)
+        for index, runs in enumerate(per_slot, start=1):
+            self._slot(index).write_bytes(self._manifest_raw(runs))
+
+    def _runtime_files(self) -> dict[str, bytes | None]:
+        """Every entry beside runs.json: a file's bytes, None for anything else."""
+        return {
+            entry.name: entry.read_bytes() if entry.is_file() else None
+            for entry in self.paths.runs_path.parent.iterdir()
+        }
+
+    def _full_slots_and_new_exited(self) -> None:
+        self._fill_slots(
+            [[self._exited(f"exited-{index}", f"profiles-{index}")] for index in range(1, 11)]
+        )
+        self._write_manifest(
+            [
+                self._exited("exited-new", "profiles-new"),
+                self._run("idle", "RUNNING_IDLE", 520),
+            ]
+        )
+
+    def _assert_load_changes_nothing(self) -> None:
+        before = self._runtime_files()
+
+        store = RunManifestStore(self.paths)
+
+        self.assertEqual(
+            {run.run_id for run in store.list_runs()},
+            {"exited-new", "idle"},
+        )
+        self.assertEqual(self._runtime_files(), before)
 
     def _lifecycle(self, store: RunManifestStore) -> ProcessLifecycle:
         audit = AuditSink()
@@ -371,6 +429,258 @@ class ProcessLifecycleStatusPruneTest(unittest.TestCase):
                 self.paths.runs_path.with_name(f"runs.json.bak-preprune.{index}").read_bytes(),
                 f"slot-{index}\n".encode("utf-8"),
             )
+
+    def test_full_slots_are_compacted_into_targets_and_the_prune_runs(self) -> None:
+        slotted = [
+            self._exited(f"exited-{index}", f"profiles-{index}") for index in range(1, 11)
+        ]
+        self._fill_slots(
+            [[run, self._run("idle", "RUNNING_IDLE", 521)] for run in slotted]
+        )
+        original = self._write_manifest(
+            [
+                self._exited("exited-new", "profiles-new"),
+                self._run("idle", "RUNNING_IDLE", 521),
+            ]
+        )
+
+        store = RunManifestStore(self.paths)
+
+        self.assertEqual([run.run_id for run in store.list_runs()], ["idle"])
+        persisted = json.loads(self.paths.runs_path.read_bytes())
+        self.assertEqual([run["run_id"] for run in persisted["runs"]], ["idle"])
+        self.assertEqual(self._slot(1).read_bytes(), original)
+        for index in range(2, 11):
+            self.assertFalse(self._slot(index).exists(), index)
+        self.assertEqual(
+            json.loads(self._targets().read_bytes()),
+            {
+                "version": 1,
+                "runs": [
+                    {
+                        "run_id": run.run_id,
+                        "state": "EXITED",
+                        "profiles": run.profiles,
+                        "mission": run.mission,
+                    }
+                    for run in slotted
+                ],
+            },
+        )
+        self.assertEqual(
+            sorted(self._runtime_files()),
+            ["runs.json", "runs.json.bak-preprune", "runs.json.bak-preprune.targets"],
+        )
+
+    def test_compaction_keeps_one_entry_per_pair_and_four_fields(self) -> None:
+        first = dataclasses.replace(
+            self._exited("exited-first", "profiles-shared"),
+            label="extra-label",
+            daemon_generation_at_launch="generation-1",
+        )
+        again = self._exited("exited-again", "profiles-shared")
+        # profiles "profiles" is not absolute: the loopback's restore skips it.
+        relative = self._run("exited-relative", "EXITED")
+        self._fill_slots(
+            [[first, relative], [again]]
+            + [
+                [self._exited(f"exited-{index}", f"profiles-{index}")]
+                for index in range(3, 11)
+            ]
+        )
+        self._write_manifest([self._exited("exited-new", "profiles-new")])
+
+        RunManifestStore(self.paths)
+
+        entries = json.loads(self._targets().read_bytes())["runs"]
+        self.assertEqual(
+            [entry["run_id"] for entry in entries],
+            ["exited-first"] + [f"exited-{index}" for index in range(3, 11)],
+        )
+        for entry in entries:
+            self.assertEqual(set(entry), {"run_id", "state", "profiles", "mission"})
+        self.assertEqual(
+            entries[0],
+            {
+                "run_id": "exited-first",
+                "state": "EXITED",
+                "profiles": first.profiles,
+                "mission": first.mission,
+            },
+        )
+
+    def test_compaction_writes_back_strings_utf8_cannot_encode(self) -> None:
+        self._full_slots_and_new_exited()
+        # A slot is JSON text: a \ud800 escape loads as a lone surrogate, which
+        # UTF-8 cannot encode. A non-ASCII folder name must come back as well.
+        payload = json.loads(self._slot(3).read_bytes())
+        payload["runs"][0]["run_id"] = "\ud800"
+        payload["runs"][0]["profiles"] = str(self.root / "perfil-\u00f1")
+        self._slot(3).write_text(json.dumps(payload), encoding="utf-8")
+
+        # RunManifestStore is what the daemon builds at startup: building it
+        # must not raise, and no (profiles, mission) pair may be lost.
+        store = RunManifestStore(self.paths)
+
+        self.assertEqual([run.run_id for run in store.list_runs()], ["idle"])
+        entries = json.loads(self._targets().read_bytes())["runs"]
+        self.assertEqual(len(entries), 10)
+        self.assertEqual(
+            {(entry["profiles"], entry["mission"]) for entry in entries},
+            {
+                (
+                    str(self.root / f"profiles-{index}"),
+                    str(self.root / "mission"),
+                )
+                for index in range(1, 11)
+            }
+            - {(str(self.root / "profiles-3"), str(self.root / "mission"))}
+            | {(str(self.root / "perfil-\u00f1"), str(self.root / "mission"))},
+        )
+        self.assertEqual(entries[2]["run_id"], "\ud800")
+        self.assertEqual(entries[2]["profiles"], str(self.root / "perfil-\u00f1"))
+
+    def test_twenty_five_loads_each_prune_and_keep_at_most_ten_slots(self) -> None:
+        seen: set[tuple[str, str]] = set()
+        previous: list[dict[str, object]] = []
+        for load in range(1, 26):
+            # Two loads in a row share a pair, so a compaction also meets
+            # pairs the .targets file already holds.
+            run = self._exited(f"exited-{load}", f"profiles-{load // 2}")
+            seen.add((run.profiles, run.mission))
+            self._write_manifest([run, self._run("idle", "RUNNING_IDLE", 522)])
+
+            store = RunManifestStore(self.paths)
+
+            self.assertEqual([item.run_id for item in store.list_runs()], ["idle"], load)
+            names = sorted(self._runtime_files())
+            slots = [
+                name
+                for name in names
+                if name.startswith("runs.json.bak-preprune")
+                and name != "runs.json.bak-preprune.targets"
+            ]
+            self.assertLessEqual(len(slots), 10, (load, names))
+            if load <= 10:
+                self.assertFalse(self._targets().exists(), load)
+                continue
+            entries = json.loads(self._targets().read_bytes())["runs"]
+            self.assertEqual(entries[: len(previous)], previous, load)
+            pairs = [(entry["profiles"], entry["mission"]) for entry in entries]
+            self.assertEqual(len(pairs), len(set(pairs)), load)
+            self.assertEqual(len(entries), 6 if load <= 20 else 11, load)
+            restorable = set(pairs)
+            for name in slots:
+                payload = json.loads(self.paths.runs_path.with_name(name).read_bytes())
+                restorable.update(
+                    (item["profiles"], item["mission"])
+                    for item in payload["runs"]
+                    if item["state"] == "EXITED"
+                )
+            self.assertLessEqual(seen, restorable, load)
+            previous = entries
+
+    def test_compaction_refuses_a_slot_with_broken_json(self) -> None:
+        self._full_slots_and_new_exited()
+        self._slot(4).write_bytes(b"{")
+
+        self._assert_load_changes_nothing()
+
+    def test_compaction_refuses_a_slot_without_a_runs_list(self) -> None:
+        self._full_slots_and_new_exited()
+        self._slot(7).write_bytes(b'{"version": 1}\n')
+
+        self._assert_load_changes_nothing()
+
+    def test_compaction_refuses_a_broken_targets_file(self) -> None:
+        self._full_slots_and_new_exited()
+        self._targets().write_bytes(b"{")
+
+        self._assert_load_changes_nothing()
+
+    def test_compaction_refuses_a_targets_path_that_is_not_a_plain_file(self) -> None:
+        self._full_slots_and_new_exited()
+        self._targets().mkdir()
+
+        self._assert_load_changes_nothing()
+
+    def test_targets_replace_failure_keeps_every_slot_and_skips_the_prune(self) -> None:
+        self._full_slots_and_new_exited()
+
+        with patch(
+            "dayz_mcp.runtime_state.os.replace",
+            side_effect=OSError("replace blocked"),
+        ):
+            self._assert_load_changes_nothing()
+
+    def test_unlink_failure_keeps_targets_and_the_next_load_prunes(self) -> None:
+        self._full_slots_and_new_exited()
+        original = self.paths.runs_path.read_bytes()
+        real_unlink = Path.unlink
+
+        def deny(path: Path, *args: object, **kwargs: object) -> None:
+            if path.name == "runs.json.bak-preprune.5":
+                raise PermissionError(13, "Access is denied")
+            real_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", deny):
+            first = RunManifestStore(self.paths)
+
+        self.assertEqual(
+            {run.run_id for run in first.list_runs()},
+            {"exited-new", "idle"},
+        )
+        self.assertEqual(self.paths.runs_path.read_bytes(), original)
+        entries = json.loads(self._targets().read_bytes())["runs"]
+        self.assertEqual(
+            [entry["run_id"] for entry in entries],
+            [f"exited-{index}" for index in range(1, 11)],
+        )
+        for index in range(1, 5):
+            self.assertFalse(self._slot(index).exists(), index)
+        self.assertTrue(self._slot(5).exists())
+        for index in range(6, 11):
+            self.assertFalse(self._slot(index).exists(), index)
+
+        second = RunManifestStore(self.paths)
+
+        self.assertEqual([run.run_id for run in second.list_runs()], ["idle"])
+        self.assertEqual(self._slot(1).read_bytes(), original)
+        self.assertEqual(json.loads(self._targets().read_bytes())["runs"], entries)
+
+    def test_unlink_failure_on_first_slot_removes_the_rest_and_next_load_prunes(self) -> None:
+        self._full_slots_and_new_exited()
+        original = self.paths.runs_path.read_bytes()
+        real_unlink = Path.unlink
+
+        def deny(path: Path, *args: object, **kwargs: object) -> None:
+            if path.name == "runs.json.bak-preprune":
+                raise PermissionError(13, "Access is denied")
+            real_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", deny):
+            first = RunManifestStore(self.paths)
+
+        self.assertEqual(
+            {run.run_id for run in first.list_runs()},
+            {"exited-new", "idle"},
+        )
+        self.assertEqual(self.paths.runs_path.read_bytes(), original)
+        entries = json.loads(self._targets().read_bytes())["runs"]
+        self.assertEqual(
+            [entry["run_id"] for entry in entries],
+            [f"exited-{index}" for index in range(1, 11)],
+        )
+        self.assertTrue(self._slot(1).exists())
+        for index in range(2, 11):
+            self.assertFalse(self._slot(index).exists(), index)
+
+        second = RunManifestStore(self.paths)
+
+        self.assertEqual([run.run_id for run in second.list_runs()], ["idle"])
+        self.assertTrue(self._slot(1).exists())
+        self.assertEqual(self._slot(2).read_bytes(), original)
+        self.assertEqual(json.loads(self._targets().read_bytes())["runs"], entries)
 
 
 class FakeBridgeBindings:

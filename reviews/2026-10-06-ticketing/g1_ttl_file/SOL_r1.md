@@ -197,7 +197,7 @@ The injected October 1 release state is historical context, not evidence for thi
 
 I ran, from this tree’s `tools/`, using:
 
-`C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`
+`%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`
 
 ```text
 -B -m unittest

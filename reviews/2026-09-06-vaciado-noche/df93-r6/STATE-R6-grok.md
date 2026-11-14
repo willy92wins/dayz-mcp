@@ -92,7 +92,7 @@ Grep `refus|reject` en el modulo: no se tocaron las frases de identidad, cfg, to
 
 ## Salida literal — rojo primero
 
-Tests ya escritos sobre el producto anterior (sin `VPP_ABSENT_HINT`). Interprete: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`. Desde `tools` con `PYTHONPATH=.`.
+Tests ya escritos sobre el producto anterior (sin `VPP_ABSENT_HINT`). Interprete: `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`. Desde `tools` con `PYTHONPATH=.`.
 
 ```
 .E......F.........F.F............F....FF.......E...E............
@@ -106,17 +106,17 @@ Traceback (most recent call last):
   File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
     return future.result()
            ~~~~~~~~~~~~~^^
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 1249, in test_the_absent_admin_tools_warning_travels_with_a_successful_run
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 1249, in test_the_absent_admin_tools_warning_travels_with_a_successful_run
     result = await dayz_test_tool.execute_dayz_test_run(
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     ...<4 lines>...
     )
     ^
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\dayz_mcp\dayz_test_tool.py", line 1256, in execute_dayz_test_run
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\dayz_mcp\dayz_test_tool.py", line 1256, in execute_dayz_test_run
     vpp = preflight_vpp_request(
         raw_request, sealed_policies=bundle.sealed_policies
     )
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 1231, in warned
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 1231, in warned
     hint=transaction.VPP_ABSENT_HINT,
          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 AttributeError: module 'dayz_mcp.native_launcher_transaction' has no attribute 'VPP_ABSENT_HINT'
@@ -125,13 +125,13 @@ AttributeError: module 'dayz_mcp.native_launcher_transaction' has no attribute '
 ERROR: test_enforce_returns_a_warning_result_when_no_admin_tools_are_requested (tests.test_vpp_preflight.VppPreflightEnforcementTest.test_enforce_returns_a_warning_result_when_no_admin_tools_are_requested)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 770, in test_enforce_returns_a_warning_result_when_no_admin_tools_are_requested
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 770, in test_enforce_returns_a_warning_result_when_no_admin_tools_are_requested
     result = transaction.enforce_vpp_preflight(
         self._parsed(policy, mode="all", extra_mods=["@DayZ_MCP"]),
         (policy,),
         files=_healthy(policy),
     )
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\dayz_mcp\native_launcher_transaction.py", line 571, in enforce_vpp_preflight
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\dayz_mcp\native_launcher_transaction.py", line 571, in enforce_vpp_preflight
     raise ValueError(result.error_code)
 ValueError: vpp_preflight_failed
 
@@ -139,7 +139,7 @@ ValueError: vpp_preflight_failed
 ERROR: test_the_warning_writes_nothing_to_the_workspace (tests.test_vpp_preflight.VppPreflightEnforcementTest.test_the_warning_writes_nothing_to_the_workspace)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 826, in test_the_warning_writes_nothing_to_the_workspace
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 826, in test_the_warning_writes_nothing_to_the_workspace
     transaction.enforce_vpp_preflight(
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
         self._parsed(policy, mode="all", extra_mods=["@DayZ_MCP"]),
@@ -148,7 +148,7 @@ Traceback (most recent call last):
         ^^^^^^^^^^
     )
     ^
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\dayz_mcp\native_launcher_transaction.py", line 571, in enforce_vpp_preflight
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\dayz_mcp\native_launcher_transaction.py", line 571, in enforce_vpp_preflight
     raise ValueError(result.error_code)
 ValueError: vpp_preflight_failed
 
@@ -162,7 +162,7 @@ Traceback (most recent call last):
   File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
     return future.result()
            ~~~~~~~~~~~~~^^
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 900, in test_a_server_request_without_admin_tools_gets_past_the_gate
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 900, in test_a_server_request_without_admin_tools_gets_past_the_gate
     self.assertNotEqual(str(raised), transaction.VPP_PREFLIGHT_FAILED)
     ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 AssertionError: 'vpp_preflight_failed' == 'vpp_preflight_failed'
@@ -171,7 +171,7 @@ AssertionError: 'vpp_preflight_failed' == 'vpp_preflight_failed'
 FAIL: test_a_preflight_request_without_admin_tools_is_warned_like_a_launch (tests.test_vpp_preflight.VppPreflightDecisionTest.test_a_preflight_request_without_admin_tools_is_warned_like_a_launch)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 435, in test_a_preflight_request_without_admin_tools_is_warned_like_a_launch
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 435, in test_a_preflight_request_without_admin_tools_is_warned_like_a_launch
     self.assertIsNone(result.error_code)
     ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
 AssertionError: 'vpp_preflight_failed' is not None
@@ -180,7 +180,7 @@ AssertionError: 'vpp_preflight_failed' is not None
 FAIL: test_a_run_that_requests_no_admin_tools_reads_nothing (tests.test_vpp_preflight.VppPreflightDecisionTest.test_a_run_that_requests_no_admin_tools_reads_nothing)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 444, in test_a_run_that_requests_no_admin_tools_reads_nothing
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 444, in test_a_run_that_requests_no_admin_tools_reads_nothing
     self.assertIsNone(result.error_code)
     ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
 AssertionError: 'vpp_preflight_failed' is not None
@@ -189,7 +189,7 @@ AssertionError: 'vpp_preflight_failed' is not None
 FAIL: test_no_base_mods_drops_a_default_that_only_lived_in_the_policy (tests.test_vpp_preflight.VppPreflightDecisionTest.test_no_base_mods_drops_a_default_that_only_lived_in_the_policy)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 208, in test_no_base_mods_drops_a_default_that_only_lived_in_the_policy
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 208, in test_no_base_mods_drops_a_default_that_only_lived_in_the_policy
     self.assertIsNone(result.error_code)
     ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
 AssertionError: 'vpp_preflight_failed' is not None
@@ -198,7 +198,7 @@ AssertionError: 'vpp_preflight_failed' is not None
 FAIL: test_server_mode_without_the_admin_tools_is_warned_not_refused (tests.test_vpp_preflight.VppPreflightDecisionTest.test_server_mode_without_the_admin_tools_is_warned_not_refused)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 156, in test_server_mode_without_the_admin_tools_is_warned_not_refused
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 156, in test_server_mode_without_the_admin_tools_is_warned_not_refused
     self.assertIsNone(result.error_code)
     ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
 AssertionError: 'vpp_preflight_failed' is not None
@@ -207,7 +207,7 @@ AssertionError: 'vpp_preflight_failed' is not None
 FAIL: test_server_only_mode_is_warned_the_same_way (tests.test_vpp_preflight.VppPreflightDecisionTest.test_server_only_mode_is_warned_the_same_way)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 165, in test_server_only_mode_is_warned_the_same_way
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6\ws\tools\tests\test_vpp_preflight.py", line 165, in test_server_only_mode_is_warned_the_same_way
     self.assertIsNone(result.error_code)
     ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
 AssertionError: 'vpp_preflight_failed' is not None
