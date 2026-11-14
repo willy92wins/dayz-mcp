@@ -206,6 +206,10 @@ def _minimal_args(cmd: str) -> dict:
         return {"path": "p"}
     if cmd == "ui_pause":
         return {}
+    if cmd == "ui_menu_set":
+        return {"menu": "map", "open": True}
+    if cmd == "ui_map_set":
+        return {"scale": 1.0}
     if cmd == "dev_free_camera_set":
         return {"active": True}
     if cmd == "ui_reload_layout":

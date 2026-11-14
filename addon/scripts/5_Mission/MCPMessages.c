@@ -356,6 +356,18 @@ class MCPArgs
 	// chat_read: return lines and drops with seq above marker (0 reads the whole ring).
 	// max_lines above is reused.
 	int marker;
+	// ui_menu_set (d4b4): a name in the closed menu table of MCPClientBridge
+	// (UiMenuId) and the requested state. The tool and the ingress always
+	// send and require both, so Enforce sees a real bool here; a hand-made
+	// command without open is outside that frontier and reads false.
+	string menu;
+	bool open;
+	// ui_map_set (d4b4): scale and center ([x, z] in world metres), each
+	// optional and at least one present. An absent scale reads the unset
+	// sentinel below and an absent center the empty array the constructor
+	// makes, so neither needs a _set flag on the wire.
+	float scale;
+	ref array<float> center;
 	// lease_close / lease_close_client (§2.16). close_floors travels only on
 	// the server close; an absent key leaves the array empty.
 	string close_generation;
@@ -384,6 +396,8 @@ class MCPArgs
 		net_high = new array<int>();
 		close_floors = new array<ref MCPLeaseCloseFloor>();
 		items = new array<ref MCPSpawnBatchItem>();
+		center = new array<float>();
+		scale = MCP_ARG_FLOAT_UNSET;
 		component = -1;
 		dik = -1;
 		limit = 64;
@@ -1460,6 +1474,45 @@ class MCPUiPause
 	}
 };
 
+// ui_menu_set reply (d4b4): the menu name, its open state before and after,
+// the ClassName() of the FindMenu(MENU_MAP) instance ("" when not open) and
+// the top menu IDs before and after (-1 when GetMenu() returns null).
+class MCPUiMenu
+{
+	string menu;
+	bool open_before;
+	bool open_after;
+	string class_name;
+	int menu_id_before;
+	int menu_id_after;
+
+	void MCPUiMenu()
+	{
+		menu = "";
+		class_name = "";
+		menu_id_before = -1;
+		menu_id_after = -1;
+	}
+};
+
+// ui_map_set reply (d4b4): the MapWidget scale and centre ([x, z] in world
+// metres) read before and after, and the ClassName() of the open menu.
+class MCPUiMap
+{
+	float scale_before;
+	float scale_after;
+	ref array<float> center_before;
+	ref array<float> center_after;
+	string class_name;
+
+	void MCPUiMap()
+	{
+		center_before = new array<float>();
+		center_after = new array<float>();
+		class_name = "";
+	}
+};
+
 // dev_free_camera_set reply (beb3): FreeDebugCamera.GetInstance().IsActive()
 // before the call and after it, read right after the toggle or on the next
 // tick by the read job; also sent with dev_free_camera_not_switched.
@@ -1684,6 +1737,10 @@ class MCPResult
 	ref MCPChatRead chat_read;
 	// ui_pause read-back, also on pause_not_opened (726c). Unassigned on other commands.
 	ref MCPUiPause ui_pause;
+	// ui_menu_set read-back, also on its errors (d4b4). Unassigned on other commands.
+	ref MCPUiMenu ui_menu;
+	// ui_map_set read-back, also on its errors (d4b4). Unassigned on other commands.
+	ref MCPUiMap ui_map;
 	// lease_close / lease_close_client census (§2.16). Unassigned on other commands.
 	ref MCPLeaseCloseCensus lease_close;
 	// dev_free_camera_set read-back, also on dev_free_camera_not_switched (beb3).
@@ -1769,6 +1826,19 @@ class MCPJob
 	bool camera_focus;
 	// ui_pause: carries menu_id_before across the job-runner read-back (726c).
 	ref MCPUiPause ui_pause;
+	// ui_menu_set: carries the reply and the requested state across the
+	// one-tick read-back (d4b4).
+	ref MCPUiMenu ui_menu;
+	bool ui_menu_open;
+	// E1: what the close removed after CloseMapMenu, for its log line.
+	string ui_menu_removed;
+	// ui_map_set: carries the reply and what was requested across the
+	// one-tick read-back (d4b4).
+	ref MCPUiMap ui_map;
+	float ui_map_scale;
+	bool ui_map_scale_set;
+	ref array<float> ui_map_center;
+	bool ui_map_center_set;
 	// dev_free_camera_set: carries active_before across the one-tick read job (beb3).
 	ref MCPDevFreeCamera dev_free_camera;
 };

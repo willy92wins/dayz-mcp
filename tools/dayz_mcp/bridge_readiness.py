@@ -516,6 +516,8 @@ CLIENT_CAPABILITY_BITS: tuple[str, ...] = (
     "weapon_fire",
     "weapon_raise",
     "weapon_sights",
+    "ui_menu_set",
+    "ui_map_set",
 )
 CAPABILITY_MASK_TABLES: dict[str, dict[int, tuple[str, ...]]] = {
     "server": {CAPABILITY_MASK_EPOCH: SERVER_CAPABILITY_BITS},
@@ -696,6 +698,8 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "ui_click": "ui_click",
         "ui_dialog": "ui_dialog",
         "ui_focus": "ui_focus",
+        "ui_map_set": "ui_map_set",
+        "ui_menu_set": "ui_menu_set",
         "ui_pause": "ui_pause",
         "ui_reload_layout": "ui_reload_layout",
         "ui_set_text": "ui_set_text",

@@ -17,7 +17,7 @@ when client telemetry shows a client-owned seated occupant. Since #312
 `scene_clear` runs the same check and refuses the same way, with the
 requested `scene_id` instead of an `object_id`. No delete is
 sent to the server. The current telemetry has no server registry `object_id`
-(`addon/scripts/5_Mission/MCPClientBridge.c:2949-2997`), so the guard
+(`addon/scripts/5_Mission/MCPClientBridge.c:3151-3254`), so the guard
 conservatively refuses **every target**, including an apparently unrelated
 object, while that seat is occupied.
 
@@ -42,7 +42,7 @@ Outside live, the guard returns `ok=false`, `error=vehicle_seat_unverified`,
 There is no established exception for an absent/stale client: probeability
 only checks binding and poll age (`tools/dayz_mcp/peer_liveness.py:14-38`).
 The addon poll failure path only retries with backoff, without vacating the
-seat or revoking ownership (`addon/scripts/5_Mission/MCPClientBridge.c:1059-1088`).
+seat or revoking ownership (`addon/scripts/5_Mission/MCPClientBridge.c:1140-1170`).
 No poll is not proof of an empty seat, even outside live.
 
 Deletion uses `occupant_client_seated_strict`
@@ -57,7 +57,7 @@ propagates without sending a delete.
 `runtime.tool_lock` serializes tool calls on that runtime and is held across
 both operations; it does not lock manual player input or prevent previously
 started actions from progressing. `action_use` can return success while an
-action is still running (`addon/scripts/5_Mission/MCPClientBridge.c:4678-4695`).
+action is still running (`addon/scripts/5_Mission/MCPClientBridge.c:5071-5102`).
 Manual input or an earlier action could seat the player between the check and
 delete. **Before deletion, ensure no actions are pending or in progress;
 operators must not interact with the vehicle during delete.**
@@ -234,7 +234,7 @@ seat-verification channel is needed to support live deletion safely.
    `condition_failed` (see "The exit reality"). Confirm the client exit via
    `vehicle_telemetry` (`seated=false`) before `object_delete` of the fixture.
    `vehicle_release` only aborts the trace and clears drive-control state
-   (`MCPClientBridge.c:3399-3405`); it is not a get-out. Stop the ladder on a
+   (`MCPClientBridge.c:3426-3432`); it is not a get-out. Stop the ladder on a
    refused exit, `vehicle_seat_unverified`, `vehicle_client_seated` or
    `vehicle_eject_failed`, retaining the fixture id
    for retry. After a successful deletion verify continued client polling,
@@ -319,7 +319,7 @@ server replica is.
    the server side follows the client-owned car.
 7. Tear down as the client ladder does: confirm the client exit before
    `object_delete` of the registered fixture id. `vehicle_release` only
-   clears trace/control (`MCPClientBridge.c:3399-3405`); server-visible
+   clears trace/control (`MCPClientBridge.c:3426-3432`); server-visible
    occupants still go through the bridge's eject guard. Verify via telemetry
    (`seated=false`) and continued
    client polling, then `restore_gameplay` and the session release. Stop the

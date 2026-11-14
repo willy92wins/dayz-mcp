@@ -77,7 +77,7 @@ que en su propio camino de ejecución llegan bajo otro nombre a uno de esos
 comandos:
 
 - Cámara y vista: `camera_get`, `camera_path_play`, `camera_path_release`, `camera_set`, `camera_set_focus`, `dev_free_camera_set`, `hud_set`, `player_look_at`, `player_view_set`, `restore_gameplay`
-- UI y chat: `chat_read`, `gameplay_state`, `ui_click`, `ui_dialog`, `ui_focus`, `ui_pause`, `ui_reload_layout`, `ui_set_text`, `ui_tree`
+- UI y chat: `chat_read`, `gameplay_state`, `ui_click`, `ui_dialog`, `ui_focus`, `ui_map_set`, `ui_menu_set`, `ui_pause`, `ui_reload_layout`, `ui_set_text`, `ui_tree`
 - Input, acciones y jugador: `action_cursor`, `action_hold`, `action_use`, `actor_emote`, `anim_timeline`, `input_describe`, `input_trigger`, `key_press`, `player_move`, `player_respawn`, `player_trace`
 - Vehículos y armas: `engine_set`, `vehicle_control`, `vehicle_get_in_client`, `vehicle_release`, `vehicle_telemetry`, `vehicle_trace`, `weapon_aim`, `weapon_fire`, `weapon_raise`, `weapon_sights`
 - Bajo otro nombre: `object_delete`, `playbook_run`, `player_teleport`, `scene_clear`, `session_release`
@@ -130,7 +130,7 @@ censo anunciado), `action_hold_cancel` (`tools/dayz_mcp/loopback.py:8179-8206`)
 y `player_look_at_release` (`tools/dayz_mcp/loopback.py:6195-6208`, solo para
 comandos ya entregados) no llegan a encolarse, y `camera_path_release` ya no se
 encola por lease: con bridge v13 la trayectoria la para el cierre del cliente
-(`addon/scripts/5_Mission/MCPClientBridge.c:10011-10016`), que sin censo tampoco
+(`addon/scripts/5_Mission/MCPClientBridge.c:10819-10838`), que sin censo tampoco
 se publica. Si sin `--require-version` el lease admitió
 `vehicle_trace(mode="start")` o un `vehicle_control` no nulo para un cliente
 `BOUND` (`vehicle_active` en
