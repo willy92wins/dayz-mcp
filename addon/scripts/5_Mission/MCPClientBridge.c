@@ -1071,6 +1071,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		while (i < count)
 		{
 			MCPCommand command = batch.commands.Get(i);
+			if (command && command.cmd == "camera_set_focus")
+			{
+				ApplyCameraFocusDefaults(command.args);
+			}
 			if (deferBehindPending)
 			{
 				QueuePendingOrFail(command);
@@ -2207,6 +2211,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// camera_set never reads the five focus fields and an older bridge
 		// answers unknown_command instead of dropping them.
 		bool focus = command.cmd == "camera_set_focus";
+		if (focus)
+		{
+			ApplyCameraFocusDefaults(command.args);
+		}
 		if (focus && !IsValidCameraFocus(command.args))
 		{
 			result.ok = false;
@@ -6839,6 +6847,40 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_ActiveCam = freeCam;
 		m_ActiveCamOwned = false;
 		return true;
+	}
+
+	// 702f / #384: JsonSerializer does not keep constructor defaults on the
+	// nested MCPArgs it builds (fb-20260930-065425-8779). A key missing from
+	// the command JSON arrives as 0. 0 is treated as absent for focus_length
+	// and focus_length_near, which then take the tool defaults 450 and 100.
+	// focus_depth_offset 0 is a documented explicit value ("draws no blur")
+	// and is left alone, except when length and near also arrived as 0: that
+	// is the old two-value payload (distance and blur only), which also takes
+	// the Close-up default 10.
+	protected void ApplyCameraFocusDefaults(MCPArgs args)
+	{
+		bool missingLength;
+		bool missingNear;
+
+		if (!args)
+		{
+			return;
+		}
+
+		missingLength = args.focus_length == 0.0;
+		missingNear = args.focus_length_near == 0.0;
+		if (missingLength)
+		{
+			args.focus_length = 450.0;
+		}
+		if (missingNear)
+		{
+			args.focus_length_near = 100.0;
+		}
+		if (missingLength && missingNear && args.focus_depth_offset == 0.0)
+		{
+			args.focus_depth_offset = 10.0;
+		}
 	}
 
 	// 702f: CGame.OverrideDOF parameter order from 3_game/global/game.c:1379.

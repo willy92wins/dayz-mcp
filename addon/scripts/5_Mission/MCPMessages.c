@@ -345,7 +345,13 @@ class MCPArgs
 	string easing;
 	string path_id;
 	// camera_set_focus (702f): camera_set plus CGame.OverrideDOF. The command
-	// name, not these fields, turns focus on; all five always travel with it.
+	// name, not these fields, turns focus on; the tool always sends all five.
+	// A key missing from the JSON arrives as 0, not as a constructor default
+	// (fb-20260930-065425-8779). After the read the client treats 0 as absent
+	// for focus_length and focus_length_near and fills 450 and 100.
+	// focus_depth_offset 0 is a legitimate value and is kept, except when
+	// length and near also arrived as 0 (an old payload of distance and blur
+	// only), which also takes the Close-up default 10.
 	float focus_distance;
 	float focus_blur;
 	float focus_length;

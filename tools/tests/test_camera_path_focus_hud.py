@@ -2,7 +2,7 @@
 
 Contract, tool, admission and census checks run here. MCP_CameraPath.c and the
 camera_path_play, camera_path_release, camera_set and hud_set dispatch, the
-camera_set job, CameraReadError, IsValidCameraFocus, ApplyCameraSet,
+camera_set job, CameraReadError, IsValidCameraFocus, ApplyCameraFocusDefaults, ApplyCameraSet,
 ApplyFreeCamera, ApplyCameraDOF, ClearCameraDOF, ReleaseCamera and the frame
 method of MCPClientBridge.c also run here, translated from the .c source by
 tests.enforce_subset_helpers (see _executed_camera_path below); that runs their
@@ -752,6 +752,7 @@ class _CameraSetBridge:
 _APPLY_METHODS = (
     "protected bool ApplyCameraSet(MCPJob job)",
     "protected bool ApplyFreeCamera(MCPJob job, MCPCameraValidation validation)",
+    "protected void ApplyCameraFocusDefaults(MCPArgs args)",
     "protected void ApplyCameraDOF(MCPArgs args)",
     "protected void ClearCameraDOF(string reason)",
     "protected void ReleaseCamera()",
@@ -760,7 +761,7 @@ _APPLY_METHODS = (
 )
 _APPLY_SIBLINGS = (
     "ValidateCameraArgs|StopCameraPath|FinishCameraHandoff|SuppressGameplay|ApplyFreeCamera|"
-    "ApplyCameraDOF|ClearCameraDOF|BeginCameraHandoff|DeleteOwnedCamera|ArrayToMatrix|Log"
+    "ApplyCameraFocusDefaults|ApplyCameraDOF|ClearCameraDOF|BeginCameraHandoff|DeleteOwnedCamera|ArrayToMatrix|Log"
 )
 # ApplyCameraSet's static array, which the translator does not parse, becomes
 # the list of four rows that the ArrayToMatrix fake fills, as its out
@@ -770,8 +771,9 @@ _FLOAT32_MAX = _F32(struct.unpack("<f", b"\xff\xff\x7f\x7f")[0])
 
 
 class _ApplyBridge:
-    """ApplyCameraSet, ApplyFreeCamera, ApplyCameraDOF, ClearCameraDOF,
-    ReleaseCamera, DeleteOwnedCamera and IsValidCameraFocus translated, on fakes.
+    """ApplyCameraSet, ApplyFreeCamera, ApplyCameraFocusDefaults, ApplyCameraDOF,
+    ClearCameraDOF, ReleaseCamera, DeleteOwnedCamera and IsValidCameraFocus
+    translated, on fakes.
 
     ValidateCameraArgs answers `validation`. StopCameraPath,
     FinishCameraHandoff, SuppressGameplay and BeginCameraHandoff log (and
@@ -3291,6 +3293,122 @@ class ExecutedApplyTest(unittest.TestCase):
                 with self.subTest(field=field, bad=bad):
                     args = SimpleNamespace(**dict(valid, **{field: bad}))
                     self.assertFalse(bridge.IsValidCameraFocus(args))  # type: ignore[attr-defined]
+
+
+
+_FOCUS_FIELDS = ("focus_distance", "focus_blur", "focus_length", "focus_length_near", "focus_depth_offset")
+
+
+def _wire_focus_args(payload: dict[str, float]) -> SimpleNamespace:
+    """MCPArgs as JsonSerializer leaves a nested object: missing keys are 0.0.
+    Constructor defaults do not survive (fb-20260930-065425-8779)."""
+    values = {name: 0.0 for name in _FOCUS_FIELDS}
+    values.update(payload)
+    return SimpleNamespace(**{name: _F32(value) for name, value in values.items()})
+
+
+class OlderPayloadDofDefaultsTest(unittest.TestCase):
+    """camera_set_focus from the tools of the Camera.SetFocus bridge carries
+    focus_distance and focus_blur only. After the JSON read, the client fills
+    the tool defaults 450, 100 and 10 for that old two-value payload, before
+    OverrideDOF. A five-value payload may send focus_depth_offset 0, which is
+    kept. The wire helper models the serializer, not MCPArgs()."""
+
+    OLD_PAYLOAD = {"focus_distance": 2.0, "focus_blur": 1.0}
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.bridge_source = _source(BRIDGE)
+        cls.messages = _source(MESSAGES)
+
+    def _dof_calls(self, payload: dict[str, float]) -> list[tuple[Any, ...]]:
+        bridge = _ApplyBridge(self.bridge_source)
+        args = _wire_focus_args(payload)
+        bridge.ApplyCameraFocusDefaults(args)  # type: ignore[attr-defined]
+        self.assertTrue(bridge.IsValidCameraFocus(args))  # type: ignore[attr-defined]
+        bridge.ApplyCameraDOF(args)  # type: ignore[attr-defined]
+        return [entry for entry in bridge.log if entry[:2] == ("engine", "OverrideDOF")]
+
+    def test_the_wire_helper_models_the_serializer_not_the_constructor(self) -> None:
+        args = _wire_focus_args(self.OLD_PAYLOAD)
+        self.assertEqual(args.focus_distance, 2.0)
+        self.assertEqual(args.focus_blur, 1.0)
+        self.assertEqual(args.focus_length, 0.0)
+        self.assertEqual(args.focus_length_near, 0.0)
+        self.assertEqual(args.focus_depth_offset, 0.0)
+        constructor = _code(_method_body(self.messages, "void MCPArgs()"))
+        for assignment in (
+            "focus_length = 450.0",
+            "focus_length_near = 100.0",
+            "focus_depth_offset = 10.0",
+        ):
+            self.assertNotIn(assignment, constructor)
+
+    def test_an_old_payload_gets_the_tool_defaults(self) -> None:
+        self.assertEqual(
+            self._dof_calls(self.OLD_PAYLOAD),
+            [("engine", "OverrideDOF", True, 2.0, 450.0, 100.0, 1.0, 10.0)],
+        )
+
+    def test_an_explicit_depth_offset_zero_is_kept(self) -> None:
+        payload = dict(
+            self.OLD_PAYLOAD,
+            focus_length=750.0,
+            focus_length_near=500.0,
+            focus_depth_offset=0.0,
+        )
+        self.assertEqual(
+            self._dof_calls(payload),
+            [("engine", "OverrideDOF", True, 2.0, 750.0, 500.0, 1.0, 0.0)],
+        )
+
+    def test_a_zero_length_or_near_is_treated_as_absent(self) -> None:
+        length_missing = dict(
+            self.OLD_PAYLOAD,
+            focus_length=0.0,
+            focus_length_near=500.0,
+            focus_depth_offset=12.0,
+        )
+        self.assertEqual(
+            self._dof_calls(length_missing),
+            [("engine", "OverrideDOF", True, 2.0, 450.0, 500.0, 1.0, 12.0)],
+        )
+        near_missing = dict(
+            self.OLD_PAYLOAD,
+            focus_length=750.0,
+            focus_length_near=0.0,
+            focus_depth_offset=12.0,
+        )
+        self.assertEqual(
+            self._dof_calls(near_missing),
+            [("engine", "OverrideDOF", True, 2.0, 750.0, 100.0, 1.0, 12.0)],
+        )
+
+    def test_explicit_nonzero_values_are_kept(self) -> None:
+        payload = dict(
+            self.OLD_PAYLOAD,
+            focus_length=700.0,
+            focus_length_near=450.0,
+            focus_depth_offset=12.0,
+        )
+        self.assertEqual(
+            self._dof_calls(payload),
+            [("engine", "OverrideDOF", True, 2.0, 700.0, 450.0, 1.0, 12.0)],
+        )
+
+    def test_on_poll_and_dispatch_apply_defaults_after_the_read(self) -> None:
+        poll = _method_body(self.bridge_source, "void OnPollSuccess(string data, int dataSize)")
+        dispatch = _method_body(
+            self.bridge_source, "protected bool DispatchCameraSet(MCPCommand command, MCPResult result)"
+        )
+        self.assertIn("ApplyCameraFocusDefaults", _code(poll))
+        self.assertIn("ApplyCameraFocusDefaults", _code(dispatch))
+        self.assertLess(poll.index("ReadFromString"), poll.index("ApplyCameraFocusDefaults"))
+        self.assertLess(dispatch.index("ApplyCameraFocusDefaults"), dispatch.index("IsValidCameraFocus"))
+
+    def test_defaults_are_a_no_op_on_null_args(self) -> None:
+        bridge = _ApplyBridge(self.bridge_source)
+        bridge.ApplyCameraFocusDefaults(None)  # type: ignore[attr-defined]
 
 
 class ExecutedHudSetTest(unittest.TestCase):
