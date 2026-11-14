@@ -142,14 +142,13 @@ class _OwnerToken:
 
 
 def _open_shared_lock(path: Path) -> int:
-    try:
-        import msvcrt
-    except ImportError:
-        flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_BINARY"):
-            flags |= os.O_BINARY
-        return os.open(path, flags, 0o600)
-    del msvcrt
+    if os.name != "nt":
+        from dayz_mcp import byte_lock
+
+        try:
+            return byte_lock.open_lock_file(path)
+        except OSError as error:
+            raise OSError("root_writer_lock_open_failed") from error
     try:
         return open_lock_file(path)
     except OSError as error:
@@ -188,10 +187,8 @@ class RootWriterLease:
                 self._key = key
                 self._held = True
                 return True
-        try:
-            import msvcrt
-        except ImportError:
-            return False
+        from dayz_mcp import byte_lock
+
         self.root.mkdir(parents=True, exist_ok=True)
         # Byte 1 of the startup lock. Byte 0 stays the startup election.
         # A second file would show up beside `.daemon-startup.lock`.
@@ -205,16 +202,14 @@ class RootWriterLease:
                 os.lseek(descriptor, 0, os.SEEK_SET)
                 os.write(descriptor, b"\0\0")
                 os.fsync(descriptor)
-            os.lseek(descriptor, 1, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            byte_lock.try_lock(descriptor, 1)
         except OSError:
             os.close(descriptor)
             return False
         with _lease_guard:
             if key in _lease_fds:
-                os.lseek(descriptor, 1, os.SEEK_SET)
                 try:
-                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                    byte_lock.unlock(descriptor, 1)
                 except OSError:
                     pass
                 os.close(descriptor)
@@ -246,10 +241,9 @@ class RootWriterLease:
         if descriptor is None:
             return
         try:
-            import msvcrt
+            from dayz_mcp import byte_lock
 
-            os.lseek(descriptor, 1, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            byte_lock.unlock(descriptor, 1)
         except OSError:
             pass
         finally:

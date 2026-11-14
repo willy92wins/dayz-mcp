@@ -36,20 +36,20 @@ def _acquire_os() -> bool:
         if _holders > 0:
             _holders += 1
             return True
-        try:
-            import msvcrt
-        except ImportError:
-            return False
+        from dayz_mcp import byte_lock
+
         path = _lock_path()
-        from dayz_mcp.server_cli import open_lock_file
+        if os.name == "nt":
+            from dayz_mcp.server_cli import open_lock_file
+        else:
+            open_lock_file = byte_lock.open_lock_file
 
         descriptor = open_lock_file(path)
         try:
             if os.fstat(descriptor).st_size == 0:
                 os.write(descriptor, b"\0")
                 os.fsync(descriptor)
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            byte_lock.try_lock(descriptor, 0)
         except OSError:
             os.close(descriptor)
             return False
@@ -71,10 +71,9 @@ def _release_os() -> None:
         if descriptor is None:
             return
         try:
-            import msvcrt
+            from dayz_mcp import byte_lock
 
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            byte_lock.unlock(descriptor, 0)
         except OSError:
             pass
         finally:

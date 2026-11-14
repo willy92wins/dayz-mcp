@@ -326,7 +326,17 @@ def _open_from_approved(
     return _open_validated_entry(matches[0])
 
 
+def _open_linux_launcher(launcher_id: str):
+    """Outside Windows there is no approved PE: the installed Linux bundle stands in."""
+    from dayz_mcp import linux_launcher
+
+    _validate_id(launcher_id)
+    return linux_launcher.open_launcher(launcher_id)
+
+
 def open_approved_launcher(launcher_id: str) -> _OpenedLauncher:
+    if os.name != "nt":
+        return _open_linux_launcher(launcher_id)
     from dayz_mcp.registry_lock import acquire_registry_lock_with_retry
 
     registry_lock = acquire_registry_lock_with_retry(exclusive=False)
@@ -362,6 +372,10 @@ async def open_approved_launcher_async(
     attempt; still busy then raises `launcher_registry_busy_timeout`.
     Every other error propagates at once, without a retry.
     """
+    if os.name != "nt":
+        with _open_linux_launcher(launcher_id) as opened:
+            yield opened
+        return
     from dayz_mcp.registry_lock import acquire_registry_lock
 
     for value in (deadline_s, initial_backoff_s, max_backoff_s):
@@ -425,6 +439,8 @@ def try_open_approved_launcher(launcher_id: str) -> _OpenedLauncher:
     too. An acquired lock is always released when opening fails,
     whatever the exception.
     """
+    if os.name != "nt":
+        return _open_linux_launcher(launcher_id)
     from dayz_mcp.registry_lock import acquire_registry_lock
 
     _validate_id(launcher_id)

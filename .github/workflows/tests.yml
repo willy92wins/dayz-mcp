@@ -86,6 +86,53 @@ jobs:
           DAYZ_MCP_FOREIGN_TOOLCHAIN: "1"
         run: .\.venv-mcp\Scripts\python.exe -B -m tests._shard "${{ matrix.shard }}/4"
 
+  # The Linux port (README-mcp.md, "Linux"): the modules written for it, whose tests
+  # the Windows jobs skip, and the process-creation audit of the launcher closure.
+  # Not the whole suite: most of it tests Windows behaviour and fails off Windows.
+  # What needs a game, Steam or Proton is not covered here.
+  linux:
+    name: unittest, Linux port (ubuntu, Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: tools/requirements-mcp.txt
+
+      # --copies: on Linux the daemon checks the interpreter's real image.
+      - name: Install
+        run: |
+          python -m venv --copies .venv-mcp
+          .venv-mcp/bin/python -m pip install pip==26.2.1
+          .venv-mcp/bin/python -m pip install -r requirements-mcp.txt
+          .venv-mcp/bin/python -m pip install -e .
+
+      - name: Run the Linux port's tests
+        run: >-
+          .venv-mcp/bin/python -B -m unittest
+          tests.test_linux_build
+          tests.test_linux_compat
+          tests.test_linux_launcher
+          tests.test_linux_windows
+          tests.test_podman_server
+          tests.test_posix_fileops
+          tests.test_proton_client
+          tests.test_security_runtime_audit
+
   fast:
     name: unittest, fast tier (windows, Python ${{ matrix.python }})
     if: github.event_name == 'pull_request'

@@ -445,6 +445,19 @@ def parse_dayz_launch_argv(argv: object) -> dict[str, object]:
     }
 
 
+def _holder_unattributed(pid: object, name: object) -> bool:
+    """A UDP holder nobody can name: no image name, or no PID.
+
+    Linux exception: ``uid:<n>`` (orphan_guard._label_other_users_sockets) is a
+    socket the kernel says belongs to another user. This user cannot read its
+    PID, and it is not a DayZ image; whoever checks the requested port still
+    sees it there.
+    """
+    if name is None:
+        return True
+    return pid is None and not (isinstance(name, str) and name.startswith("uid:"))
+
+
 def _is_dayz_image(name: object) -> bool:
     return isinstance(name, str) and name.casefold() in _DAYZ_IMAGE_NAMES
 
@@ -2361,7 +2374,16 @@ class ProcessLifecycle:
         self._parent_anchors: dict[tuple[str, int, str], object] = {}
         self.game_path = Path(game_path).resolve()
         self.launcher = launcher or self._launch
-        self.steam_gate = steam_gate if steam_gate is not None else SteamPreparationGate()
+        if steam_gate is None:
+            if os.name == "nt":
+                steam_gate = SteamPreparationGate()
+            else:
+                # Read-only on Linux: evaluates and pins the native Steam, never
+                # repairs or restarts it (steam_linux).
+                from dayz_mcp.steam_linux import LinuxSteamPreparationGate
+
+                steam_gate = LinuxSteamPreparationGate()
+        self.steam_gate = steam_gate
         self.id_fn = id_fn or (lambda: uuid.uuid4().hex)
         self.recovery_fault_arm = recovery_fault_arm
         self.argv_of = argv_of or _default_argv_of
@@ -3084,6 +3106,28 @@ class ProcessLifecycle:
         return runs, diagnostics
 
     def _launch(self, argv: list[str], cwd: str, window_style: str) -> object:
+        if os.name != "nt":
+            # Linux. argv[0] has passed the allow rule, and the policy's binary
+            # decides. DayZServer is a server-only project in rootless podman
+            # (podman_server): the engine refuses a DayZDiag client on it
+            # (0x00020017, "Client is using Diag exe while the server is not"),
+            # so a client launch is refused here rather than left at that modal.
+            # Anything else runs <game_path>/DayZDiag_x64.exe under Proton in a
+            # headless sway, client and server alike, as on Windows
+            # (proton_client). Both return the game's host PID.
+            from dayz_mcp import podman_server, proton_client
+
+            if os.path.basename(argv[0]) == podman_server.SERVER_BINARY:
+                if "-server" not in [arg.casefold() for arg in argv[1:]]:
+                    raise OSError("client_needs_diag_executable")
+                try:
+                    return podman_server.launch_lifecycle_process(list(argv), cwd)
+                except podman_server.PodmanServerError as error:
+                    raise OSError(str(error)) from error
+            try:
+                return proton_client.launch_client(list(argv), self.game_path, guard=self.guard)
+            except proton_client.ProtonClientError as error:
+                raise OSError(str(error)) from error
         kwargs: dict[str, object] = {
             "cwd": cwd,
             "close_fds": True,
@@ -3652,6 +3696,24 @@ class ProcessLifecycle:
             authority[0], authority[1], authority[2], command
         )
 
+    # Steam app folder of the client -> folder of its dedicated server.
+    _LINUX_SERVER_APPS = {"DayZ": "DayZServer", "DayZ Exp": "DayZ Server Exp"}
+
+    def _linux_server_executable(self) -> Path | None:
+        """Off Windows: the native DayZServer of the Steam app next to game_path.
+
+        The one other binary the allow rule accepts, for a server-only policy.
+        Derived from the bound game path only, never from a request: the DayZ
+        client app (``steamapps/common/DayZ``) pairs with
+        ``steamapps/common/DayZServer``, DayZ Exp with DayZ Server Exp.
+        """
+        if os.name == "nt":
+            return None
+        server_app = self._LINUX_SERVER_APPS.get(self.game_path.name)
+        if server_app is None:
+            return None
+        return (self.game_path.parent / server_app / "DayZServer").resolve()
+
     def _canonical_error(self, executable: Path) -> str | None:
         canonical = executable.resolve()
         diag = (self.game_path / "DayZDiag_x64.exe").resolve()
@@ -3661,6 +3723,9 @@ class ProcessLifecycle:
         }
         normalized = os.path.normcase(str(canonical))
         if normalized == os.path.normcase(str(diag)):
+            return None
+        linux_server = self._linux_server_executable()
+        if linux_server is not None and normalized == str(linux_server):
             return None
         if normalized in retail:
             return "retail_manual_lifecycle_required"
@@ -9561,10 +9626,13 @@ class ProcessLifecycle:
                 requested_port is not None and holder["port"] == requested_port
             ):
                 return "port_in_use_foreign"
-            if pid is None or name is None:
+            if _holder_unattributed(pid, name):
                 unattributed = True
         # A holder nobody can be named for might be a DayZ image on another
         # port: the launch is refused until the table can be attributed.
+        # Linux: "uid:<n>" is a socket the kernel says belongs to another user
+        # (orphan_guard._label_other_users_sockets); it has no PID for this user
+        # to read, and it already blocked above if it holds the requested port.
         return "port_attribution_unknown" if unattributed else None
 
     def box_occupancy(self, *, now: float | None = None) -> dict[str, object]:
@@ -9708,7 +9776,7 @@ class ProcessLifecycle:
             # DayZ UDP range. Unattributed or unrelated ports are never guessed.
             if (dayz or int(port) in _DAYZ_PORT_RANGE) and int(port) not in foreign_ports_dayz_related:
                 foreign_ports_dayz_related.append(int(port))
-            if pid is None or name is None:
+            if _holder_unattributed(pid, name):
                 # A socket nobody can be named for cannot be cleared as
                 # not-DayZ: the scan is unknown, the box occupied.
                 unattributed = True
@@ -9881,7 +9949,7 @@ class ProcessLifecycle:
         for holder in holders:
             if _is_dayz_image(holder.get("name")):
                 return False, "manual_cleanup_required"
-            if holder.get("pid") is None or holder.get("name") is None:
+            if _holder_unattributed(holder.get("pid"), holder.get("name")):
                 return False, "port_attribution_unknown"
         return True, ""
 
