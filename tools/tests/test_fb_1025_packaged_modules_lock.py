@@ -7,17 +7,22 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 import build_native_launcher
 from write_packaged_modules_lock import (
     DRIFT_RECIPE,
+    LINUX_DRIFT_RECIPE,
+    LINUX_LOCK_PATH,
     LOCK_PATH,
     REPO_ROOT,
+    compute_linux_lock,
     compute_lock,
+    expected_linux_paths,
     expected_paths,
+    linux_problems,
     main,
     normalize_crlf_to_lf,
     problems,
@@ -70,6 +75,41 @@ class PackagedModulesLockTest(unittest.TestCase):
                 recipe=DRIFT_RECIPE,
             ),
         )
+
+    def test_linux_lock_paths_and_hashes_match_this_tree(self) -> None:
+        payload = json.loads(LINUX_LOCK_PATH.read_bytes().decode("utf-8"))
+        self.assertEqual(sorted(payload["files"]), expected_linux_paths())
+        self.assertEqual(payload, compute_linux_lock())
+        self.assertIn("python -m dayz_mcp.linux_launcher install", LINUX_DRIFT_RECIPE)
+        self.assertNotIn("Rebuild the launcher", LINUX_DRIFT_RECIPE)
+
+    def test_linux_lock_check_runs_and_names_a_drifted_overlay(self) -> None:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = main(["--check-linux"])
+        self.assertEqual(code, 0, buffer.getvalue())
+        committed = json.loads(LINUX_LOCK_PATH.read_bytes().decode("utf-8"))
+        drifted = dict(committed)
+        drifted_files = dict(committed["files"])
+        drifted_files["tools/dayz_mcp/linux_compat.py"] = "0" * 64
+        drifted["files"] = drifted_files
+        self.assertTrue(linux_problems(drifted, compute_linux_lock()))
+
+    def test_lock_modes_are_mutually_exclusive_and_do_not_write(self) -> None:
+        before = (LOCK_PATH.read_bytes(), LINUX_LOCK_PATH.read_bytes())
+        for argv in (
+            ["--check", "--linux"],
+            ["--check", "--check-linux"],
+            ["--linux", "--check-linux"],
+            ["--check", "--linux", "--check-linux"],
+        ):
+            with self.subTest(argv=argv), redirect_stdout(io.StringIO()), redirect_stderr(
+                io.StringIO()
+            ):
+                with self.assertRaises(SystemExit) as caught:
+                    main(argv)
+            self.assertNotEqual(caught.exception.code, 0)
+        self.assertEqual((LOCK_PATH.read_bytes(), LINUX_LOCK_PATH.read_bytes()), before)
 
     def test_fb_1025_main_check_returns_zero_on_this_tree(self) -> None:
         buffer = io.StringIO()

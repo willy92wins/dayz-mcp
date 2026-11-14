@@ -10890,7 +10890,11 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
     # second process LISTEN on an already-bound port, which defeats the exclusive
     # instance lock (two loopbacks would silently split bridge polls). Exclusive
     # bind makes the second bind fail with EADDRINUSE.
-    allow_reuse_address = False
+    # Linux differs: SO_REUSEADDR never admits a second listener there (that is
+    # SO_REUSEPORT), it only lets a restarted daemon bind while the game's last
+    # polls sit in TIME_WAIT. Without it the restart fails with EADDRINUSE for up
+    # to a minute, so it is on outside Windows.
+    allow_reuse_address = os.name != "nt"
 
     def __init__(self, *args, **kwargs):
         self._http_workers = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
@@ -11012,8 +11016,9 @@ def _bind_exclusive(port: int, log_sink: LogSink, reclaim_orphans: bool) -> "Exc
         ):
             raise
         # A confirmed-dead-parent dayz_mcp orphan was terminated and the port came
-        # free; retry the exclusive bind exactly once. The exclusive lock stays intact — the bind is
-        # still ExclusiveThreadingHTTPServer with allow_reuse_address False.
+        # free; retry the exclusive bind exactly once. The exclusive lock stays intact: the bind is
+        # still ExclusiveThreadingHTTPServer (exclusive bind on Windows, where
+        # allow_reuse_address is False; it is True only off Windows).
         return ExclusiveThreadingHTTPServer(("127.0.0.1", port), Handler)
 
 

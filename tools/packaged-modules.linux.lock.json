@@ -1,0 +1,18 @@
+{
+  "dayzmake_linux": {
+    "architecture": "x86_64",
+    "binary_sha256": "6626BF1D4EA95C43B607C4B9550DAB22549777ADBBE58032637E8717BD175D38",
+    "license": "GPL-2.0",
+    "sha256": "1593E670BAE4CCAF1F60EFF4E1A0201E191AB7879713334FBEADA12DAD8580FC",
+    "size": 2354278,
+    "url": "https://github.com/bzed/dayzmake/releases/download/v1.0.0/dayzmake-v1.0.0-debian-trixie-x86_64.tar.gz",
+    "version": "1.0.0"
+  },
+  "files": {
+    "tools/dayz_mcp/byte_lock.py": "8208CC610ED87F35FB967FB156ADDBE3E195077288EC46939264311DEB1B8E1F",
+    "tools/dayz_mcp/linux_build.py": "FC871A6A91442739747425D375A06E6F2E644309D479074734A623D92A97FD27",
+    "tools/dayz_mcp/linux_compat.py": "4EDBF46414D2281DB46D54001E963D0EA65962848030B6C97F7F6771A410652A",
+    "tools/dayz_mcp/linux_worker_host.py": "8256F1725A8A8821424EFD922580116F4812FC87BACACB1A0B67D6C13F6F76DA"
+  },
+  "format_version": 1
+}
