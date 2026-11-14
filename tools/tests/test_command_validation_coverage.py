@@ -99,6 +99,8 @@ def _minimal_args(cmd: str) -> dict:
         return {}
     if cmd == "player_respawn":
         return {}
+    if cmd == "player_respawn_survivor":
+        return {"survivor_type": "SurvivorM_Manua"}
     if cmd == "key_press":
         return {"dik": 1}
     if cmd == "input_describe":

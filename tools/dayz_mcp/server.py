@@ -136,9 +136,11 @@ from dayz_mcp.loopback import (
     SPAWN_BATCH_ITEMS_MAX,
     SPAWN_BATCH_PER_TICK_MAX,
     SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG,
+    VANILLA_SURVIVOR_TYPES,
     LoopbackServer,
     _FENCE_OMITTED,
     is_printable_input_name,
+    is_vanilla_survivor_type,
     is_scene_id,
     read_key,
 )
@@ -6667,6 +6669,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "mode=all plus wait_for(players_at_least, 1) after "
             "session_acquire_wait can complete without human intervention "
             "(viable night session). "
+            "With storage_rotated true (storage_reset_notice "
+            "mission_world_and_character_reset) the player's character is new and its "
+            "survivor class can differ from the previous run's (loadout_get type says "
+            "which); pin it with player_respawn(survivor_type=...) or dress a "
+            "world_spawn'ed survivor by object_id. "
             "preflight does not relax that matrix. "
             "extra_mods entries must be a single folder name "
             "(for example '@DayZ_MCP') or an absolute path inside the "
@@ -11427,17 +11434,42 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(str(exc)) from exc
 
     @app.tool(description=(
-        f"{LEASE_TOOL_LINE} Request a random local-player respawn through the "
+        f"{LEASE_TOOL_LINE} Request a local-player respawn through the "
         "same character-selection, death-screen, menu, and mission teardown sequence as "
-        "vanilla InGameMenu.GameRespawn. ok/requested means the request was "
-        "issued; observe player state separately for completion. The new "
+        "vanilla InGameMenu.GameRespawn. Without survivor_type the respawn is random as before. "
+        "survivor_type, one of the 31 vanilla survivor classes "
+        f"({', '.join(VANILLA_SURVIVOR_TYPES)}), asks vanilla's custom respawn for that class. "
+        "The server honours it only in respawn mode CUSTOM (cfggameplay or serverDZ.cfg "
+        "disableRespawnDialog false; the client reads the mode it received when it connected, "
+        "which vanilla does not change during a mission) and when no spawn-gear preset lists "
+        "characterTypes. Refusals that change nothing: unknown_survivor_type (not a vanilla "
+        "survivor class; nothing is sent), survivor_type_unavailable (this game's survivor list "
+        "lacks it), respawn_mode_random, bridge_capability_missing (a client bridge older than "
+        "this release; nothing is sent). ok/requested is only the request: read the body's class "
+        "with loadout_get (type) after the respawn. A storage reset gives a new character whose "
+        "class can differ, which survivor_type pins. The new "
         "character keeps the player identity's godmode: off by default (on by "
         "default only in a harness test run with profile=test), or the choice "
         "player_godmode made for that identity during this mission."
     ))
     async def player_respawn(
+        survivor_type: StrictStr | None = None,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
+        if survivor_type is not None:
+            if not is_vanilla_survivor_type(survivor_type):
+                raise ToolError(
+                    "unknown_survivor_type: "
+                    f"{survivor_type!r} is not a vanilla survivor class; expected one of: "
+                    + ", ".join(VANILLA_SURVIVOR_TYPES)
+                )
+            async with runtime.tool_lock:
+                return await runtime.call_bridge(
+                    "player_respawn_survivor",
+                    {"survivor_type": survivor_type},
+                    "client",
+                    _timeout(timeout_s),
+                )
         async with runtime.tool_lock:
             return await runtime.call_bridge(
                 "player_respawn", {}, "client", _timeout(timeout_s)

@@ -249,6 +249,13 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("valid_empty", {}, (True, None)),
         ("extra_random", {"random": True}, (False, "bad_args")),
     ),
+    "player_respawn_survivor": (
+        ("valid", {"survivor_type": "SurvivorM_Manua"}, (True, None)),
+        ("missing", {}, (False, "bad_args")),
+        ("extra_key", {"survivor_type": "SurvivorM_Manua", "extra": None}, (False, "bad_args")),
+        ("non_string", {"survivor_type": 1}, (False, "bad_args")),
+        ("mod_class", {"survivor_type": "SurvivorM_Mod"}, (False, "bad_args")),
+    ),
     "key_press": (
         ("valid_esc", {"dik": 1}, (True, None)),
         ("missing_dik", {}, (False, "bad_args")),

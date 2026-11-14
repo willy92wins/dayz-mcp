@@ -158,6 +158,7 @@ CLIENT_COMMANDS = {
     "input_trigger",
     "player_move",
     "player_respawn",
+    "player_respawn_survivor",
     "player_trace",
     "vehicle_get_in_client",
     "engine_set",
@@ -914,6 +915,52 @@ def is_printable_input_name(value: object) -> bool:
     return all(32 <= ord(character) <= 126 for character in value)
 
 
+# player_respawn_survivor: the 31 vanilla survivor classes. Source: the public
+# unbinarized config dump ravmustang/DayZ_SA_ClassName_Dump, commit b5daa78856
+# (2026-05-26), CurrentConfigs/characters_data/config.cpp lines 8724-10066
+# (CfgPatches DZ_Characters): every class with scope=2 deriving from
+# SurvivorMale_Base/SurvivorFemale_Base. The runtime ListAvailableCharacters()
+# is not enough for this allowlist: it also lists survivor classes a mod adds,
+# and a mod's class must be refused before the bridge.
+VANILLA_SURVIVOR_TYPES: tuple[str, ...] = (
+    "SurvivorM_Mirek",
+    "SurvivorM_Boris",
+    "SurvivorM_Cyril",
+    "SurvivorM_Denis",
+    "SurvivorM_Elias",
+    "SurvivorM_Francis",
+    "SurvivorM_Guo",
+    "SurvivorM_Hassan",
+    "SurvivorM_Indar",
+    "SurvivorM_Jose",
+    "SurvivorM_Kaito",
+    "SurvivorM_Lewis",
+    "SurvivorM_Manua",
+    "SurvivorM_Niki",
+    "SurvivorM_Oliver",
+    "SurvivorM_Peter",
+    "SurvivorM_Quinn",
+    "SurvivorM_Rolf",
+    "SurvivorM_Seth",
+    "SurvivorM_Taiki",
+    "SurvivorF_Eva",
+    "SurvivorF_Frida",
+    "SurvivorF_Gabi",
+    "SurvivorF_Helga",
+    "SurvivorF_Irena",
+    "SurvivorF_Judy",
+    "SurvivorF_Keiko",
+    "SurvivorF_Linda",
+    "SurvivorF_Maria",
+    "SurvivorF_Naomi",
+    "SurvivorF_Baty",
+)
+
+
+def is_vanilla_survivor_type(value: object) -> bool:
+    return isinstance(value, str) and value in VANILLA_SURVIVOR_TYPES
+
+
 # input_trigger bounds. Mirror MCPInputTriggerControl (DIK_MAX, HOLD_MAX_S,
 # PRESS_MAX_TTL_S) in addon/scripts/5_Mission/MCPClientBridge.c; a test keeps
 # the copies equal. hold_s and the press TTL are refused outside (0, max].
@@ -1564,6 +1611,7 @@ _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "chat_read": "bridge_capability_missing",
     "gameplay_state": "bridge_capability_missing",
     "hud_set": "bridge_capability_missing",
+    "player_respawn_survivor": "bridge_capability_missing",
     "player_view_set": "bridge_capability_missing",
     "ui_pause": "bridge_capability_missing",
     "dev_free_camera_set": "bridge_capability_missing",
@@ -1618,6 +1666,12 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "ui_pause": _command_schema(_schema_variant()),
     "restore_gameplay": _command_schema(_schema_variant()),
     "player_respawn": _command_schema(_schema_variant()),
+    "player_respawn_survivor": _command_schema(
+        _schema_variant(
+            required=("survivor_type",),
+            validators={"survivor_type": is_vanilla_survivor_type},
+        )
+    ),
     "key_press": _command_schema(
         _schema_variant(
             required=("dik",),

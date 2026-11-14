@@ -209,10 +209,10 @@ class AppendRetireRegressionTest(unittest.TestCase):
         )
         self.assertEqual(variant.count("ui_focus,ui_pause"), 1)
         variant = variant.replace("ui_focus,ui_pause", "ui_focus,ui_menu_set,ui_pause", 1)
-        self.assertEqual(variant.count('CLIENT_POLL_CAPS_MASK = "1.3fffffffffff"'), 1)
+        self.assertEqual(variant.count('CLIENT_POLL_CAPS_MASK = "1.7fffffffffff"'), 1)
         variant = variant.replace(
-            'CLIENT_POLL_CAPS_MASK = "1.3fffffffffff"',
             'CLIENT_POLL_CAPS_MASK = "1.7fffffffffff"',
+            'CLIENT_POLL_CAPS_MASK = "1.ffffffffffff"',
             1,
         )
         self.assertNotEqual(variant, source)
@@ -220,13 +220,13 @@ class AppendRetireRegressionTest(unittest.TestCase):
         CAPABILITY_MASK_TABLES["client"][1] = CLIENT_CAPABILITY_BITS + ("ui_menu_set",)
         try:
             constant = _mask_constant(variant, "CLIENT_POLL_CAPS_MASK")
-            self.assertEqual(constant, "1.7fffffffffff")
+            self.assertEqual(constant, "1.ffffffffffff")
             census = _const_census(variant, "CLIENT_POLL_CAPS")
             names, reason = parse_capability_mask("client", constant)
             self.assertEqual(reason, "ok")
             self.assertEqual(set(names), set(census))
             self.assertEqual(set(names), set(client_dispatch_census(variant)))
-            self.assertEqual(len(names), 47)
+            self.assertEqual(len(names), 48)
             self.assertEqual(encode_capability_mask("client", census), constant)
             self.assertEqual(
                 _translated_poll_names(self, "MCPClientBridge.c", variant, "client"),
