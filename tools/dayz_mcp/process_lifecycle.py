@@ -3378,7 +3378,7 @@ class ProcessLifecycle:
             ]
         if "current" in fallback:
             row["current"] = fallback["current"]
-        internal = dict(stored) if isinstance(stored, dict) else dict(fallback)
+        internal = dict(row)
         row.pop("exit_evidence", None)
         row["exit_diagnosis"] = _derive_exit_diagnosis(internal, actions)
         return row

@@ -258,6 +258,36 @@ class LifecycleDiagnosis508aTest(unittest.TestCase):
         finally:
             life.close()
 
+    def test_published_row_derives_from_locked_copy(self) -> None:
+        life, run, client = _dead_life()
+        try:
+            row = life.diagnostics(run)[0]
+            self.assertIsNone(row["exit_code"])
+            self.assertEqual(row["exit_diagnosis"]["classification"], "unknown")  # type: ignore[index]
+            key = life.lifecycle._client_action_key(RUN_ID, client)
+
+            class _FillingFallback(dict[str, object]):
+                def __contains__(self, item: object) -> bool:
+                    stored = life.lifecycle._client_role_observations[key]
+                    stored["exit_code"] = 7
+                    stored["exit_time_utc"] = EXITED
+                    return dict.__contains__(self, item)
+
+            published = life.lifecycle._published_client_row(
+                key, _FillingFallback()
+            )
+            self.assertIsNone(published["exit_code"])
+            self.assertEqual(
+                published["exit_diagnosis"]["classification"], "unknown"  # type: ignore[index]
+            )
+            later = life.lifecycle._published_client_row(key, {})
+            self.assertEqual(later["exit_code"], 7)
+            self.assertEqual(
+                later["exit_diagnosis"]["classification"], "spontaneous"  # type: ignore[index]
+            )
+        finally:
+            life.close()
+
     def test_reused_pid_no_anchor_unknown(self) -> None:
         life = _Life()
         try:
@@ -615,6 +645,8 @@ class LifecycleDiagnosis508aTest(unittest.TestCase):
                 life.diagnostics(run)[0]["exit_diagnosis"]["classification"],  # type: ignore[index]
                 "mcp_ordered",
             )
+            run.processes = []
+            life.store.replace(run)
             for index in range(64):
                 rec = _record(
                     1000 + index,
@@ -640,6 +672,7 @@ class LifecycleDiagnosis508aTest(unittest.TestCase):
             life.lifecycle._client_launch_output_dirs[key] = "some-folder"
             life.lifecycle._client_exit_deferrals[key] = 2
             run.processes = []
+            life.store.replace(run)
             generation = life.lifecycle._current_generation()
             for index in range(40):
                 other_key = (
@@ -1238,7 +1271,7 @@ class CancelAction508aTest(unittest.TestCase):
         life.lifecycle._observation_now = lambda: "2026-07-15T00:00:10.000Z"  # type: ignore[method-assign]
         return life, run, client
 
-    def _outcome(self, life) -> object:  # type: ignore[no-untyped-def]
+    def _cancel_outcome(self, life) -> object:  # type: ignore[no-untyped-def]
         actions = [
             a
             for items in life.lifecycle._client_actions.values()
@@ -1255,7 +1288,7 @@ class CancelAction508aTest(unittest.TestCase):
                 _FakeLaunched(), run_id=RUN_ID, record=client
             )
             self.assertTrue(result)
-            self.assertEqual(self._outcome(life), "terminated")
+            self.assertEqual(self._cancel_outcome(life), "terminated")
         finally:
             life.close()
 
@@ -1268,7 +1301,7 @@ class CancelAction508aTest(unittest.TestCase):
                 record=client,
             )
             self.assertTrue(result)
-            self.assertEqual(self._outcome(life), "terminated")
+            self.assertEqual(self._cancel_outcome(life), "terminated")
         finally:
             life.close()
 
@@ -1281,7 +1314,7 @@ class CancelAction508aTest(unittest.TestCase):
                 record=client,
             )
             self.assertFalse(result)
-            self.assertEqual(self._outcome(life), "unconfirmed")
+            self.assertEqual(self._cancel_outcome(life), "unconfirmed")
         finally:
             life.close()
 
@@ -1293,7 +1326,7 @@ class CancelAction508aTest(unittest.TestCase):
                 run_id=RUN_ID,
                 record=client,
             )
-            self.assertEqual(self._outcome(life), "failed")
+            self.assertEqual(self._cancel_outcome(life), "failed")
         finally:
             life.close()
 
@@ -1325,7 +1358,7 @@ class CancelAction508aTest(unittest.TestCase):
                 confirmed_error="launch_cancelled",
             )
             self.assertIsInstance(result, dict)
-            self.assertEqual(self._outcome(life), "terminated")
+            self.assertEqual(self._cancel_outcome(life), "terminated")
         finally:
             life.close()
 
