@@ -1250,6 +1250,62 @@ def audit_runtime_http(tools_dir: Path) -> tuple[RuntimeHttpFinding, ...]:
 # off Windows (see _ProcessCreationVisitor._is_canonical_linux_relay_popen).
 _LINUX_RELAY_FUNCTIONS = frozenset({"_supervise_worker", "_run_lifecycle_child"})
 _LINUX_BUILD_FUNCTIONS = frozenset({"run_addon_builder"})
+# Per audited file: the argv builder and the environment builder the one canonical
+# Popen must call. Both must be single, undecorated top-level defs of that file.
+_LINUX_POPEN_BUILDERS = {
+    "dayz_mcp/linux_launcher.py": ("_host_argv", "_child_environment"),
+    "dayz_mcp/linux_build.py": ("build_argv", "build_environment"),
+}
+# The only Popen keywords the canonical calls may pass. Everything that chooses or
+# changes what runs (shell, executable, preexec_fn, user/group, process_group, ...)
+# is outside this set, and so is a **mapping, whose keys the audit cannot see.
+_LINUX_POPEN_KEYWORDS = frozenset(
+    {"stdin", "stdout", "stderr", "env", "close_fds", "cwd", "pass_fds", "start_new_session"}
+)
+
+
+def _module_bindings(module: ast.Module, name: str) -> list[ast.AST]:
+    """Every statement or node in ``module`` that binds ``name``, at any depth."""
+    bindings: list[ast.AST] = []
+    for node in ast.walk(module):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == name:
+                bindings.append(node)
+        elif isinstance(node, ast.Name):
+            if node.id == name and isinstance(node.ctx, (ast.Store, ast.Del)):
+                bindings.append(node)
+        elif isinstance(node, ast.arg):
+            if node.arg == name:
+                bindings.append(node)
+        elif isinstance(node, ast.alias):
+            if (node.asname or node.name.split(".", 1)[0]) == name or node.name == "*":
+                bindings.append(node)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            if name in node.names:
+                bindings.append(node)
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name == name:
+                bindings.append(node)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
+            if node.name == name:
+                bindings.append(node)
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest == name:
+                bindings.append(node)
+    return bindings
+
+
+def _is_sole_top_level_def(module: ast.Module | None, name: str) -> bool:
+    """``name`` is bound exactly once in the file: by an undecorated top-level ``def``."""
+    if module is None:
+        return False
+    bindings = _module_bindings(module, name)
+    return (
+        len(bindings) == 1
+        and isinstance(bindings[0], ast.FunctionDef)
+        and bindings[0] in module.body
+        and not bindings[0].decorator_list
+    )
 _PROCESS_AUDIT_PATHS = frozenset(
     {
         "dayz_mcp/native_launcher_backend.py",
@@ -1321,6 +1377,11 @@ class _ProcessCreationVisitor(ast.NodeVisitor):
         self.direct_create_process_calls = 0
         self.canonical_create_flags_definitions = 0
         self.linux_relay_popen_calls: dict[str, int] = {}
+        self.module: ast.Module | None = None
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self.module = node
+        self.generic_visit(node)
 
     @property
     def aliases(self) -> dict[str, str]:
@@ -1388,24 +1449,42 @@ class _ProcessCreationVisitor(ast.NodeVisitor):
         The relay's build step (``linux_build``) is the counterpart of the
         launcher's AddonBuilder child: exactly one ``subprocess.Popen`` in
         ``run_addon_builder``, whose argv is the ``build_argv(...)`` call itself.
+
+        The call takes the argv as its only positional argument and otherwise only
+        the keywords in ``_LINUX_POPEN_KEYWORDS`` (no ``shell``, ``executable``,
+        ``preexec_fn``, no ``**mapping``); ``env``, when given, is the file's
+        environment builder call. The argv and environment builders must each be
+        bound exactly once in the file, by an undecorated top-level ``def``, so a
+        rebinding or a shadowing local cannot stand in for them.
+
+        The builders' bodies are trusted, not analysed: ``linux_build`` is a
+        sealed module (``packaged-modules.lock.json``), and ``linux_launcher`` is
+        the reviewed relay itself.
         """
-        expected_argv = {
-            "dayz_mcp/linux_launcher.py": "_host_argv",
-            "dayz_mcp/linux_build.py": "build_argv",
-        }.get(self.relative_path)
+        builders = _LINUX_POPEN_BUILDERS.get(self.relative_path)
+        if resolved != "subprocess.Popen" or builders is None:
+            return False
+        expected_argv, expected_env = builders
         allowed_functions = (
             _LINUX_RELAY_FUNCTIONS
             if self.relative_path == "dayz_mcp/linux_launcher.py"
             else _LINUX_BUILD_FUNCTIONS
         )
+        env_ok = all(
+            isinstance(keyword.value, ast.Call)
+            and self._is_name(keyword.value.func, expected_env)
+            and _is_sole_top_level_def(self.module, expected_env)
+            for keyword in node.keywords
+            if keyword.arg == "env"
+        )
         if (
-            resolved != "subprocess.Popen"
-            or expected_argv is None
-            or self.function not in allowed_functions
-            or not node.args
+            self.function not in allowed_functions
+            or len(node.args) != 1
             or not isinstance(node.args[0], ast.Call)
             or not self._is_name(node.args[0].func, expected_argv)
-            or any(keyword.arg == "shell" for keyword in node.keywords)
+            or not _is_sole_top_level_def(self.module, expected_argv)
+            or any(keyword.arg not in _LINUX_POPEN_KEYWORDS for keyword in node.keywords)
+            or not env_ok
         ):
             return False
         count = self.linux_relay_popen_calls.get(self.function, 0) + 1

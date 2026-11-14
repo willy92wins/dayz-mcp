@@ -292,7 +292,12 @@ and of the `Popen` launch path are skipped off Windows (`skipIf(os.name != "nt")
   `STEAM_COMPAT_CLIENT_INSTALL_PATH`), not the daemon's whole block. The
   PBO goes to `@Mod/Addons/` (both engines load that spelling on Linux). The `msvcrt` shared build lock is replaced
   by a `byte_lock` port. `security_runtime_audit` accepts exactly one `subprocess.Popen` here, in `run_addon_builder`,
-  with `build_argv(...)` as its argv and no shell: the counterpart of the launcher's AddonBuilder child.
+  with `build_argv(...)` as its only positional argument, `env=build_environment()` when an environment is given,
+  and no keyword outside `stdin`, `stdout`, `stderr`, `env`, `close_fds`, `cwd`, `pass_fds`, `start_new_session`
+  (so no `shell`, `executable`, `preexec_fn` or `**mapping`); both builders must be single undecorated top-level
+  `def`s of the file. The relay's two Popen calls in `linux_launcher` follow the same rule with `_host_argv` and
+  `_child_environment`. The builders' bodies are trusted, not analysed (`linux_build` is sealed). This is the
+  counterpart of the launcher's AddonBuilder child.
 
 Measured 2026-11-06 (DayZDiag 1.30.164289.70, GE-Proton11-1, `@DayZ_MCP`, scratch `HOME`), all through `dayz_test_run`:
 `mode=all`: bridge `ready` with server and client polls bound to the run about 34 s after `dayz_test_run` returned

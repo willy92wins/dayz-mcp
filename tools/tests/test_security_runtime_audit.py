@@ -1308,6 +1308,9 @@ def _create_registered_launcher(opened_launcher):
 def _host_argv(bundle, *, lifecycle):
     return ["python", "-I", "-m", "dayz_mcp.linux_worker_host"]
 
+def _child_environment(extra):
+    return dict(extra)
+
 def _run_lifecycle_child(bundle, frame, command, secrets_env):
     child = subprocess.Popen(_host_argv(bundle, lifecycle=True), stdin=subprocess.PIPE)
     return child
@@ -1343,12 +1346,19 @@ def _supervise_worker(bundle):
                 if finding.relative_path == "dayz_mcp/linux_build.py"
             ]
 
+    _LINUX_BUILD_BUILDERS = (
+        "import subprocess\n"
+        "def build_argv(payload):\n    return ['dayzmake', 'pack']\n"
+        "def build_environment():\n    return {}\n"
+    )
+
     def test_linux_build_accepts_one_build_argv_popen(self) -> None:
         self.assertEqual(
             self._linux_build_findings(
-                "import subprocess\n"
-                "def run_addon_builder(payload):\n"
-                "    return subprocess.Popen(build_argv(payload))\n"
+                self._LINUX_BUILD_BUILDERS
+                + "def run_addon_builder(payload):\n"
+                "    return subprocess.Popen(build_argv(payload), stdin=subprocess.DEVNULL,\n"
+                "        cwd='/', env=build_environment(), close_fds=True, start_new_session=True)\n"
             ),
             [],
         )
@@ -1365,12 +1375,49 @@ def _supervise_worker(bundle):
             with self.subTest(body=body):
                 self.assertTrue(self._linux_build_findings(body))
 
+    def test_linux_build_refuses_popen_that_changes_what_runs(self) -> None:
+        call = "def run_addon_builder(payload):\n    return subprocess.Popen({args})\n"
+        builders = self._LINUX_BUILD_BUILDERS
+        fixtures = {
+            "executable": builders + call.format(args="build_argv(payload), executable='/bin/sh'"),
+            "positional_shell": builders
+            + call.format(args="build_argv(payload), -1, None, None, None, None, None, True, True"),
+            "kwargs_mapping": builders + call.format(args="build_argv(payload), **{'shell': True}"),
+            "preexec_fn": builders + call.format(args="build_argv(payload), preexec_fn=print"),
+            "foreign_env": builders + call.format(args="build_argv(payload), env={'LD_PRELOAD': '/x.so'}"),
+            "builder_missing": "import subprocess\n" + call.format(args="build_argv(payload)"),
+            "builder_rebound": builders
+            + "build_argv = lambda payload: ['sh', '-c', 'id']\n"
+            + call.format(args="build_argv(payload)"),
+            "builder_shadowed_local": builders
+            + "def run_addon_builder(payload):\n"
+            "    build_argv = lambda p: ['sh', '-c', 'id']\n"
+            "    return subprocess.Popen(build_argv(payload))\n",
+            "builder_parameter": builders
+            + "def run_addon_builder(payload, build_argv=None):\n"
+            "    return subprocess.Popen(build_argv(payload))\n",
+            "builder_imported": "import subprocess\nfrom os import system as build_argv\n"
+            "def build_environment():\n    return {}\n" + call.format(args="build_argv(payload)"),
+            "builder_decorated": "import subprocess\nimport functools\n"
+            "@functools.cache\ndef build_argv(payload):\n    return ['dayzmake']\n"
+            + call.format(args="build_argv(payload)"),
+            "builder_nested": "import subprocess\nclass Holder:\n"
+            "    def build_argv(payload):\n        return ['sh']\n"
+            + call.format(args="build_argv(payload)"),
+        }
+        for label, body in fixtures.items():
+            with self.subTest(label=label):
+                self.assertTrue(self._linux_build_findings(body))
+
     def test_linux_relay_boundary_accepts_one_host_argv_popen_per_function(self) -> None:
         auditor = self._auditor()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self._linux_relay_tree(
-                root, "worker = subprocess.Popen(_host_argv(bundle, lifecycle=False), close_fds=True)"
+                root,
+                "worker = subprocess.Popen(_host_argv(bundle, lifecycle=False), stdin=subprocess.PIPE,"
+                " stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_child_environment({}),"
+                " pass_fds=(3,), close_fds=True, cwd='/')",
             )
             self.assertEqual(auditor.audit_process_creation(root), ())
 
@@ -1384,6 +1431,18 @@ def _supervise_worker(bundle):
             ),
             "shell": "worker = subprocess.Popen(_host_argv(bundle, lifecycle=False), shell=True)",
             "run_instead": "worker = subprocess.run(_host_argv(bundle, lifecycle=False))",
+            "positional_shell": (
+                "worker = subprocess.Popen(_host_argv(bundle, lifecycle=False),"
+                " -1, None, None, None, None, None, True, True)"
+            ),
+            "kwargs_mapping": "worker = subprocess.Popen(_host_argv(bundle, lifecycle=False), **{'shell': True})",
+            "executable": "worker = subprocess.Popen(_host_argv(bundle, lifecycle=False), executable='/bin/sh')",
+            "preexec_fn": "worker = subprocess.Popen(_host_argv(bundle, lifecycle=False), preexec_fn=print)",
+            "foreign_env": "worker = subprocess.Popen(_host_argv(bundle, lifecycle=False), env={'LD_PRELOAD': 'x'})",
+            "shadowed_builder": (
+                "_host_argv = lambda *a, **k: ['sh', '-c', 'id']\n"
+                "    worker = subprocess.Popen(_host_argv(bundle, lifecycle=False))"
+            ),
         }
         for label, call in fixtures.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
