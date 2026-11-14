@@ -145,6 +145,8 @@ class SuiteSteamViewTest(_SessionToolsFixture):
                 self.assertEqual(_RecordingProvider.reads, [])
                 self.assertNotIn("steam_app_view", result)
 
+    @unittest.skipIf(os.name != "nt", "Windows Steam registry provider defaults: off Windows the default provider is steam_linux's")
+
     async def test_the_real_observation_reads_a_real_registry_provider_for_each_tool(self) -> None:
         # The negative control: with the real observation back, each call
         # builds a real-registry provider and calls its read_active_process.

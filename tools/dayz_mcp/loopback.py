@@ -10890,7 +10890,11 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
     # second process LISTEN on an already-bound port, which defeats the exclusive
     # instance lock (two loopbacks would silently split bridge polls). Exclusive
     # bind makes the second bind fail with EADDRINUSE.
-    allow_reuse_address = False
+    # Linux differs: SO_REUSEADDR never admits a second listener there (that is
+    # SO_REUSEPORT), it only lets a restarted daemon bind while the game's last
+    # polls sit in TIME_WAIT. Without it the restart fails with EADDRINUSE for up
+    # to a minute, so it is on outside Windows.
+    allow_reuse_address = os.name != "nt"
 
     def __init__(self, *args, **kwargs):
         self._http_workers = threading.BoundedSemaphore(MAX_HTTP_WORKERS)

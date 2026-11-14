@@ -97,6 +97,7 @@ try:
 except ImportError:  # pragma: no cover - covered by the fail-closed runtime path.
     psutil = None  # type: ignore[assignment]
 
+from dayz_mcp import byte_lock, posix_fileops
 from dayz_mcp.accredited_daemon_transport import argv_matches_redirected
 from dayz_mcp.native_process_guard import NativeProcessGuard, identity_hashes
 from dayz_mcp.orphan_guard import image_name_of
@@ -106,7 +107,12 @@ from dayz_mcp.instance_context import (
     state_root_name,
     validate_instance_token,
 )
-from dayz_mcp.server_cli import open_lock_file, parse_server_tail_silent
+from dayz_mcp.server_cli import parse_server_tail_silent
+
+if os.name == "nt":
+    from dayz_mcp.server_cli import open_lock_file
+else:
+    open_lock_file = byte_lock.open_lock_file
 
 
 _MIGRATION_SUBDIR = ("migration", "P0S-IDENTITY-V2")
@@ -229,7 +235,7 @@ def _assert_no_name_surrogates(path: Path, error_code: str) -> None:
         except OSError as error:
             raise RunsBackupGateError(error_code) from error
         tag = int(getattr(value, "st_reparse_tag", 0) or 0)
-        if tag & _NAME_SURROGATE_BIT:
+        if tag & _NAME_SURROGATE_BIT or (os.name != "nt" and stat.S_ISLNK(value.st_mode)):
             raise RunsBackupGateError(error_code)
 
 
@@ -287,9 +293,22 @@ def _safe_unlink_owned(
         fault_injector(f"{phase_name}_before_unlink_open")
     if not os.path.lexists(path):
         return
-    if os.name != "nt":
-        raise RunsBackupGateError("runs_backup_recovery_conflict")
     candidates = expected if isinstance(expected, tuple) else (expected,)
+    if os.name != "nt":
+        try:
+            posix_fileops.unlink_owned(
+                path,
+                lambda actual: _matches_owned_bytes(actual, candidates, allow_prefix),
+                fault_injector=fault_injector,
+                phase_name=phase_name,
+            )
+        except posix_fileops.OwnedUnlinkConflict as error:
+            raise RunsBackupGateError("runs_backup_recovery_conflict") from error
+        except posix_fileops.OwnedUnlinkFailed as error:
+            raise RunsBackupGateError("runs_backup_recovery_failed") from error
+        if os.path.lexists(path):
+            raise RunsBackupGateError("runs_backup_recovery_failed")
+        return
     handle = _kernel32.CreateFileW(
         str(_absolute(path)),
         _GENERIC_READ | _DELETE_ACCESS,
@@ -353,8 +372,6 @@ def daemon_startup_election(paths: RuntimePaths) -> Iterator[bool]:
     """
     if not isinstance(paths, RuntimePaths):
         raise RunsBackupGateError("invalid_runtime_paths")
-    if msvcrt is None:
-        raise RunsBackupGateError("daemon_startup_lock_unavailable")
     try:
         paths.root.mkdir(parents=True, exist_ok=True)
     except OSError as error:
@@ -382,7 +399,7 @@ def daemon_startup_election(paths: RuntimePaths) -> Iterator[bool]:
                 raise OSError("short_lock_write")
         os.lseek(descriptor, 0, os.SEEK_SET)
         try:
-            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            byte_lock.try_lock(descriptor, 0)
             acquired = True
         except OSError as error:
             if error.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
@@ -402,15 +419,13 @@ def daemon_startup_election(paths: RuntimePaths) -> Iterator[bool]:
             try:
                 if acquired:
                     os.lseek(descriptor, 0, os.SEEK_SET)
-                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                    byte_lock.unlock(descriptor, 0)
             finally:
                 os.close(descriptor)
 
 
 @contextmanager
 def _exclusive_gate_lock(lock_path: Path) -> Iterator[None]:
-    if msvcrt is None:
-        raise RunsBackupGateError("runs_backup_lock_unavailable")
     _assert_no_name_surrogates(lock_path.parent, "runs_backup_lock_unavailable")
     if os.path.lexists(lock_path):
         _assert_regular_path(lock_path, "runs_backup_lock_unavailable")
@@ -431,7 +446,7 @@ def _exclusive_gate_lock(lock_path: Path) -> Iterator[None]:
             if os.fstat(descriptor).st_size < 1:
                 raise OSError("short_lock_write")
         os.lseek(descriptor, 0, os.SEEK_SET)
-        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        byte_lock.try_lock(descriptor, 0)
         acquired = True
         named = _assert_regular_path(lock_path, "runs_backup_lock_unavailable")
         if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
@@ -453,7 +468,7 @@ def _exclusive_gate_lock(lock_path: Path) -> Iterator[None]:
         try:
             if acquired:
                 os.lseek(descriptor, 0, os.SEEK_SET)
-                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                byte_lock.unlock(descriptor, 0)
         finally:
             os.close(descriptor)
 
@@ -461,8 +476,9 @@ def _exclusive_gate_lock(lock_path: Path) -> Iterator[None]:
 def _python_image(value: object) -> bool:
     if not isinstance(value, str) or not value:
         return False
-    basename = ntpath.basename(value).casefold()
-    return basename.startswith("python") and basename.endswith(".exe")
+    from dayz_mcp.linux_compat import is_python_image
+
+    return is_python_image(value)
 
 
 def _dayz_mcp_tail_is_writer(tail: list[str]) -> bool:
@@ -650,7 +666,7 @@ def capture_launch_ancestor_identity(
             or not math.isfinite(creation_time)
             or creation_time <= 0
             or not isinstance(executable, str)
-            or not ntpath.isabs(executable)
+            or not os.path.isabs(executable)
             or not isinstance(argv, list)
             or not argv
             or any(not isinstance(argument, str) or not argument for argument in argv)
@@ -978,7 +994,7 @@ def scan_dayz_mcp_processes(
                 raise RunsBackupGateError("process_scan_incomplete") from error
             if (
                 not isinstance(executable, str)
-                or not ntpath.isabs(executable)
+                or not os.path.isabs(executable)
                 or not _python_image(executable)
                 or not isinstance(argv, list)
                 or not argv
@@ -1238,14 +1254,20 @@ def _validate_transaction_marker(
     return payload, encoded
 
 
+def _rename_noreplace(source: Path, target: Path) -> None:
+    """os.rename with its Windows meaning: FileExistsError instead of replacing."""
+    if os.name == "nt":
+        os.rename(source, target)
+    else:
+        posix_fileops.rename_noreplace(source, target)
+
+
 def _publish_transaction_marker(
     marker_path: Path,
     next_path: Path,
     marker: Mapping[str, object],
     fault_injector: Callable[[str], None] | None,
 ) -> str:
-    if os.name != "nt":
-        raise RunsBackupGateError("runs_backup_transaction_publish_failed")
     if os.path.lexists(marker_path):
         raise RunsBackupGateError("runs_backup_transaction_conflict")
     if os.path.lexists(next_path):
@@ -1264,7 +1286,7 @@ def _publish_transaction_marker(
     if _read_file(next_path, "invalid_runs_backup_transaction") != encoded:
         raise RunsBackupGateError("runs_backup_transaction_conflict")
     try:
-        os.rename(next_path, marker_path)
+        _rename_noreplace(next_path, marker_path)
     except FileExistsError as error:
         raise RunsBackupGateError("runs_backup_transaction_conflict") from error
     except OSError as error:
@@ -1702,7 +1724,7 @@ def ensure_runs_v1_backup(
         if os.path.lexists(receipt_path):
             raise RunsBackupGateError("runs_backup_receipt_publish_conflict")
         try:
-            os.rename(pending_receipt_path, receipt_path)
+            _rename_noreplace(pending_receipt_path, receipt_path)
         except OSError as error:
             raise RunsBackupGateError("runs_backup_receipt_publish_failed") from error
         if fault_injector is not None:

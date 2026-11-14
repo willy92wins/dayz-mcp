@@ -11,6 +11,7 @@ import ctypes
 from dataclasses import dataclass, replace
 from datetime import datetime
 import ntpath
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -394,6 +395,26 @@ def _not_running(registered_pid: int | None) -> SteamSessionResult:
     )
 
 
+def is_steam_image(image_path: object) -> bool:
+    """The Steam client's process image: ``steam.exe``, or off Windows also the
+    native ``steam`` (``ubuntu12_32/steam``; see ``steam_linux``)."""
+    if not isinstance(image_path, str):
+        return False
+    if ntpath.basename(image_path).casefold() == "steam.exe":
+        # Windows, or a Windows-shaped value anywhere; a Linux image never is one.
+        return True
+    return os.name != "nt" and image_path.startswith("/") and os.path.basename(image_path) == "steam"
+
+
+def default_preflight_provider(*, real_registry: bool = False) -> SteamPreflightProvider:
+    """The host's provider: the Windows registry reader, or ``steam_linux``'s off Windows."""
+    if os.name != "nt":
+        from dayz_mcp.steam_linux import LinuxSteamPreflightProvider
+
+        return LinuxSteamPreflightProvider()
+    return WindowsSteamPreflightProvider(real_registry=real_registry)
+
+
 def _registered_is_live_steam(
     provider: SteamPreflightProvider, registered_pid: int | None
 ) -> bool:
@@ -411,7 +432,7 @@ def _registered_is_live_steam(
         image_path = provider.process_image_path(registered_pid)
     except Exception:
         return False
-    return isinstance(image_path, str) and ntpath.basename(image_path).casefold() == "steam.exe"
+    return is_steam_image(image_path)
 
 
 def _read_stable_snapshot(provider: SteamPreflightProvider) -> SteamActiveProcessSnapshot | None:
@@ -478,7 +499,7 @@ def evaluate_steam_session(
     """
 
     selected_provider = (
-        WindowsSteamPreflightProvider(real_registry=True) if provider is None else provider
+        default_preflight_provider(real_registry=True) if provider is None else provider
     )
     result = _evaluate_with(selected_provider)
     if (
@@ -535,6 +556,9 @@ def observe_app_steam_view(
     (dayz_test_run names that itself) and on any failure: it is advice, never a
     gate.
     """
+    if os.name != "nt" and app_provider is None and real_provider is None:
+        # No registry virtualization outside Windows: one view, nothing to compare.
+        return None
     try:
         real = (
             WindowsSteamPreflightProvider(real_registry=True)
@@ -587,7 +611,7 @@ def _evaluate_with(selected_provider: SteamPreflightProvider) -> SteamSessionRes
         image_path = selected_provider.process_image_path(registered_pid)
     except Exception:
         return _stale(registered_pid, live_pids)
-    if not isinstance(image_path, str) or ntpath.basename(image_path).casefold() != "steam.exe":
+    if not is_steam_image(image_path):
         return _stale(registered_pid, live_pids)
 
     return SteamSessionResult(

@@ -382,6 +382,14 @@ from dayz_mcp.box_occupancy import (
 # These imports bind definitions only; they do not launch or acquire anything.
 if os.name == "nt":
     from dayz_mcp import native_bundle, native_launcher_backend
+else:
+    # The Linux closure: the bundle loader, the relay, the stand-in that
+    # secure_launcher imports as native_launcher_backend, the Steam gate and
+    # the Proton client launcher.
+    from dayz_mcp import linux_compat, linux_launcher, native_bundle  # noqa: F401
+    from dayz_mcp import linux_build, linux_windows, proton_client, steam_linux  # noqa: F401
+
+    linux_compat.install_linux_launcher_backend()
 playbook_tool_mod.load_runner()
 # Freeze at import, before build_app can be delayed or repeated.
 _SERVER_SOURCES = ServerSourceWatch(loaded_source_files())

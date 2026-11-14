@@ -473,6 +473,13 @@ if os.name == 'nt':
                      'dayz_mcp.native_child_announcement', 'dayz_mcp.native_debug_state',
                      'dayz_mcp.dayz_tools_paths', 'dayz_mcp.request_path_authority'})
 assert expected <= set(loaded_source_files()), sorted(expected - set(loaded_source_files()))
+# Imported in a branch for the other host, so they never load on this one.
+other_host_only = (
+    {'dayz_mcp.linux_build', 'dayz_mcp.linux_launcher', 'dayz_mcp.linux_windows',
+     'dayz_mcp.podman_server', 'dayz_mcp.proton_client', 'dayz_mcp.steam_linux'}
+    if os.name == 'nt'
+    else {'dayz_mcp.native_launcher_backend', 'dayz_mcp.native_bundle'}
+)
 missing = []
 for name, path in loaded_source_files().items():
     if not name.startswith('dayz_mcp.') or path is None:
@@ -484,8 +491,7 @@ for name, path in loaded_source_files().items():
         elif isinstance(node, ast.Import):
             targets = [x.name for x in node.names if x.name.startswith('dayz_mcp')]
         missing.extend((name, node.lineno, target) for target in targets
-                       if target not in sys.modules and (os.name == 'nt' or target not in
-                           {'dayz_mcp.native_launcher_backend', 'dayz_mcp.native_bundle'}))
+                       if target not in sys.modules and target not in other_host_only)
 assert not missing, missing
 server.playbook_tool_mod.load_runner()
 after = server._SERVER_SOURCES.snapshot()
