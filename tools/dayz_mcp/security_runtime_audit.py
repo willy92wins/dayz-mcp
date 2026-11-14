@@ -1393,36 +1393,263 @@ def _reviewed_dump(source: str) -> str:
     return ast.dump(ast.parse(source).body[0], include_attributes=False)
 
 
+_REVIEWED_SEALED_DAYZMAKE = (
+    "def _sealed_dayzmake() -> tuple[int | None, str | None, str]:\n"
+    "    \"\"\"A sealed memfd holding the pinned dayzmake, its ``/proc`` path, or a refusal.\n"
+    "\n"
+    "    Returns ``(descriptor, argv0, \"\")`` on success; the caller owns the\n"
+    "    descriptor and closes it once the child has started.\n"
+    "    \"\"\"\n"
+    "    found = shutil.which('dayzmake')\n"
+    "    if found is None:\n"
+    "        return None, None, f'dayzmake not found on PATH (install the {DAYZMAKE_VERSION} release)\\n'\n"
+    "    absolute = os.path.realpath(os.path.abspath(found))\n"
+    "    if not hasattr(os, 'memfd_create'):\n"
+    "        return None, None, 'dayzmake_sealed_image_unavailable: memfd_create is unavailable\\n'\n"
+    "    source_fd: int | None = None\n"
+    "    sealed_fd: int | None = None\n"
+    "    try:\n"
+    "        source_fd = os.open(absolute, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)\n"
+    "        info = os.fstat(source_fd)\n"
+    "        if not stat.S_ISREG(info.st_mode):\n"
+    "            return None, None, f'dayzmake at {absolute} is not a regular file\\n'\n"
+    "        flags = getattr(os, 'MFD_CLOEXEC', 0) | getattr(os, 'MFD_ALLOW_SEALING', 0)\n"
+    "        sealed_fd = os.memfd_create('dayzmake', flags)\n"
+    "        digest = hashlib.sha256()\n"
+    "        while True:\n"
+    "            block = os.read(source_fd, 1024 * 1024)\n"
+    "            if not block:\n"
+    "                break\n"
+    "            digest.update(block)\n"
+    "            view = memoryview(block)\n"
+    "            while view:\n"
+    "                written = os.write(sealed_fd, view)\n"
+    "                view = view[written:]\n"
+    "        actual = digest.hexdigest()\n"
+    "        expected = expected_sha256()\n"
+    "        if actual != expected:\n"
+    "            os.close(sealed_fd)\n"
+    "            sealed_fd = None\n"
+    "            return None, None, (\n"
+    "                f'dayzmake_pin_mismatch: {absolute} is sha256 {actual}, expected {expected} '\n"
+    "                f'({DAYZMAKE_VERSION}); set {PIN_OVERRIDE_ENV} to pin a development build\\n'\n"
+    "            )\n"
+    "        import fcntl\n"
+    "        seals = (\n"
+    "            getattr(fcntl, 'F_SEAL_SHRINK', 2)\n"
+    "            | getattr(fcntl, 'F_SEAL_GROW', 4)\n"
+    "            | getattr(fcntl, 'F_SEAL_WRITE', 8)\n"
+    "            | getattr(fcntl, 'F_SEAL_SEAL', 1)\n"
+    "        )\n"
+    "        fcntl.fcntl(sealed_fd, getattr(fcntl, 'F_ADD_SEALS', 1033), seals)\n"
+    "    except OSError as error:\n"
+    "        if sealed_fd is not None:\n"
+    "            os.close(sealed_fd)\n"
+    "        return None, None, f'dayzmake_sealed_image_unavailable: {absolute}: {error}\\n'\n"
+    "    finally:\n"
+    "        if source_fd is not None:\n"
+    "            os.close(source_fd)\n"
+    "    return sealed_fd, f'/proc/self/fd/{sealed_fd}', ''\n"
+)
+
+
 def _sealed_dayzmake_ok(module: ast.Module | None) -> bool:
-    """``_sealed_dayzmake`` is the one source of the build's sealed image."""
+    """``_sealed_dayzmake`` is AST-equal to its reviewed source, bound once."""
     if module is None or not _is_sole_top_level_def(module, "_sealed_dayzmake"):
         return False
     node = _top_level_def(module, "_sealed_dayzmake")
     if node is None:
         return False
-    call_names = {
-        _attribute_name(child.func)
-        for child in ast.walk(node)
-        if isinstance(child, ast.Call)
-    }
-    plain_calls = {
-        child.func.id
-        for child in ast.walk(node)
-        if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
-    }
-    has_proc_path = any(
-        isinstance(child, ast.JoinedStr)
-        and any(
-            isinstance(part, ast.Constant) and part.value == "/proc/self/fd/"
-            for part in child.values
-        )
-        for child in ast.walk(node)
-    )
+    return ast.dump(node, include_attributes=False) == _reviewed_dump(_REVIEWED_SEALED_DAYZMAKE)
+
+
+_REVIEWED_HOST_FUNCTIONS = {
+    "_read_app": (
+        "def _read_app(bundle: Path, expected_sha256: str) -> dict[str, bytes]:\n"
+        "    path = bundle / 'app.pyz'\n"
+        "    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)\n"
+        "    try:\n"
+        "        info = os.fstat(descriptor)\n"
+        "        if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_APP_BYTES:\n"
+        "            raise RuntimeError('app_invalid')\n"
+        "        with os.fdopen(os.dup(descriptor), 'rb') as stream:\n"
+        "            raw = stream.read(_MAX_APP_BYTES + 1)\n"
+        "    finally:\n"
+        "        os.close(descriptor)\n"
+        "    if hashlib.sha256(raw).hexdigest().upper() != expected_sha256.upper():\n"
+        "        raise RuntimeError('app_hash_mismatch')\n"
+        "    with zipfile.ZipFile(io.BytesIO(raw)) as archive:\n"
+        "        return {item.filename: archive.read(item) for item in archive.infolist()}\n"
+    ),
+    "_load_app_main": (
+        "def _load_app_main(members: dict[str, bytes], bundle: Path) -> types.ModuleType:\n"
+        "    \"\"\"Execute the sealed ``__main__.py`` as a module, with an ``msvcrt`` for its import.\n"
+        "\n"
+        "    The shim is in ``sys.modules`` only while that module body runs: a module\n"
+        "    named ``msvcrt`` makes ``subprocess`` (and so ``asyncio``) take its Windows\n"
+        "    branch, so everything else must already be imported and it is removed again.\n"
+        "    \"\"\"\n"
+        "    module = types.ModuleType('dayz_test_app_main')\n"
+        "    module.__file__ = str(bundle / 'app.pyz' / '__main__.py')\n"
+        "    shim = types.ModuleType('msvcrt')\n"
+        "    shim.open_osfhandle = lambda handle, _flags: int(handle)\n"
+        "    if 'msvcrt' in sys.modules:\n"
+        "        raise RuntimeError('msvcrt_present')\n"
+        "    sys.modules['msvcrt'] = shim\n"
+        "    sys.modules[module.__name__] = module\n"
+        "    try:\n"
+        "        exec(compile(members['__main__.py'], module.__file__, 'exec', dont_inherit=True), module.__dict__)\n"
+        "    finally:\n"
+        "        del sys.modules['msvcrt']\n"
+        "    module._bundle_root = lambda: bundle\n"
+        "    return module\n"
+    ),
+    "_venv_root": (
+        "def _venv_root() -> Path | None:\n"
+        "    \"\"\"The venv root named by the ``pyvenv.cfg`` next to or above the executable.\n"
+        "\n"
+        "    With ``-S``, ``site`` never runs, and on Python before 3.14 the venv is\n"
+        "    only detected by ``site``: ``sys.prefix`` (and so ``sysconfig``) still\n"
+        "    names the base installation, whose site-packages does not hold the\n"
+        "    venv's ``psutil``. Locate the venv the way ``site`` does, from\n"
+        "    ``pyvenv.cfg`` beside ``sys.executable`` or in its parent directory,\n"
+        "    without importing ``site`` or processing any ``.pth`` file.\n"
+        "    \"\"\"\n"
+        "    executable = Path(sys.executable)\n"
+        "    for directory in (executable.parent, executable.parent.parent):\n"
+        "        if (directory / 'pyvenv.cfg').is_file():\n"
+        "            return directory\n"
+        "    return None\n"
+    ),
+    "_add_site_packages": (
+        "def _add_site_packages() -> None:\n"
+        "    \"\"\"Add site-packages for ``psutil`` without running any ``.pth`` hook.\"\"\"\n"
+        "    candidates: list[str] = []\n"
+        "    venv = _venv_root()\n"
+        "    if venv is not None:\n"
+        "        version = f'python{sys.version_info.major}.{sys.version_info.minor}'\n"
+        "        candidates.extend(\n"
+        "            str(venv / relative)\n"
+        "            for relative in (\n"
+        "                Path('lib') / version / 'site-packages',\n"
+        "                Path('lib64') / version / 'site-packages',\n"
+        "                Path('Lib') / 'site-packages',\n"
+        "            )\n"
+        "        )\n"
+        "        try:\n"
+        "            candidates.extend(\n"
+        "                str(path) for path in sorted(venv.glob('lib/python*/site-packages'))\n"
+        "            )\n"
+        "        except OSError:\n"
+        "            pass\n"
+        "    else:\n"
+        "        paths = sysconfig.get_paths()\n"
+        "        for key in ('purelib', 'platlib'):\n"
+        "            candidate = paths.get(key)\n"
+        "            if candidate:\n"
+        "                candidates.append(candidate)\n"
+        "    for candidate in candidates:\n"
+        "        if candidate not in sys.path and os.path.isdir(candidate):\n"
+        "            sys.path.append(candidate)\n"
+    ),
+    "main": (
+        "def main(argv: list[str] | None = None) -> int:\n"
+        "    parser = argparse.ArgumentParser(prog='dayz_mcp.linux_worker_host', allow_abbrev=False)\n"
+        "    parser.add_argument('--bundle', required=True)\n"
+        "    parser.add_argument('--app-sha256', required=True)\n"
+        "    parser.add_argument('--lifecycle-child', action='store_true')\n"
+        "    args = parser.parse_args(argv)\n"
+        "    bundle = Path(args.bundle)\n"
+        "    if not bundle.is_absolute() or os.path.normpath(args.bundle) != args.bundle:\n"
+        "        return 2\n"
+        "    members = _read_app(bundle, args.app_sha256)\n"
+        "    sealed = _SealedModuleFinder(members, str(bundle / 'app.pyz'))\n"
+        "    already = [name for name in sealed._sources if name in sys.modules]\n"
+        "    if already:\n"
+        "        raise RuntimeError('sealed_module_preloaded')\n"
+        "    sys.meta_path.insert(0, sealed)\n"
+        "    import dayz_mcp\n"
+        "    _add_site_packages()\n"
+        "    import asyncio\n"
+        "    import subprocess\n"
+        "    from dayz_mcp import linux_compat\n"
+        "    linux_compat.install()\n"
+        "    app_main = _load_app_main(members, bundle)\n"
+        "    sys.argv = [sys.argv[0], *(['--lifecycle-child'] if args.lifecycle_child else [])]\n"
+        "    return app_main.main()\n"
+    ),
+}
+_REVIEWED_HOST_CLASS = (
+    "class _SealedModuleFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):\n"
+    "    \"\"\"Serve ``dayz_mcp`` and ``dayz_mcp.<name>`` from the verified archive.\"\"\"\n"
+    "    def __init__(self, members: dict[str, bytes], origin: str) -> None:\n"
+    "        self._sources = {\n"
+    "            'dayz_mcp.' + name[len(_PACKAGE_PREFIX):-3]: data\n"
+    "            for name, data in members.items()\n"
+    "            if name.startswith(_PACKAGE_PREFIX)\n"
+    "            and name.endswith('.py')\n"
+    "            and name != _PACKAGE_PREFIX + '__init__.py'\n"
+    "            and '/' not in name[len(_PACKAGE_PREFIX):]\n"
+    "        }\n"
+    "        init = members.get(_PACKAGE_PREFIX + '__init__.py')\n"
+    "        if init is None:\n"
+    "            raise RuntimeError('package_init_missing')\n"
+    "        self._sources['dayz_mcp'] = init\n"
+    "        self._origin = origin\n"
+    "    def find_spec(self, fullname, path=None, target=None):\n"
+    "        if fullname not in self._sources:\n"
+    "            return None\n"
+    "        if fullname == 'dayz_mcp':\n"
+    "            spec = importlib.util.spec_from_loader(\n"
+    "                fullname, self, origin=f'{self._origin}/dayz_mcp/__init__.py', is_package=True\n"
+    "            )\n"
+    "            spec.submodule_search_locations = []\n"
+    "            return spec\n"
+    "        return importlib.util.spec_from_loader(\n"
+    "            fullname, self, origin=f\"{self._origin}/{fullname.replace('.', '/')}.py\"\n"
+    "        )\n"
+    "    def create_module(self, spec):\n"
+    "        return None\n"
+    "    def exec_module(self, module: types.ModuleType) -> None:\n"
+    "        source = self._sources[module.__name__]\n"
+    "        module.__file__ = module.__spec__.origin\n"
+    "        exec(compile(source, module.__spec__.origin, 'exec', dont_inherit=True), module.__dict__)\n"
+)
+
+
+def _host_contract_ok(module: ast.Module | None) -> bool:
+    """Every definition on the host's app.pyz-to-exec path is AST-equal to reviewed text.
+
+    Pinning the whole path (not only a no-rebinding rule at the exec site) is
+    what makes a subscript store, ``del``, augmented assignment or mutating
+    call on ``members`` or ``self._sources`` in any of these definitions a
+    finding: the mutated definition no longer matches its reviewed AST.
+    """
+    if module is None:
+        return False
+    for name, source in _REVIEWED_HOST_FUNCTIONS.items():
+        node = _top_level_def(module, name)
+        bindings = _module_bindings(module, name)
+        if (
+            node is None
+            or len(bindings) != 1
+            or bindings[0] is not node
+            or node.decorator_list
+            or ast.dump(node, include_attributes=False) != _reviewed_dump(source)
+        ):
+            return False
+    classes = [
+        node
+        for node in module.body
+        if isinstance(node, ast.ClassDef) and node.name == "_SealedModuleFinder"
+    ]
+    bindings = _module_bindings(module, "_SealedModuleFinder")
     return (
-        "os.memfd_create" in call_names
-        and "fcntl.fcntl" in call_names
-        and "expected_sha256" in plain_calls
-        and has_proc_path
+        len(classes) == 1
+        and len(bindings) == 1
+        and bindings[0] is classes[0]
+        and not classes[0].decorator_list
+        and ast.dump(classes[0], include_attributes=False) == _reviewed_dump(_REVIEWED_HOST_CLASS)
     )
 
 
@@ -1774,6 +2001,8 @@ class _ProcessCreationVisitor(ast.NodeVisitor):
 
     def _is_canonical_host_dynamic(self, node: ast.Call, resolved: str | None) -> bool:
         if self.relative_path != _HOST_PATH or self.function not in _HOST_EXEC_FUNCTIONS:
+            return False
+        if not _host_contract_ok(self.module):
             return False
         if resolved == "exec":
             return (
@@ -2283,6 +2512,24 @@ def audit_process_creation(tools_dir: Path) -> tuple[ProcessCreationFinding, ...
                     0,
                     "_create_registered_launcher",
                     "create_process_call_missing",
+                )
+            )
+        if relative == "dayz_mcp/linux_build.py" and not _sealed_dayzmake_ok(parsed[module]):
+            findings.append(
+                ProcessCreationFinding(
+                    relative,
+                    0,
+                    "<module>",
+                    "sealed_dayzmake_contract_invalid",
+                )
+            )
+        if relative == _HOST_PATH and not _host_contract_ok(parsed[module]):
+            findings.append(
+                ProcessCreationFinding(
+                    relative,
+                    0,
+                    "<module>",
+                    "host_exec_path_contract_invalid",
                 )
             )
         if (

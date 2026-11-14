@@ -452,6 +452,20 @@ class HostProbeTest(unittest.TestCase):
         self.assertIsNone(derived("/s/steamapps/common/Other"))
 
 
+@unittest.skipUnless(POSIX, "the Linux packaged-modules lock check")
+class LinuxLockCheckTest(unittest.TestCase):
+    def test_check_linux_runs_from_tools_without_the_windows_builder(self) -> None:
+        done = subprocess.run(
+            [sys.executable, "write_packaged_modules_lock.py", "--check-linux"],
+            cwd=TOOLS,
+            input=b"",
+            capture_output=True,
+            timeout=60,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+        self.assertIn(b"packaged modules linux lock ok", done.stdout)
+
+
 class LinuxHostArgvShapeTest(unittest.TestCase):
     """The sealed-host argv shape and the extra-key refusal, on any platform."""
 

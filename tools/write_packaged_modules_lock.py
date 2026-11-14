@@ -10,8 +10,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import build_native_launcher
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOCK_PATH = REPO_ROOT / "tools" / "packaged-modules.lock.json"
 LINUX_LOCK_PATH = REPO_ROOT / "tools" / "packaged-modules.linux.lock.json"
@@ -38,6 +36,11 @@ DRIFT_RECIPE = (
 
 
 def expected_paths() -> list[str]:
+    # Imported here, not at module level: deriving the Windows set needs
+    # build_native_launcher (and its Windows-only import chain), while the
+    # Linux lock operations must run where that chain cannot be imported.
+    import build_native_launcher
+
     paths = [f"tools/dayz_mcp/{name}" for name in build_native_launcher.PACKAGED_MODULES]
     paths.append("tools/dayz_mcp/__init__.py")
     paths.append("tools/native-launchers/dayz-test-v1/src/app_main.py")
@@ -210,9 +213,10 @@ def main(argv: list[str] | None = None, *, root: Path = REPO_ROOT) -> int:
     parser = argparse.ArgumentParser(
         description="Write or check the lock of sources embedded in the sealed launcher"
     )
-    parser.add_argument("--check", action="store_true")
-    parser.add_argument("--linux", action="store_true", help="write the Linux lock instead")
-    parser.add_argument("--check-linux", action="store_true", help="check the Linux lock instead")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--check", action="store_true")
+    modes.add_argument("--linux", action="store_true", help="write the Linux lock instead")
+    modes.add_argument("--check-linux", action="store_true", help="check the Linux lock instead")
     options = parser.parse_args(argv)
     if options.linux or options.check_linux:
         linux_path = root / "tools" / "packaged-modules.linux.lock.json"

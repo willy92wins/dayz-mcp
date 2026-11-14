@@ -7,7 +7,7 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -94,6 +94,22 @@ class PackagedModulesLockTest(unittest.TestCase):
         drifted_files["tools/dayz_mcp/linux_compat.py"] = "0" * 64
         drifted["files"] = drifted_files
         self.assertTrue(linux_problems(drifted, compute_linux_lock()))
+
+    def test_lock_modes_are_mutually_exclusive_and_do_not_write(self) -> None:
+        before = (LOCK_PATH.read_bytes(), LINUX_LOCK_PATH.read_bytes())
+        for argv in (
+            ["--check", "--linux"],
+            ["--check", "--check-linux"],
+            ["--linux", "--check-linux"],
+            ["--check", "--linux", "--check-linux"],
+        ):
+            with self.subTest(argv=argv), redirect_stdout(io.StringIO()), redirect_stderr(
+                io.StringIO()
+            ):
+                with self.assertRaises(SystemExit) as caught:
+                    main(argv)
+            self.assertNotEqual(caught.exception.code, 0)
+        self.assertEqual((LOCK_PATH.read_bytes(), LINUX_LOCK_PATH.read_bytes()), before)
 
     def test_fb_1025_main_check_returns_zero_on_this_tree(self) -> None:
         buffer = io.StringIO()

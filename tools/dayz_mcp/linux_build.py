@@ -212,7 +212,7 @@ def run_addon_builder(
                         # and a cancel must end those too (the job object does on Windows).
                         start_new_session=True,
                     )
-                except PermissionError as error:
+                except OSError as error:
                     if output_sink is not None:
                         output_sink(
                             "stderr",

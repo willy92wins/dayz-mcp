@@ -1443,6 +1443,11 @@ def _create_registered_launcher(opened_launcher):
                 "    return subprocess.Popen(",
                 "    sealed_fd = 99\n    return subprocess.Popen(",
             ),
+            "sealed_dayzmake_conditional_return": self._build_builders().replace(
+                '    return sealed_fd, f"/proc/self/fd/{sealed_fd}", ""',
+                '    return sealed_fd, f"/proc/self/fd/{sealed_fd}" if False else absolute, ""',
+            )
+            + canonical_build,
             "ld_preload_in_build_keys": self._build_builders()
             + '\n_BUILD_ENV_KEYS += ("LD_PRELOAD",)\n'
             + canonical_build,
@@ -1562,6 +1567,42 @@ def _create_registered_launcher(opened_launcher):
                     [f for f in findings if f.relative_path == "dayz_mcp/linux_worker_host.py"],
                     label,
                 )
+
+    def test_linux_worker_host_exec_path_is_pinned(self) -> None:
+        auditor = self._auditor()
+        real = (TOOLS_DIR / "dayz_mcp/linux_worker_host.py").read_text(encoding="utf-8")
+        marker = 'members["__main__.py"] = b"UNAPPROVED_MARKER=True\\n"\n'
+        bodies = {
+            "load_app_main_subscript_store": real.replace(
+                "    sys.modules[module.__name__] = module\n",
+                "    sys.modules[module.__name__] = module\n    " + marker,
+            ),
+            "main_subscript_store": real.replace(
+                "    members = _read_app(bundle, args.app_sha256)\n",
+                "    members = _read_app(bundle, args.app_sha256)\n    " + marker,
+            ),
+            "sources_subscript_store_in_init": real.replace(
+                "        self._origin = origin\n",
+                '        self._sources["dayz_mcp.linux_compat"] = b"UNAPPROVED_MARKER=True\\n"\n'
+                "        self._origin = origin\n",
+            ),
+        }
+
+        def host_findings(source: str) -> list[object]:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write(root, "dayz_mcp/linux_worker_host.py", source)
+                return [
+                    finding
+                    for finding in auditor.audit_process_creation(root)
+                    if finding.relative_path == "dayz_mcp/linux_worker_host.py"
+                ]
+
+        self.assertEqual(host_findings(real), [])
+        for label, source in bodies.items():
+            with self.subTest(host_path=label):
+                self.assertNotEqual(source, real, label)
+                self.assertTrue(host_findings(source), label)
 
     def test_linux_build_refuses_any_other_process_start(self) -> None:
         for body in (

@@ -314,10 +314,14 @@ and of the `Popen` launch path are skipped off Windows (`skipIf(os.name != "nt")
   keyword outside `stdin`, `stdout`, `stderr`, `env`, `close_fds`, `cwd`, `pass_fds`, `start_new_session`
   (so no `shell`, `executable`, `preexec_fn` or `**mapping`); both builders must be single undecorated top-level
   `def`s of the file and must be AST-equal to the reviewed sources the audit carries, as must every constant
-  they read. The relay's two Popen calls in `linux_launcher` follow the same rule with `_host_argv` and
-  `_child_environment` (whose extra keys are limited to the four `DAYZ_MCP_*` names and which raises on any
-  other), and `linux_worker_host.py` is audited too: only its two sealed `exec(compile(...))` shapes over
-  archive bytes are allowed there. This is the counterpart of the launcher's AddonBuilder child.
+  they read; `_sealed_dayzmake`, the one source of the sealed image, is pinned the same way. The relay's two
+  Popen calls in `linux_launcher` follow the same rule with `_host_argv` and `_child_environment` (whose extra
+  keys are limited to the four `DAYZ_MCP_*` names and which raises on any other), and `linux_worker_host.py` is
+  audited too: only its two sealed `exec(compile(...))` shapes over archive bytes are allowed there, and every
+  definition on the path from reading `app.pyz` to those exec sites (`_read_app`, the sealed finder class,
+  `_load_app_main`, `main` and the site-packages helpers it calls) must be AST-equal to the reviewed sources
+  the audit carries, bound exactly once at top level, so a mutation of `members` or of the finder's sources
+  anywhere on that path is a finding. This is the counterpart of the launcher's AddonBuilder child.
 
 Measured 2026-11-06 (DayZDiag 1.30.164289.70, GE-Proton11-1, `@DayZ_MCP`, scratch `HOME`), all through `dayz_test_run`:
 `mode=all`: bridge `ready` with server and client polls bound to the run about 34 s after `dayz_test_run` returned

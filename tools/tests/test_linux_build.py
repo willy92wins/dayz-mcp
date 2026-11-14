@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
@@ -246,6 +247,25 @@ class RunAddonBuilderTest(unittest.TestCase):
             )
         self.assertFalse(json.loads(raw)["ok"])
         self.assertIn(b"dayzmake_sealed_image_unavailable", b"".join(sink))
+
+    def test_a_sealed_image_the_kernel_cannot_exec_is_reported(self) -> None:
+        for label, error in (
+            ("missing_proc_fd", FileNotFoundError(errno.ENOENT, "no /proc/self/fd")),
+            ("incompatible_image", OSError(errno.ENOEXEC, "Exec format error")),
+        ):
+            with self.subTest(error=label):
+                sink: list[bytes] = []
+                with mock.patch.object(
+                    linux_build.subprocess, "Popen", side_effect=error
+                ):
+                    raw = linux_build.run_addon_builder(
+                        self.payload,
+                        cancelled=lambda: False,
+                        output_sink=lambda _channel, data: sink.append(data),
+                    )
+                self.assertFalse(json.loads(raw)["ok"])
+                self.assertIn(b"dayzmake_sealed_image_unavailable", b"".join(sink))
+                self.assertIn(str(error).encode(), b"".join(sink))
 
     def test_a_broken_tmpdir_does_not_stop_the_build(self) -> None:
         with mock.patch.dict(os.environ, {"TMPDIR": "/nonexistent/dayz-mcp-tmpdir"}):
