@@ -778,6 +778,35 @@ def _utc_epoch(value: object) -> float | None:
         return None
 
 
+_TERMINATION_LINE_TEXT = "--- Termination successfully completed ---"
+_COUNTING_ACTION_OUTCOMES = frozenset({"posted", "terminated", "unconfirmed"})
+
+
+def _redact_diagnostic_text(text: str) -> str:
+    """Mask identifiers in one diagnostic line, in the brief's order."""
+    if not isinstance(text, str):
+        return ""
+    out = re.sub(
+        r"([A-Za-z]:\\Users\\)[^\\/]+", r"\1<user>", text
+    )
+    out = re.sub(
+        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "<email>", out
+    )
+    out = re.sub(
+        r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
+        "<uuid>",
+        out,
+    )
+    out = re.sub(r"7656119\d{10}", "<steamid>", out)
+    out = re.sub(r"[A-Za-z0-9+/_-]{20,}={1,2}", "<id>", out)
+    out = re.sub(r"\b[0-9a-fA-F]{24,}\b", "<hex>", out)
+    out = re.sub(r"[A-Za-z0-9_-]{32,}", "<token>", out)
+    out = re.sub(
+        r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b", "<ip>", out
+    )
+    return out
+
+
 def _run_age_s(run: RunRecord, now: float) -> float:
     stamps = [
         stamp
@@ -903,8 +932,13 @@ def _merge_client_observations(
     """
 
     merged = dict(observation)
+    merged.pop("exit_diagnosis", None)
+    merged.pop("exit_evidence", None)
     if not isinstance(previous, dict):
         return merged
+    previous_evidence = previous.get("exit_evidence")
+    if isinstance(previous_evidence, dict):
+        merged["exit_evidence"] = dict(previous_evidence)
     new_state = merged.get("state")
     old_state = previous.get("state")
     if _CLIENT_STATE_STRENGTH.get(new_state, 0) < _CLIENT_STATE_STRENGTH.get(
@@ -926,6 +960,61 @@ def _merge_client_observations(
         # observed: the stamp never moves backwards.
         merged["observed_at_utc"] = old_seen
     return merged
+
+
+_COUNTING_DERIVED_OUTCOMES = frozenset(
+    {"posted", "terminated", "unconfirmed"}
+)
+
+
+def _derive_exit_diagnosis(
+    row: dict[str, object],
+    actions: list[dict[str, object]],
+) -> dict[str, object] | None:
+    """Pure derivation from stored evidence; nothing derived is cached."""
+    if row.get("state") != "dead":
+        return None
+    evidence = row.get("exit_evidence")
+    if not isinstance(evidence, dict):
+        evidence = {}
+    exit_epoch = _utc_epoch(row.get("exit_time_utc"))
+    moment = exit_epoch
+    if moment is None:
+        moment = _utc_epoch(row.get("first_observed_dead_at_utc"))
+    classification = "unknown"
+    if row.get("exit_code") is not None:
+        classification = "spontaneous"
+        for item in actions:
+            outcome = item.get("outcome")
+            if outcome is not None and outcome not in _COUNTING_DERIVED_OUTCOMES:
+                continue
+            at_epoch = _utc_epoch(item.get("at_utc"))
+            if at_epoch is None or moment is None or at_epoch <= moment:
+                classification = "mcp_ordered"
+                break
+    creation_epoch = _utc_epoch(row.get("creation_time_utc"))
+    lifetime: float | None = None
+    if exit_epoch is not None and creation_epoch is not None:
+        diff = exit_epoch - creation_epoch
+        if diff >= 0:
+            lifetime = round(diff, 1)
+    bridge = evidence.get("bridge_polled")
+    rpt_path = evidence.get("rpt_path")
+    rpt_clean = evidence.get("rpt_clean_termination")
+    rpt_tail = evidence.get("rpt_tail")
+    return {
+        "classification": classification,
+        "lifetime_s": lifetime,
+        "close_posted": any(
+            item.get("action") == "wm_close" and item.get("outcome") == "posted"
+            for item in actions
+        ),
+        "lifecycle_actions": [dict(item) for item in actions[:8]],
+        "bridge_polled": bridge if type(bridge) is bool else None,
+        "rpt_path": rpt_path if isinstance(rpt_path, str) else None,
+        "rpt_clean_termination": rpt_clean if type(rpt_clean) is bool else None,
+        "rpt_tail": list(rpt_tail) if isinstance(rpt_tail, list) else [],
+    }
 
 
 def _client_liveness(run: RunRecord, probes: _BoxProbes) -> str:
@@ -2349,6 +2438,7 @@ class ProcessLifecycle:
         child_probe: RetailProbe | None = None,
         parent_anchor: tuple[Callable[[int], object | None], Callable[[object], None]]
         | None = None,
+        anchor_exit: Callable[[object], dict[str, object] | None] | None = None,
         launcher: Launcher | None = None,
         id_fn: Callable[[], str] | None = None,
         recovery_fault_arm: RecoveryFaultArm | None = None,
@@ -2373,6 +2463,8 @@ class ProcessLifecycle:
         self.port_probe = port_probe
         self.child_probe = child_probe
         self.parent_anchor = parent_anchor
+        self.anchor_exit = anchor_exit
+        self._anchor_lock = threading.Lock()
         self._parent_anchors: dict[tuple[str, int, str], object] = {}
         self.game_path = Path(game_path).resolve()
         self.launcher = launcher or self._launch
@@ -2495,6 +2587,11 @@ class ProcessLifecycle:
         # Status readers merge, store and copy under this lock. Probes stay
         # outside it.
         self._client_observation_lock = threading.Lock()
+        self._client_actions: dict[
+            tuple[str, str, int, str], list[dict[str, object]]
+        ] = {}
+        self._client_launch_output_dirs: dict[tuple[str, str, int, str], str] = {}
+        self._client_exit_deferrals: dict[tuple[str, str, int, str], int] = {}
         # fb-20260904-200821-dae1 part 2: the clock of not_before_utc in the
         # launch intent. Instance state so a test can drive it.
         self._launch_intent_clock: Callable[[], float] = time.time
@@ -2932,14 +3029,21 @@ class ProcessLifecycle:
             table[key] = row
             if len(table) <= _CLIENT_ROLE_OBSERVATION_BOUND:
                 return dict(row)
+
+            def _drop_identity(old: tuple[str, str, int, str]) -> None:
+                table.pop(old, None)
+                self._client_actions.pop(old, None)
+                self._client_exit_deferrals.pop(old, None)
+                self._client_launch_output_dirs.pop(old, None)
+
             for old in list(table):
                 if len(table) <= _CLIENT_ROLE_OBSERVATION_BOUND:
                     break
                 if old in active:
                     continue
-                table.pop(old, None)
+                _drop_identity(old)
             while len(table) > _CLIENT_ROLE_OBSERVATION_BOUND:
-                table.pop(next(iter(table)))
+                _drop_identity(next(iter(table)))
             return dict(row)
 
     def _retained_client_observations(
@@ -2964,7 +3068,326 @@ class ProcessLifecycle:
             retained.append(row)
         return retained
 
-    def _observe_client_record(self, run: RunRecord, record: ProcessRecord) -> dict[str, object]:
+    def _read_anchor_exit(
+        self, key: tuple[str, int, str]
+    ) -> tuple[str, dict[str, object] | None]:
+        with self._anchor_lock:
+            token = self._parent_anchors.get(key)
+            if token is None or self.anchor_exit is None:
+                return ("none", None)
+            try:
+                info = self.anchor_exit(token)
+            except Exception:
+                return ("pending", None)
+            if isinstance(info, dict) and type(info.get("exit_code")) is int:
+                return ("exited", dict(info))
+            return ("pending", None)
+
+    def _prune_client_table(self, table: dict, active: set) -> None:
+        limit = 2 * _CLIENT_ROLE_OBSERVATION_BOUND
+        while len(table) > limit:
+            stored = set(self._client_role_observations)
+            victim = None
+            for old in list(table):
+                if old not in stored and old not in active:
+                    victim = old
+                    break
+            if victim is None:
+                for old in list(table):
+                    if old not in stored:
+                        victim = old
+                        break
+            if victim is None:
+                break
+            table.pop(victim, None)
+
+    def _client_action_key(
+        self, run_id: str, record: ProcessRecord
+    ) -> tuple[str, str, int, str]:
+        return (
+            self._current_generation(),
+            run_id,
+            record.pid,
+            record.creation_time_utc,
+        )
+
+    def _begin_client_action(
+        self, run_id: str, record: ProcessRecord, action: str, source: str
+    ) -> dict[str, object] | None:
+        if record is None or getattr(record, "role", None) != "client":
+            return None
+        key = self._client_action_key(run_id, record)
+        entry: dict[str, object] = {
+            "action": action,
+            "source": source,
+            "at_utc": self._observation_now(),
+            "outcome": None,
+        }
+        active = self._active_client_observation_keys()
+        with self._client_observation_lock:
+            entries = self._client_actions.setdefault(key, [])
+            if len(entries) >= 8:
+                droppable = None
+                for item in entries:
+                    outcome = item.get("outcome")
+                    if outcome is not None and outcome not in (
+                        "posted",
+                        "terminated",
+                        "unconfirmed",
+                    ):
+                        droppable = item
+                        break
+                if droppable is None:
+                    if not entries:
+                        pass
+                    else:
+                        # Keep table entry created by setdefault tidy.
+                        if key in self._client_actions and not self._client_actions[key]:
+                            del self._client_actions[key]
+                        return None
+                else:
+                    entries.remove(droppable)
+            entries.append(entry)
+            self._prune_client_table(self._client_actions, active)
+            if not any(item is entry for item in self._client_actions.get(key, [])):
+                return None
+        return entry
+
+    def _end_client_action(
+        self,
+        run_id: str,
+        record: ProcessRecord,
+        entry: dict[str, object] | None,
+        outcome: str,
+    ) -> None:
+        if entry is None:
+            return
+        with self._client_observation_lock:
+            entry["outcome"] = outcome
+
+    @staticmethod
+    def _client_terminate_outcome(result: object) -> str:
+        if isinstance(result, dict) and result.get("terminated") is True:
+            return "terminated"
+        if (
+            isinstance(result, dict)
+            and result.get("error") == "termination_unconfirmed"
+        ):
+            return "unconfirmed"
+        return "failed"
+
+    def _client_actions_for(
+        self, key: tuple[str, str, int, str]
+    ) -> list[dict[str, object]]:
+        with self._client_observation_lock:
+            return [
+                dict(item)
+                for item in self._client_actions.get(key, [])
+                if isinstance(item, dict)
+            ]
+
+    def _rpt_file_times(self, path: str) -> tuple[float | None, float | None]:
+        try:
+            found = os.stat(path)
+        except (OSError, ValueError):
+            return (None, None)
+        birth = getattr(found, "st_birthtime", None)
+        if birth is None and os.name == "nt":
+            birth = found.st_ctime
+        try:
+            return (
+                float(birth) if birth is not None else None,
+                float(found.st_mtime),
+            )
+        except (TypeError, ValueError):
+            return (None, None)
+
+    def _client_rpt_evidence(
+        self, folder: str, row: dict[str, object]
+    ) -> tuple[str | None, bool | None, list[str]]:
+        creation = _utc_epoch(row.get("creation_time_utc"))
+        if creation is None:
+            return (None, None, [])
+        end = _utc_epoch(row.get("exit_time_utc"))
+        if end is None:
+            end = _utc_epoch(row.get("observed_at_utc"))
+        if end is None:
+            return (None, None, [])
+        candidates: list[tuple[float, str]] = []
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if not entry.name.casefold().endswith(".rpt"):
+                        continue
+                    try:
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    birth, mtime = self._rpt_file_times(entry.path)
+                    if birth is None or mtime is None:
+                        continue
+                    if birth < creation - 0.5 or birth > end + 2.0:
+                        continue
+                    if mtime > end + 2.0:
+                        continue
+                    candidates.append((mtime, entry.path))
+        except (OSError, ValueError):
+            return (None, None, [])
+        if not candidates:
+            return (None, None, [])
+        _mtime, path = max(candidates, key=lambda item: item[0])
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                offset = max(0, size - 16384)
+                handle.seek(offset)
+                raw = handle.read(16384)
+        except (OSError, ValueError):
+            return (None, None, [])
+        text = raw.decode("utf-8", errors="replace")
+        if offset > 0:
+            _partial, _sep, text = text.partition("\n")
+        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+        clean = bool(lines) and _TERMINATION_LINE_TEXT in lines[-1]
+        tail = [_redact_diagnostic_text(line)[:200] for line in lines[-6:]]
+        return (path, clean, tail)
+
+    def _note_exit_deferral(self, key: tuple[str, str, int, str]) -> int:
+        active = self._active_client_observation_keys()
+        with self._client_observation_lock:
+            count = int(self._client_exit_deferrals.get(key, 0)) + 1
+            self._client_exit_deferrals[key] = count
+            self._prune_client_table(self._client_exit_deferrals, active)
+            return count
+
+    def _store_anchor_exit_evidence(
+        self,
+        key: tuple[str, str, int, str],
+        anchor_info: dict[str, object],
+    ) -> None:
+        with self._client_observation_lock:
+            stored = self._client_role_observations.get(key)
+            if not isinstance(stored, dict):
+                return
+            if stored.get("exit_code") is None and type(
+                anchor_info.get("exit_code")
+            ) is int:
+                stored["exit_code"] = anchor_info.get("exit_code")
+            anchor_time = anchor_info.get("exit_time_utc")
+            current_time = stored.get("exit_time_utc")
+            if (
+                not (isinstance(current_time, str) and current_time)
+                and isinstance(anchor_time, str)
+                and anchor_time
+            ):
+                stored["exit_time_utc"] = anchor_time
+
+    def _collect_exit_evidence(
+        self,
+        key: tuple[str, str, int, str],
+        anchor_kind: str | None,
+        observed_at_utc: str | None = None,
+    ) -> None:
+        """Store bridge/RPT evidence pieces as they arrive; never derives."""
+        # Finality for the one RPT attempt.
+        is_final = anchor_kind in ("exited", "none")
+        if anchor_kind == "pending":
+            if self._note_exit_deferral(key) >= 3:
+                is_final = True
+        with self._client_observation_lock:
+            stored = self._client_role_observations.get(key)
+            if not isinstance(stored, dict) or stored.get("state") != "dead":
+                return
+            evidence = stored.get("exit_evidence")
+            if not isinstance(evidence, dict):
+                evidence = {}
+                stored["exit_evidence"] = evidence
+            need_bridge = "bridge_polled" not in evidence
+            reserve_rpt = is_final and "rpt_attempted" not in evidence
+            if reserve_rpt:
+                evidence["rpt_attempted"] = True
+            folder = self._client_launch_output_dirs.get(key)
+            row_snapshot = dict(stored)
+        # IO / external calls outside the lock.
+        bridge_answer: object = None
+        have_bridge = False
+        if need_bridge:
+            bindings = getattr(self, "bindings", None)
+            checker = (
+                getattr(bindings, "process_polled", None)
+                if bindings is not None
+                else None
+            )
+            if callable(checker):
+                try:
+                    bridge_answer = checker(key[1], key[2], key[3])
+                except Exception:
+                    bridge_answer = None
+                if type(bridge_answer) is bool:
+                    have_bridge = True
+        rpt_result: tuple[str | None, bool | None, list[str]] | None = None
+        if reserve_rpt:
+            if isinstance(folder, str) and folder:
+                scan_row = dict(row_snapshot)
+                if not (
+                    isinstance(scan_row.get("exit_time_utc"), str)
+                    and scan_row.get("exit_time_utc")
+                ):
+                    if isinstance(observed_at_utc, str) and observed_at_utc:
+                        scan_row["observed_at_utc"] = observed_at_utc
+                try:
+                    rpt_result = self._client_rpt_evidence(folder, scan_row)
+                except Exception:
+                    rpt_result = (None, None, [])
+            else:
+                rpt_result = (None, None, [])
+        with self._client_observation_lock:
+            stored = self._client_role_observations.get(key)
+            if not isinstance(stored, dict):
+                return
+            evidence = stored.get("exit_evidence")
+            if not isinstance(evidence, dict):
+                evidence = {}
+                stored["exit_evidence"] = evidence
+            if have_bridge and "bridge_polled" not in evidence:
+                evidence["bridge_polled"] = bridge_answer
+            if rpt_result is not None:
+                if "rpt_path" not in evidence:
+                    evidence["rpt_path"] = rpt_result[0]
+                if "rpt_clean_termination" not in evidence:
+                    evidence["rpt_clean_termination"] = rpt_result[1]
+                if "rpt_tail" not in evidence:
+                    evidence["rpt_tail"] = list(rpt_result[2])
+
+    def _published_client_row(
+        self,
+        key: tuple[str, str, int, str],
+        fallback: dict[str, object],
+    ) -> dict[str, object] | None:
+        with self._client_observation_lock:
+            stored = self._client_role_observations.get(key)
+            if not isinstance(stored, dict):
+                return None
+            row = dict(stored)
+            if isinstance(row.get("exit_evidence"), dict):
+                row["exit_evidence"] = dict(row["exit_evidence"])  # type: ignore[arg-type]
+            actions = [
+                dict(item)
+                for item in self._client_actions.get(key, [])
+                if isinstance(item, dict)
+            ]
+        if "current" in fallback:
+            row["current"] = fallback["current"]
+        internal = dict(row)
+        row.pop("exit_evidence", None)
+        row["exit_diagnosis"] = _derive_exit_diagnosis(internal, actions)
+        return row
+
+    def _observe_client_record(
+        self, run: RunRecord, record: ProcessRecord
+    ) -> dict[str, object] | None:
         """Identity-aware liveness of one registered client. Never terminates."""
 
         generation = self._current_generation()
@@ -3020,6 +3443,34 @@ class ProcessLifecycle:
                     exit_code = observed
                 if isinstance(observed_at, str) and observed_at:
                     exit_time_utc = observed_at
+        anchor_kind: str | None = None
+        anchor_info: dict[str, object] | None = None
+        if state == "dead":
+            anchor_kind, anchor_info = self._read_anchor_exit(
+                (run.run_id, record.pid, record.creation_time_utc)
+            )
+            if anchor_kind == "exited" and anchor_info is not None:
+                exit_code = anchor_info.get("exit_code")  # type: ignore[assignment]
+                anchor_time = anchor_info.get("exit_time_utc")
+                if isinstance(anchor_time, str) and anchor_time:
+                    exit_time_utc = anchor_time
+            if (
+                isinstance(actual, dict)
+                and actual.get("error") != "process_identity_mismatch"
+                and not (
+                    actual.get("identity_complete") is True
+                    and not self._identity_matches(record, actual)
+                )
+            ):
+                observed = actual.get("process_exit_code")
+                observed_at = actual.get("exit_time_utc")
+                if exit_code is None and (
+                    isinstance(observed, int)
+                    and not isinstance(observed, bool)
+                ):
+                    exit_code = observed
+                if exit_time_utc is None and isinstance(observed_at, str) and observed_at:
+                    exit_time_utc = observed_at
         first_dead = now if state == "dead" else None
         row: dict[str, object] = {
             "role": "client",
@@ -3035,26 +3486,66 @@ class ProcessLifecycle:
             "exit_time_utc": exit_time_utc,
             "current": True,
         }
-        # The probe ran unlocked. Merge, store and the returned copy share
-        # one critical section, so a late weak probe cannot erase a death
-        # another reader published while it was in flight.
-        return self._remember_client_observation(key, row)
+        merged = self._remember_client_observation(key, row)
+        if merged.get("state") == "dead":
+            try:
+                self._collect_exit_evidence(key, anchor_kind, now)
+            except Exception:
+                pass
+            merged = self._published_client_row(key, merged)
+        else:
+            merged.pop("exit_evidence", None)
+            merged["exit_diagnosis"] = None
+        return merged
 
     def _client_role_diagnostics(self, run: RunRecord) -> list[dict[str, object]]:
         generation = self._current_generation()
         current: list[dict[str, object]] = []
         current_keys: set[tuple[str, str, int, str]] = set()
+        has_client_record = any(
+            record.role == "client" for record in run.processes
+        )
         for record in run.processes:
             if record.role != "client":
                 continue
             current_keys.add(
                 (generation, run.run_id, record.pid, record.creation_time_utc)
             )
-            current.append(self._observe_client_record(run, record))
+            observed = self._observe_client_record(run, record)
+            if observed is not None:
+                current.append(observed)
         retained = self._retained_client_observations(
             generation, run.run_id, current_keys
         )
-        if not current and not retained:
+        had_retained = bool(retained)
+        finalized: list[dict[str, object]] = []
+        for row in retained:
+            pid = row.get("pid")
+            created = row.get("creation_time_utc")
+            if row.get("state") == "dead" and type(pid) is int and isinstance(created, str):
+                key = (generation, run.run_id, pid, created)
+                anchor_kind, anchor_info = self._read_anchor_exit(
+                    (run.run_id, pid, created)
+                )
+                if anchor_kind == "exited" and isinstance(anchor_info, dict):
+                    self._store_anchor_exit_evidence(key, anchor_info)
+                try:
+                    self._collect_exit_evidence(
+                        key, anchor_kind, self._observation_now()
+                    )
+                except Exception:
+                    pass
+                published = self._published_client_row(key, row)
+                if published is None:
+                    continue
+                row = published
+                row["current"] = False
+            else:
+                row.pop("exit_evidence", None)
+                row["exit_diagnosis"] = None
+            finalized.append(row)
+        retained = finalized
+        if not has_client_record and not had_retained:
             return [
                 {
                     "role": "client",
@@ -3069,6 +3560,7 @@ class ProcessLifecycle:
                     "exit_code": None,
                     "exit_time_utc": None,
                     "current": False,
+                    "exit_diagnosis": None,
                 }
             ]
         return retained + current
@@ -4257,7 +4749,9 @@ class ProcessLifecycle:
         """
 
         self._last_start_error = confirmed_error
-        confirmed_closed = launched is None or self._terminate_open_handle(launched)
+        confirmed_closed = launched is None or self._terminate_open_handle(
+            launched, run_id=provisional.run_id, record=record
+        )
         persistence_failed = False
         with self._compensating(provisional.run_id):
             if confirmed_closed:
@@ -4950,6 +5444,24 @@ class ProcessLifecycle:
                         confirmed_error="identity_unavailable",
                         attempt_started_at=attempt_started_at,
                     )
+                if launch_role == "client" and record is not None:
+                    try:
+                        folder = _launch_output_dir(parsed["argv"])
+                    except Exception:
+                        folder = None
+                    if isinstance(folder, str) and folder:
+                        key = (
+                            self._current_generation(),
+                            run_id,
+                            record.pid,
+                            record.creation_time_utc,
+                        )
+                        active = self._active_client_observation_keys()
+                        with self._client_observation_lock:
+                            self._client_launch_output_dirs[key] = folder
+                            self._prune_client_table(
+                                self._client_launch_output_dirs, active
+                            )
                 if cancel.requested.is_set():
                     # The process exists and its identity is known, so the
                     # cancel path can terminate exactly the owned PID and
@@ -5437,10 +5949,33 @@ class ProcessLifecycle:
             finally:
                 self._finish_committed(authority, command_id)
 
-    def _terminate_open_handle(self, launched: object) -> bool:
+    def _terminate_open_handle(
+        self,
+        launched: object,
+        *,
+        run_id: str | None = None,
+        record: ProcessRecord | None = None,
+    ) -> bool:
+        entry: dict[str, object] | None = None
+        if record is not None and isinstance(run_id, str):
+            try:
+                entry = self._begin_client_action(
+                    run_id, record, "terminate", "cancel"
+                )
+            except Exception:
+                entry = None
+
+        def _settle(outcome: str) -> None:
+            if entry is not None and record is not None and isinstance(run_id, str):
+                try:
+                    self._end_client_action(run_id, record, entry, outcome)
+                except Exception:
+                    pass
+
         try:
             launched.terminate()
         except Exception:
+            _settle("failed")
             poll = getattr(launched, "poll", None)
             if callable(poll):
                 try:
@@ -5450,15 +5985,18 @@ class ProcessLifecycle:
             return False
         try:
             launched.wait(timeout=self._starting_cancel_kill_s)
+            _settle("terminated")
             return True
         except Exception:
             poll = getattr(launched, "poll", None)
+            confirmed = False
             if callable(poll):
                 try:
-                    return poll() is not None
+                    confirmed = poll() is not None
                 except Exception:
-                    return False
-            return False
+                    confirmed = False
+            _settle("terminated" if confirmed else "unconfirmed")
+            return confirmed
 
     @staticmethod
     def _record_from_snapshot(value: object, role: str) -> ProcessRecord | None:
@@ -5559,7 +6097,8 @@ class ProcessLifecycle:
         return (run_id, record.pid, record.creation_time_utc)
 
     def _parent_is_anchored(self, run: RunRecord, record: ProcessRecord) -> bool:
-        return self._parent_anchor_key(run.run_id, record) in self._parent_anchors
+        with self._anchor_lock:
+            return self._parent_anchor_key(run.run_id, record) in self._parent_anchors
 
     def _anchor_parents_locked(self, run: RunRecord) -> None:
         """Open a handle on each live parent so its pid cannot be reused.
@@ -5574,8 +6113,9 @@ class ProcessLifecycle:
             if record.role not in _CRASH_REPORTER_PARENT_ROLES:
                 continue
             key = self._parent_anchor_key(run.run_id, record)
-            if key in self._parent_anchors:
-                continue
+            with self._anchor_lock:
+                if key in self._parent_anchors:
+                    continue
             try:
                 token = open_fn(record.pid)
             except Exception:
@@ -5592,7 +6132,17 @@ class ProcessLifecycle:
                 except Exception:
                     pass
                 continue
-            self._parent_anchors[key] = token
+            with self._anchor_lock:
+                if key in self._parent_anchors:
+                    duplicate = True
+                else:
+                    self._parent_anchors[key] = token
+                    duplicate = False
+            if duplicate:
+                try:
+                    close_fn(token)
+                except Exception:
+                    pass
 
     def _release_parent_anchors_locked(self) -> None:
         """Close anchors whose run is gone, EXITED, or no longer holds the record."""
@@ -5608,15 +6158,16 @@ class ProcessLifecycle:
                 if record.role in _CRASH_REPORTER_PARENT_ROLES:
                     live.add(self._parent_anchor_key(run.run_id, record))
         close_fn = None if self.parent_anchor is None else self.parent_anchor[1]
-        for key, token in list(self._parent_anchors.items()):
-            if key in live:
-                continue
-            if close_fn is not None:
-                try:
-                    close_fn(token)
-                except Exception:
-                    pass
-            self._parent_anchors.pop(key, None)
+        with self._anchor_lock:
+            for key, token in list(self._parent_anchors.items()):
+                if key in live:
+                    continue
+                if close_fn is not None:
+                    try:
+                        close_fn(token)
+                    except Exception:
+                        pass
+                self._parent_anchors.pop(key, None)
 
     def _kept_after_partial_stop(
         self,
@@ -6140,6 +6691,9 @@ class ProcessLifecycle:
             return [], "audit_failed"
         terminated: list[int] = []
         for record in owned:
+            _action = self._begin_client_action(
+                run.run_id, record, "terminate", "replace_role"
+            )
             try:
                 guard_result = self.guard.terminate(record)
             except Exception:
@@ -6148,6 +6702,12 @@ class ProcessLifecycle:
                     "exit_code": 3,
                     "terminated": False,
                 }
+            self._end_client_action(
+                run.run_id,
+                record,
+                _action,
+                self._client_terminate_outcome(guard_result),
+            )
             if (
                 not isinstance(guard_result, dict)
                 or guard_result.get("terminated") is not True
@@ -6649,6 +7209,9 @@ class ProcessLifecycle:
                                 break
                             untouched_reasons.append((record.pid, reason))
                             continue
+                    _action = self._begin_client_action(
+                        run_id, record, "terminate", "stop"
+                    )
                     try:
                         guard_result = self.guard.terminate(record)
                     except Exception:
@@ -6657,6 +7220,12 @@ class ProcessLifecycle:
                             "exit_code": 3,
                             "terminated": False,
                         }
+                    self._end_client_action(
+                        run_id,
+                        record,
+                        _action,
+                        self._client_terminate_outcome(guard_result),
+                    )
                     if (
                         not isinstance(guard_result, dict)
                         or guard_result.get("terminated") is not True
@@ -6823,6 +7392,9 @@ class ProcessLifecycle:
                             terminated=terminated,
                         )
                     for record in extra:
+                        _action = self._begin_client_action(
+                            run_id, record, "terminate", "stop"
+                        )
                         try:
                             guard_result = self.guard.terminate(record)
                         except Exception:
@@ -6831,6 +7403,12 @@ class ProcessLifecycle:
                                 "exit_code": 3,
                                 "terminated": False,
                             }
+                        self._end_client_action(
+                            run_id,
+                            record,
+                            _action,
+                            self._client_terminate_outcome(guard_result),
+                        )
                         if (
                             not isinstance(guard_result, dict)
                             or guard_result.get("terminated") is not True
@@ -7211,9 +7789,25 @@ class ProcessLifecycle:
                             kind, _reason = self._classify_registered_process(record)
                             if kind != "owned":
                                 continue
-                            if window_close.post_wm_close(
-                                hwnd, fns=fns, expected_pid=record.pid
-                            ):
+                            _action = self._begin_client_action(
+                                run_id, record, "wm_close", "close_run"
+                            )
+                            try:
+                                _posted = window_close.post_wm_close(
+                                    hwnd, fns=fns, expected_pid=record.pid
+                                )
+                            except Exception:
+                                self._end_client_action(
+                                    run_id, record, _action, "not_posted"
+                                )
+                                raise
+                            self._end_client_action(
+                                run_id,
+                                record,
+                                _action,
+                                "posted" if _posted else "not_posted",
+                            )
+                            if _posted:
                                 windows_posted += 1
                             _ = window_pid
                         existing = role_rows.get(record.role)
@@ -8092,11 +8686,26 @@ class ProcessLifecycle:
                     decision["boundary"] = boundary
                     return boundary is None
 
-                posted = window_close.post_wm_close(
-                    hwnd,
-                    fns=fns,
-                    expected_pid=record.pid,
-                    before_post=before_post,
+                _action = self._begin_client_action(
+                    run_id, record, "wm_close", "idle_close"
+                )
+                try:
+                    posted = window_close.post_wm_close(
+                        hwnd,
+                        fns=fns,
+                        expected_pid=record.pid,
+                        before_post=before_post,
+                    )
+                except Exception:
+                    self._end_client_action(
+                        run_id, record, _action, "not_posted"
+                    )
+                    raise
+                self._end_client_action(
+                    run_id,
+                    record,
+                    _action,
+                    "posted" if posted else "not_posted",
                 )
                 _ = window_pid
                 if posted:
@@ -9002,10 +9611,19 @@ class ProcessLifecycle:
                                     }
                                 )
                                 return
+                            _action = self._begin_client_action(
+                                current.run_id, record, "terminate", "release_owner"
+                            )
                             try:
                                 terminated = self.guard.terminate(record)
                             except Exception:
                                 terminated = {"terminated": False}
+                            self._end_client_action(
+                                current.run_id,
+                                record,
+                                _action,
+                                self._client_terminate_outcome(terminated),
+                            )
                             if (
                                 not isinstance(terminated, dict)
                                 or terminated.get("terminated") is not True
@@ -9138,10 +9756,19 @@ class ProcessLifecycle:
                         "terminal_safe": False,
                         "error": "identity_ambiguous",
                     }
+                _action = self._begin_client_action(
+                    run_id, record, "terminate", "repair"
+                )
                 try:
                     terminated = self.guard.terminate(record)
                 except Exception:
                     terminated = {"terminated": False}
+                self._end_client_action(
+                    run_id,
+                    record,
+                    _action,
+                    self._client_terminate_outcome(terminated),
+                )
                 if (
                     not isinstance(terminated, dict)
                     or terminated.get("terminated") is not True
@@ -9228,10 +9855,19 @@ class ProcessLifecycle:
                         return self._manifest_repair_failure(
                             "identity_ambiguous"
                         )
+                    _action = self._begin_client_action(
+                        run.run_id, record, "terminate", "repair"
+                    )
                     try:
                         terminated = self.guard.terminate(record)
                     except Exception:
                         terminated = {"terminated": False}
+                    self._end_client_action(
+                        run.run_id,
+                        record,
+                        _action,
+                        self._client_terminate_outcome(terminated),
+                    )
                     if (
                         not isinstance(terminated, dict)
                         or terminated.get("terminated") is not True
