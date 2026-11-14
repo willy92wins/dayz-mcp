@@ -8944,6 +8944,75 @@ class MCPBridge : Managed
 		return players;
 	}
 
+	protected void FillPlayerTriggers(PlayerBase body, MCPPlayerState state)
+	{
+		MCPPlayerTriggerBody tracker;
+		MCPPlayerTriggerLive live;
+		MCPPlayerTriggerInside insideCopy;
+		MCPPlayerTriggerEvent eventCopy;
+		MCPPlayerTriggerEvent triggerEvent;
+		int index;
+		int posIndex;
+		state.trigger_run = MCPPlayerTriggers.RunId();
+		state.trigger_seq = MCPPlayerTriggers.LastSeq();
+		state.trigger_evicted_seq = 0;
+		if (!body)
+		{
+			return;
+		}
+		tracker = body.MCPGetTriggerBody(false);
+		if (!tracker)
+		{
+			return;
+		}
+		tracker.PruneGone();
+		state.trigger_seq = MCPPlayerTriggers.LastSeq();
+		state.trigger_evicted_seq = tracker.evicted_seq;
+		index = 0;
+		while (index < tracker.inside.Count())
+		{
+			live = tracker.inside.Get(index);
+			if (live && live.entry)
+			{
+				insideCopy = new MCPPlayerTriggerInside();
+				insideCopy.type = live.entry.type;
+				insideCopy.net_id_low = live.entry.net_id_low;
+				insideCopy.net_id_high = live.entry.net_id_high;
+				posIndex = 0;
+				while (posIndex < live.entry.pos.Count())
+				{
+					insideCopy.pos.Insert(live.entry.pos.Get(posIndex));
+					posIndex = posIndex + 1;
+				}
+				insideCopy.shape = live.entry.shape;
+				insideCopy.enter_uptime_s = live.entry.enter_uptime_s;
+				state.triggers.Insert(insideCopy);
+			}
+			index = index + 1;
+		}
+		index = 0;
+		while (index < tracker.events.Count())
+		{
+			triggerEvent = tracker.events.Get(index);
+			eventCopy = new MCPPlayerTriggerEvent();
+			eventCopy.seq = triggerEvent.seq;
+			eventCopy.kind = triggerEvent.kind;
+			eventCopy.type = triggerEvent.type;
+			eventCopy.net_id_low = triggerEvent.net_id_low;
+			eventCopy.net_id_high = triggerEvent.net_id_high;
+			posIndex = 0;
+			while (posIndex < triggerEvent.pos.Count())
+			{
+				eventCopy.pos.Insert(triggerEvent.pos.Get(posIndex));
+				posIndex = posIndex + 1;
+			}
+			eventCopy.shape = triggerEvent.shape;
+			eventCopy.uptime_s = triggerEvent.uptime_s;
+			state.trigger_events.Insert(eventCopy);
+			index = index + 1;
+		}
+	}
+
 	protected MCPPlayerState BuildPlayerState()
 	{
 		m_Players.Clear();
@@ -8985,6 +9054,7 @@ class MCPBridge : Managed
 			FillPlayerVitals(body, vitals);
 			state.water = vitals.water;
 			state.energy = vitals.energy;
+			FillPlayerTriggers(body, state);
 		}
 		return state;
 	}

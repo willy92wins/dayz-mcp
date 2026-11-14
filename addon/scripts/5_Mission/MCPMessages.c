@@ -431,10 +431,17 @@ class MCPPlayerState
 	bool godmode;
 	float water;
 	float energy;
+	ref array<ref MCPPlayerTriggerInside> triggers;
+	ref array<ref MCPPlayerTriggerEvent> trigger_events;
+	int trigger_run;
+	int trigger_seq;
+	int trigger_evicted_seq;
 
 	void MCPPlayerState()
 	{
 		pos = new array<float>();
+		triggers = new array<ref MCPPlayerTriggerInside>();
+		trigger_events = new array<ref MCPPlayerTriggerEvent>();
 	}
 };
 

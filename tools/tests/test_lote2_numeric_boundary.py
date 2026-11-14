@@ -141,7 +141,8 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 1 from 726c (ui_pause timeout_s).
         # + 6 from 702f OverrideDOF (camera_set and camera_set_focus focus_length/focus_length_near/focus_depth_offset).
         # + 1 from beb3 (dev_free_camera_set timeout_s; active is a bool).
-        self.assertEqual(len(rows), 255)
+        # + 2 from fa2b (query_player_state trigger_cursor/trigger_run, both StrictInt).
+        self.assertEqual(len(rows), 257)
         self.assertIn(("actor_emote", "object_id", "int"), rows)
         self.assertIn(("ai_group_order", "group_id", "int"), rows)
         self.assertIn(("ai_group_order", "timeout_s", "float"), rows)
@@ -152,6 +153,8 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("chat_read", "max_lines", "int"), rows)
         self.assertIn(("chat_read", "timeout_s", "float"), rows)
         self.assertIn(("ui_pause", "timeout_s", "float"), rows)
+        self.assertIn(("query_player_state", "trigger_cursor", "int"), rows)
+        self.assertIn(("query_player_state", "trigger_run", "int"), rows)
         self.assertIn(("player_find", "timeout_s", "float"), rows)
         self.assertIn(("object_set_health", "health01", "float"), rows)
         self.assertIn(("object_set_health", "object_id", "int"), rows)

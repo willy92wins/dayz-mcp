@@ -7446,12 +7446,52 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "(GetAllowDamage() false on the server). water and energy are "
             "the body's stats, 0 to 5000, as player_heal reads them; an older "
             "PBO leaves them out. "
+            "triggers is the list of scripted triggers (Trigger subclasses) "
+            "the server-side body is inside now, empty when none. "
+            "trigger_events are its enter/leave/gone events with a monotonic "
+            "seq, paged with trigger_cursor plus trigger_run like "
+            "player_trace's cursor. A trigger deleted while the player is "
+            "inside shows up as a gone event when it is next noticed. "
+            "The ring keeps 32 events per body and trigger_events_overflow "
+            "says some were lost. A respawned body starts empty; an older "
+            "PBO leaves these fields out. "
             f"{GODMODE_DEFAULT_LINE}"
         )
     )
-    async def query_player_state(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def query_player_state(
+        trigger_cursor: StrictInt = 0,
+        trigger_run: StrictInt = 0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(trigger_cursor, int) or isinstance(trigger_cursor, bool) or trigger_cursor < 0:
+            raise ToolError(_bad_args("trigger_cursor", trigger_cursor, "be an int >= 0"))
+        if not isinstance(trigger_run, int) or isinstance(trigger_run, bool) or trigger_run < 0:
+            raise ToolError(_bad_args("trigger_run", trigger_run, "be an int >= 0"))
+        if trigger_cursor > 0 and trigger_run == 0:
+            raise ToolError(_bad_args("trigger_run", trigger_run, "be given with trigger_cursor"))
         async with runtime.tool_lock:
-            return await runtime.call_bridge("query_player_state", {}, "server", _timeout(timeout_s))
+            result = await runtime.call_bridge("query_player_state", {}, "server", _timeout(timeout_s))
+        if isinstance(result, dict):
+            state = result.get("state")
+            if isinstance(state, dict) and isinstance(state.get("trigger_events"), list):
+                effective_cursor = trigger_cursor
+                reset = False
+                if trigger_cursor > 0 and trigger_run != state.get("trigger_run"):
+                    effective_cursor = 0
+                    reset = True
+                kept = [
+                    event
+                    for event in state["trigger_events"]
+                    if isinstance(event, dict) and isinstance(event.get("seq"), int) and event["seq"] > effective_cursor
+                ]
+                state["trigger_events"] = kept
+                state["trigger_next_cursor"] = kept[-1]["seq"] if kept else effective_cursor
+                evicted = state.get("trigger_evicted_seq")
+                state["trigger_events_overflow"] = bool(
+                    isinstance(evicted, int) and effective_cursor < evicted
+                )
+                state["trigger_cursor_reset"] = reset
+        return result
 
     @app.tool(
         description=(

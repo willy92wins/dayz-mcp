@@ -280,6 +280,7 @@ def _state_namespace(listed: list[_Man | None], fill: Any) -> dict[str, Any]:
         "MCPPlayerVitals": _Vitals,
         "PlayerBase": SimpleNamespace(Cast=lambda man: man if isinstance(man, _Body) else None),
         "FillPlayerVitals": fill,
+        "FillPlayerTriggers": lambda _body, _state: None,
         "_vector": _CopiedVector,
     }
 
@@ -417,7 +418,14 @@ class PlayerStateVitalsTest(unittest.TestCase):
 
     def test_the_state_constructor_sets_only_pos(self) -> None:
         # _State is this constructor.
-        self.assertEqual(_statements(method_body(MESSAGES, "void MCPPlayerState()")), ["pos = new array<float>()"])
+        self.assertEqual(
+            _statements(method_body(MESSAGES, "void MCPPlayerState()")),
+            [
+                "pos = new array<float>()",
+                "triggers = new array<ref MCPPlayerTriggerInside>()",
+                "trigger_events = new array<ref MCPPlayerTriggerEvent>()",
+            ],
+        )
 
 
 def _spliced(body: str, found: re.Match[str], text: str) -> str:
