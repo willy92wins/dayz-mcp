@@ -485,13 +485,17 @@ modded class PlayerBase
 		return count;
 	}
 
-	// Closed stance name for m_MovementState.m_iStanceIdx (human.c
-	// HumanMovementState, dayzplayer.c STANCEIDX_*). Raised variants
-	// collapse to the body stance. An unknown index is "unknown".
+	// Closed stance name for the current movement stance (human.c
+	// Human.GetMovementState / HumanMovementState.m_iStanceIdx,
+	// dayzplayer.c STANCEIDX_*). Raised variants collapse to the body
+	// stance. An unknown index is "unknown".
 	string MCPStanceName()
 	{
+		HumanMovementState state;
 		int stanceId;
-		stanceId = m_MovementState.m_iStanceIdx;
+		state = new HumanMovementState();
+		GetMovementState(state);
+		stanceId = state.m_iStanceIdx;
 		if (stanceId == DayZPlayerConstants.STANCEIDX_ERECT || stanceId == DayZPlayerConstants.STANCEIDX_RAISEDERECT)
 		{
 			return "erect";
@@ -572,6 +576,10 @@ modded class PlayerBase
 		{
 			return "no_move_command";
 		}
+		// ForceStance holds a lock until ForceStance(-1) (human.c:497-499).
+		// Vanilla scripts never release that way, and a same-tick -1 is not
+		// proven not to undo the change. Release is left to a later in-game
+		// check (and a follow-up if the player cannot change stance by input).
 		moveCmd.ForceStance(stanceId);
 		return "";
 	}
