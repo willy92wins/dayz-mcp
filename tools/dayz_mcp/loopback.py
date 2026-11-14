@@ -4794,6 +4794,34 @@ class ServerState:
                 f"{binding.creation_time_utc}"
             )
 
+    def process_polled(
+        self, run_id: str, pid: int, creation_time_utc: str
+    ) -> bool | None:
+        """Whether the bound process for this identity has polled, or None."""
+        if (
+            not isinstance(run_id, str)
+            or not run_id
+            or not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid <= 0
+        ):
+            return None
+        wanted = normalize_creation_time_utc(creation_time_utc)
+        if wanted is None:
+            return None
+        with self._lock:
+            for binding in self._bindings.values():
+                if _binding_run_id(binding) != run_id:
+                    continue
+                if getattr(binding, "pid", None) != pid:
+                    continue
+                if normalize_creation_time_utc(
+                    getattr(binding, "creation_time_utc", None)
+                ) != wanted:
+                    continue
+                return binding.last_poll_at is not None
+            return None
+
     def run_has_bound_binding(self, run_id: str) -> bool:
         """True iff a present binding for this run is BOUND. STARTING does not dispatch."""
 
@@ -7444,6 +7472,7 @@ class ServerState:
                     self._peer_last_class[peer] = bind_label
                     if bind_label == BINDING_BOUND:
                         accredited = True
+                        binding.last_poll_at = now
                         self._bound_last_poll_at[peer] = now
                         run_id = _binding_run_id(binding)
                         if self._poll_should_hold_commands(run_id):
@@ -10944,7 +10973,11 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
     # second process LISTEN on an already-bound port, which defeats the exclusive
     # instance lock (two loopbacks would silently split bridge polls). Exclusive
     # bind makes the second bind fail with EADDRINUSE.
-    allow_reuse_address = False
+    # Linux differs: SO_REUSEADDR never admits a second listener there (that is
+    # SO_REUSEPORT), it only lets a restarted daemon bind while the game's last
+    # polls sit in TIME_WAIT. Without it the restart fails with EADDRINUSE for up
+    # to a minute, so it is on outside Windows.
+    allow_reuse_address = os.name != "nt"
 
     def __init__(self, *args, **kwargs):
         self._http_workers = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
@@ -11066,8 +11099,9 @@ def _bind_exclusive(port: int, log_sink: LogSink, reclaim_orphans: bool) -> "Exc
         ):
             raise
         # A confirmed-dead-parent dayz_mcp orphan was terminated and the port came
-        # free; retry the exclusive bind exactly once. The exclusive lock stays intact — the bind is
-        # still ExclusiveThreadingHTTPServer with allow_reuse_address False.
+        # free; retry the exclusive bind exactly once. The exclusive lock stays intact: the bind is
+        # still ExclusiveThreadingHTTPServer (exclusive bind on Windows, where
+        # allow_reuse_address is False; it is True only off Windows).
         return ExclusiveThreadingHTTPServer(("127.0.0.1", port), Handler)
 
 

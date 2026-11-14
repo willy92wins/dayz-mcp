@@ -1246,19 +1246,471 @@ def audit_runtime_http(tools_dir: Path) -> tuple[RuntimeHttpFinding, ...]:
     )
 
 
+# linux_launcher.launch_registered_linux: the relay that replaces the native PE
+# off Windows (see _ProcessCreationVisitor._is_canonical_linux_relay_popen).
+_LINUX_RELAY_FUNCTIONS = frozenset({"_supervise_worker", "_run_lifecycle_child"})
+_LINUX_BUILD_FUNCTIONS = frozenset({"run_addon_builder"})
+# Per audited file: the argv builder and the environment builder the one canonical
+# Popen must call. Both must be single, undecorated top-level defs of that file.
+_LINUX_POPEN_BUILDERS = {
+    "dayz_mcp/linux_launcher.py": ("_host_argv", "_child_environment"),
+    "dayz_mcp/linux_build.py": ("build_argv", "build_environment"),
+}
+# The only Popen keywords the canonical calls may pass. Everything that chooses or
+# changes what runs (shell, executable, preexec_fn, user/group, process_group, ...)
+# is outside this set, and so is a **mapping, whose keys the audit cannot see.
+_LINUX_POPEN_KEYWORDS = frozenset(
+    {"stdin", "stdout", "stderr", "env", "close_fds", "cwd", "pass_fds", "start_new_session"}
+)
+_LINUX_CHILD_EXTRA_ENV_KEYS = frozenset(
+    {
+        "DAYZ_MCP_CANCEL_HANDLE",
+        "DAYZ_MCP_CLIENT_ID_JSON",
+        "DAYZ_MCP_LEASE_TOKEN",
+        "DAYZ_MCP_NORMAL_POLICY_JSON",
+    }
+)
+_HOST_PATH = "dayz_mcp/linux_worker_host.py"
+_HOST_EXEC_FUNCTIONS = frozenset({"_SealedModuleFinder.exec_module", "_load_app_main"})
+# Reviewed builder sources (option (a)): each builder and every module-level
+# constant it reads must be AST-equal to the text below, so a changed builder
+# body or a widened constant is a finding even when the call shape is kept.
+_REVIEWED_BUILDERS = {
+    ("dayz_mcp/linux_launcher.py", "_host_argv"): (
+        "def _host_argv(bundle: VerifiedLinuxBundle, *, lifecycle: bool) -> list[str]:\n"
+        "    argv = [sys.executable, '-I', '-S', '-c', bundle.host_source.decode('utf-8'),"
+        " '--bundle', str(bundle.root), '--app-sha256', bundle.app_sha256]\n"
+        "    if lifecycle:\n"
+        "        argv.append('--lifecycle-child')\n"
+        "    return argv\n"
+    ),
+    ("dayz_mcp/linux_launcher.py", "_child_environment"): (
+        "def _child_environment(extra: dict[str, str]) -> dict[str, str]:\n"
+        "    if not set(extra) <= _CHILD_EXTRA_ENV_KEYS:\n"
+        "        raise ValueError('child_environment_extra_key')\n"
+        "    env = {key: os.environ[key] for key in _CHILD_ENV_KEYS if os.environ.get(key)}\n"
+        "    env.update(extra)\n"
+        "    return env\n"
+    ),
+    ("dayz_mcp/linux_build.py", "build_argv"): (
+        "def build_argv(dayzmake: str, payload: dict[str, object], output: str) -> list[str]:\n"
+        "    source = str(payload['source'])\n"
+        "    argv = [dayzmake, 'pack' if payload['pack_only'] else 'build', '-f']\n"
+        "    if not payload['pack_only']:\n"
+        "        argv.append('--proton-binarize')\n"
+        "    if not os.path.exists(os.path.join(source, MARKER)):\n"
+        "        argv += ['-e', f\"prefix={payload['prefix']}\"]\n"
+        "    return [*argv, source, output]\n"
+    ),
+    ("dayz_mcp/linux_build.py", "build_environment"): (
+        "def build_environment() -> dict[str, str]:\n"
+        "    \"\"\"The daemon's environment limited to what dayzmake and Proton read.\"\"\"\n"
+        "    return {key: os.environ[key] for key in _BUILD_ENV_KEYS if os.environ.get(key)}\n"
+    ),
+}
+_REVIEWED_CONSTANTS = {
+    "dayz_mcp/linux_launcher.py": {
+        "_CHILD_ENV_KEYS": "_CHILD_ENV_KEYS = ('HOME', 'PATH', 'LANG', 'LC_ALL', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR', 'LOCALAPPDATA')\n",
+        "_CHILD_EXTRA_ENV_KEYS": (
+            "_CHILD_EXTRA_ENV_KEYS = frozenset({'DAYZ_MCP_CANCEL_HANDLE', 'DAYZ_MCP_CLIENT_ID_JSON',"
+            " 'DAYZ_MCP_LEASE_TOKEN', 'DAYZ_MCP_NORMAL_POLICY_JSON'})\n"
+        ),
+    },
+    "dayz_mcp/linux_build.py": {
+        "_BUILD_ENV_KEYS": (
+            "_BUILD_ENV_KEYS = ('HOME', 'PATH', 'LANG', 'LC_ALL', 'TMPDIR', 'USER', 'LOGNAME',"
+            " 'XDG_RUNTIME_DIR', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'PROTON',"
+            " 'STEAM_ROOT', 'DAYZ_TOOLS', 'BIOUTPUT', 'STEAM_COMPAT_CLIENT_INSTALL_PATH')\n"
+        ),
+        "MARKER": "MARKER = '$PBOPREFIX$'\n",
+    },
+}
+
+
+def _module_bindings(module: ast.Module, name: str) -> list[ast.AST]:
+    """Every statement or node in ``module`` that binds ``name``, at any depth."""
+    bindings: list[ast.AST] = []
+    for node in ast.walk(module):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == name:
+                bindings.append(node)
+        elif isinstance(node, ast.Name):
+            if node.id == name and isinstance(node.ctx, (ast.Store, ast.Del)):
+                bindings.append(node)
+        elif isinstance(node, ast.arg):
+            if node.arg == name:
+                bindings.append(node)
+        elif isinstance(node, ast.alias):
+            if (node.asname or node.name.split(".", 1)[0]) == name or node.name == "*":
+                bindings.append(node)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            if name in node.names:
+                bindings.append(node)
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name == name:
+                bindings.append(node)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
+            if node.name == name:
+                bindings.append(node)
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest == name:
+                bindings.append(node)
+    return bindings
+
+
+def _is_sole_top_level_def(module: ast.Module | None, name: str) -> bool:
+    """``name`` is bound exactly once in the file: by an undecorated top-level ``def``."""
+    if module is None:
+        return False
+    bindings = _module_bindings(module, name)
+    return (
+        len(bindings) == 1
+        and isinstance(bindings[0], ast.FunctionDef)
+        and bindings[0] in module.body
+        and not bindings[0].decorator_list
+    )
+def _top_level_def(module: ast.Module | None, name: str) -> ast.FunctionDef | None:
+    if module is None:
+        return None
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    return None
+
+
+def _top_level_assign(module: ast.Module | None, name: str) -> ast.Assign | None:
+    if module is None:
+        return None
+    for node in module.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in node.targets
+        ):
+            return node
+    return None
+
+
+def _reviewed_dump(source: str) -> str:
+    return ast.dump(ast.parse(source).body[0], include_attributes=False)
+
+
+_REVIEWED_SEALED_DAYZMAKE = (
+    "def _sealed_dayzmake() -> tuple[int | None, str | None, str]:\n"
+    "    \"\"\"A sealed memfd holding the pinned dayzmake, its ``/proc`` path, or a refusal.\n"
+    "\n"
+    "    Returns ``(descriptor, argv0, \"\")`` on success; the caller owns the\n"
+    "    descriptor and closes it once the child has started.\n"
+    "    \"\"\"\n"
+    "    found = shutil.which('dayzmake')\n"
+    "    if found is None:\n"
+    "        return None, None, f'dayzmake not found on PATH (install the {DAYZMAKE_VERSION} release)\\n'\n"
+    "    absolute = os.path.realpath(os.path.abspath(found))\n"
+    "    if not hasattr(os, 'memfd_create'):\n"
+    "        return None, None, 'dayzmake_sealed_image_unavailable: memfd_create is unavailable\\n'\n"
+    "    source_fd: int | None = None\n"
+    "    sealed_fd: int | None = None\n"
+    "    try:\n"
+    "        source_fd = os.open(absolute, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)\n"
+    "        info = os.fstat(source_fd)\n"
+    "        if not stat.S_ISREG(info.st_mode):\n"
+    "            return None, None, f'dayzmake at {absolute} is not a regular file\\n'\n"
+    "        flags = getattr(os, 'MFD_CLOEXEC', 0) | getattr(os, 'MFD_ALLOW_SEALING', 0)\n"
+    "        sealed_fd = os.memfd_create('dayzmake', flags)\n"
+    "        digest = hashlib.sha256()\n"
+    "        while True:\n"
+    "            block = os.read(source_fd, 1024 * 1024)\n"
+    "            if not block:\n"
+    "                break\n"
+    "            digest.update(block)\n"
+    "            view = memoryview(block)\n"
+    "            while view:\n"
+    "                written = os.write(sealed_fd, view)\n"
+    "                view = view[written:]\n"
+    "        actual = digest.hexdigest()\n"
+    "        expected = expected_sha256()\n"
+    "        if actual != expected:\n"
+    "            os.close(sealed_fd)\n"
+    "            sealed_fd = None\n"
+    "            return None, None, (\n"
+    "                f'dayzmake_pin_mismatch: {absolute} is sha256 {actual}, expected {expected} '\n"
+    "                f'({DAYZMAKE_VERSION}); set {PIN_OVERRIDE_ENV} to pin a development build\\n'\n"
+    "            )\n"
+    "        import fcntl\n"
+    "        seals = (\n"
+    "            getattr(fcntl, 'F_SEAL_SHRINK', 2)\n"
+    "            | getattr(fcntl, 'F_SEAL_GROW', 4)\n"
+    "            | getattr(fcntl, 'F_SEAL_WRITE', 8)\n"
+    "            | getattr(fcntl, 'F_SEAL_SEAL', 1)\n"
+    "        )\n"
+    "        fcntl.fcntl(sealed_fd, getattr(fcntl, 'F_ADD_SEALS', 1033), seals)\n"
+    "    except OSError as error:\n"
+    "        if sealed_fd is not None:\n"
+    "            os.close(sealed_fd)\n"
+    "        return None, None, f'dayzmake_sealed_image_unavailable: {absolute}: {error}\\n'\n"
+    "    finally:\n"
+    "        if source_fd is not None:\n"
+    "            os.close(source_fd)\n"
+    "    return sealed_fd, f'/proc/self/fd/{sealed_fd}', ''\n"
+)
+
+
+def _sealed_dayzmake_ok(module: ast.Module | None) -> bool:
+    """``_sealed_dayzmake`` is AST-equal to its reviewed source, bound once."""
+    if module is None or not _is_sole_top_level_def(module, "_sealed_dayzmake"):
+        return False
+    node = _top_level_def(module, "_sealed_dayzmake")
+    if node is None:
+        return False
+    return ast.dump(node, include_attributes=False) == _reviewed_dump(_REVIEWED_SEALED_DAYZMAKE)
+
+
+_REVIEWED_HOST_FUNCTIONS = {
+    "_read_app": (
+        "def _read_app(bundle: Path, expected_sha256: str) -> dict[str, bytes]:\n"
+        "    path = bundle / 'app.pyz'\n"
+        "    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)\n"
+        "    try:\n"
+        "        info = os.fstat(descriptor)\n"
+        "        if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_APP_BYTES:\n"
+        "            raise RuntimeError('app_invalid')\n"
+        "        with os.fdopen(os.dup(descriptor), 'rb') as stream:\n"
+        "            raw = stream.read(_MAX_APP_BYTES + 1)\n"
+        "    finally:\n"
+        "        os.close(descriptor)\n"
+        "    if hashlib.sha256(raw).hexdigest().upper() != expected_sha256.upper():\n"
+        "        raise RuntimeError('app_hash_mismatch')\n"
+        "    with zipfile.ZipFile(io.BytesIO(raw)) as archive:\n"
+        "        return {item.filename: archive.read(item) for item in archive.infolist()}\n"
+    ),
+    "_load_app_main": (
+        "def _load_app_main(members: dict[str, bytes], bundle: Path) -> types.ModuleType:\n"
+        "    \"\"\"Execute the sealed ``__main__.py`` as a module, with an ``msvcrt`` for its import.\n"
+        "\n"
+        "    The shim is in ``sys.modules`` only while that module body runs: a module\n"
+        "    named ``msvcrt`` makes ``subprocess`` (and so ``asyncio``) take its Windows\n"
+        "    branch, so everything else must already be imported and it is removed again.\n"
+        "    \"\"\"\n"
+        "    module = types.ModuleType('dayz_test_app_main')\n"
+        "    module.__file__ = str(bundle / 'app.pyz' / '__main__.py')\n"
+        "    shim = types.ModuleType('msvcrt')\n"
+        "    shim.open_osfhandle = lambda handle, _flags: int(handle)\n"
+        "    if 'msvcrt' in sys.modules:\n"
+        "        raise RuntimeError('msvcrt_present')\n"
+        "    sys.modules['msvcrt'] = shim\n"
+        "    sys.modules[module.__name__] = module\n"
+        "    try:\n"
+        "        exec(compile(members['__main__.py'], module.__file__, 'exec', dont_inherit=True), module.__dict__)\n"
+        "    finally:\n"
+        "        del sys.modules['msvcrt']\n"
+        "    module._bundle_root = lambda: bundle\n"
+        "    return module\n"
+    ),
+    "_venv_root": (
+        "def _venv_root() -> Path | None:\n"
+        "    \"\"\"The venv root named by the ``pyvenv.cfg`` next to or above the executable.\n"
+        "\n"
+        "    With ``-S``, ``site`` never runs, and on Python before 3.14 the venv is\n"
+        "    only detected by ``site``: ``sys.prefix`` (and so ``sysconfig``) still\n"
+        "    names the base installation, whose site-packages does not hold the\n"
+        "    venv's ``psutil``. Locate the venv the way ``site`` does, from\n"
+        "    ``pyvenv.cfg`` beside ``sys.executable`` or in its parent directory,\n"
+        "    without importing ``site`` or processing any ``.pth`` file.\n"
+        "    \"\"\"\n"
+        "    executable = Path(sys.executable)\n"
+        "    for directory in (executable.parent, executable.parent.parent):\n"
+        "        if (directory / 'pyvenv.cfg').is_file():\n"
+        "            return directory\n"
+        "    return None\n"
+    ),
+    "_add_site_packages": (
+        "def _add_site_packages() -> None:\n"
+        "    \"\"\"Add site-packages for ``psutil`` without running any ``.pth`` hook.\"\"\"\n"
+        "    candidates: list[str] = []\n"
+        "    venv = _venv_root()\n"
+        "    if venv is not None:\n"
+        "        version = f'python{sys.version_info.major}.{sys.version_info.minor}'\n"
+        "        candidates.extend(\n"
+        "            str(venv / relative)\n"
+        "            for relative in (\n"
+        "                Path('lib') / version / 'site-packages',\n"
+        "                Path('lib64') / version / 'site-packages',\n"
+        "                Path('Lib') / 'site-packages',\n"
+        "            )\n"
+        "        )\n"
+        "        try:\n"
+        "            candidates.extend(\n"
+        "                str(path) for path in sorted(venv.glob('lib/python*/site-packages'))\n"
+        "            )\n"
+        "        except OSError:\n"
+        "            pass\n"
+        "    else:\n"
+        "        paths = sysconfig.get_paths()\n"
+        "        for key in ('purelib', 'platlib'):\n"
+        "            candidate = paths.get(key)\n"
+        "            if candidate:\n"
+        "                candidates.append(candidate)\n"
+        "    for candidate in candidates:\n"
+        "        if candidate not in sys.path and os.path.isdir(candidate):\n"
+        "            sys.path.append(candidate)\n"
+    ),
+    "main": (
+        "def main(argv: list[str] | None = None) -> int:\n"
+        "    parser = argparse.ArgumentParser(prog='dayz_mcp.linux_worker_host', allow_abbrev=False)\n"
+        "    parser.add_argument('--bundle', required=True)\n"
+        "    parser.add_argument('--app-sha256', required=True)\n"
+        "    parser.add_argument('--lifecycle-child', action='store_true')\n"
+        "    args = parser.parse_args(argv)\n"
+        "    bundle = Path(args.bundle)\n"
+        "    if not bundle.is_absolute() or os.path.normpath(args.bundle) != args.bundle:\n"
+        "        return 2\n"
+        "    members = _read_app(bundle, args.app_sha256)\n"
+        "    sealed = _SealedModuleFinder(members, str(bundle / 'app.pyz'))\n"
+        "    already = [name for name in sealed._sources if name in sys.modules]\n"
+        "    if already:\n"
+        "        raise RuntimeError('sealed_module_preloaded')\n"
+        "    sys.meta_path.insert(0, sealed)\n"
+        "    import dayz_mcp\n"
+        "    _add_site_packages()\n"
+        "    import asyncio\n"
+        "    import subprocess\n"
+        "    from dayz_mcp import linux_compat\n"
+        "    linux_compat.install()\n"
+        "    app_main = _load_app_main(members, bundle)\n"
+        "    sys.argv = [sys.argv[0], *(['--lifecycle-child'] if args.lifecycle_child else [])]\n"
+        "    return app_main.main()\n"
+    ),
+}
+_REVIEWED_HOST_CLASS = (
+    "class _SealedModuleFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):\n"
+    "    \"\"\"Serve ``dayz_mcp`` and ``dayz_mcp.<name>`` from the verified archive.\"\"\"\n"
+    "    def __init__(self, members: dict[str, bytes], origin: str) -> None:\n"
+    "        self._sources = {\n"
+    "            'dayz_mcp.' + name[len(_PACKAGE_PREFIX):-3]: data\n"
+    "            for name, data in members.items()\n"
+    "            if name.startswith(_PACKAGE_PREFIX)\n"
+    "            and name.endswith('.py')\n"
+    "            and name != _PACKAGE_PREFIX + '__init__.py'\n"
+    "            and '/' not in name[len(_PACKAGE_PREFIX):]\n"
+    "        }\n"
+    "        init = members.get(_PACKAGE_PREFIX + '__init__.py')\n"
+    "        if init is None:\n"
+    "            raise RuntimeError('package_init_missing')\n"
+    "        self._sources['dayz_mcp'] = init\n"
+    "        self._origin = origin\n"
+    "    def find_spec(self, fullname, path=None, target=None):\n"
+    "        if fullname not in self._sources:\n"
+    "            return None\n"
+    "        if fullname == 'dayz_mcp':\n"
+    "            spec = importlib.util.spec_from_loader(\n"
+    "                fullname, self, origin=f'{self._origin}/dayz_mcp/__init__.py', is_package=True\n"
+    "            )\n"
+    "            spec.submodule_search_locations = []\n"
+    "            return spec\n"
+    "        return importlib.util.spec_from_loader(\n"
+    "            fullname, self, origin=f\"{self._origin}/{fullname.replace('.', '/')}.py\"\n"
+    "        )\n"
+    "    def create_module(self, spec):\n"
+    "        return None\n"
+    "    def exec_module(self, module: types.ModuleType) -> None:\n"
+    "        source = self._sources[module.__name__]\n"
+    "        module.__file__ = module.__spec__.origin\n"
+    "        exec(compile(source, module.__spec__.origin, 'exec', dont_inherit=True), module.__dict__)\n"
+)
+
+
+def _host_contract_ok(module: ast.Module | None) -> bool:
+    """Every definition on the host's app.pyz-to-exec path is AST-equal to reviewed text.
+
+    Pinning the whole path (not only a no-rebinding rule at the exec site) is
+    what makes a subscript store, ``del``, augmented assignment or mutating
+    call on ``members`` or ``self._sources`` in any of these definitions a
+    finding: the mutated definition no longer matches its reviewed AST.
+    """
+    if module is None:
+        return False
+    for name, source in _REVIEWED_HOST_FUNCTIONS.items():
+        node = _top_level_def(module, name)
+        bindings = _module_bindings(module, name)
+        if (
+            node is None
+            or len(bindings) != 1
+            or bindings[0] is not node
+            or node.decorator_list
+            or ast.dump(node, include_attributes=False) != _reviewed_dump(source)
+        ):
+            return False
+    classes = [
+        node
+        for node in module.body
+        if isinstance(node, ast.ClassDef) and node.name == "_SealedModuleFinder"
+    ]
+    bindings = _module_bindings(module, "_SealedModuleFinder")
+    return (
+        len(classes) == 1
+        and len(bindings) == 1
+        and bindings[0] is classes[0]
+        and not classes[0].decorator_list
+        and ast.dump(classes[0], include_attributes=False) == _reviewed_dump(_REVIEWED_HOST_CLASS)
+    )
+
+
+def _builder_contract_ok(module: ast.Module | None, relative_path: str) -> bool:
+    # Pins compare docstrings too: the reviewed texts above carry them.
+    if module is None:
+        return False
+    for (path, name), source in _REVIEWED_BUILDERS.items():
+        if path != relative_path:
+            continue
+        node = _top_level_def(module, name)
+        bindings = _module_bindings(module, name)
+        if (
+            node is None
+            or len(bindings) != 1
+            or bindings[0] is not node
+            or ast.dump(node, include_attributes=False) != _reviewed_dump(source)
+        ):
+            return False
+    for name, source in _REVIEWED_CONSTANTS.get(relative_path, {}).items():
+        assigns = [
+            node
+            for node in module.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
+        ]
+        bindings = _module_bindings(module, name)
+        if (
+            len(assigns) != 1
+            or len(bindings) != 1
+            or ast.dump(assigns[0], include_attributes=False) != _reviewed_dump(source)
+        ):
+            return False
+    if relative_path == "dayz_mcp/linux_build.py" and not _sealed_dayzmake_ok(module):
+        return False
+    return True
+
+
 _PROCESS_AUDIT_PATHS = frozenset(
     {
         "dayz_mcp/native_launcher_backend.py",
         "dayz_mcp/secure_launcher.py",
+        # Off Windows linux_compat installs it under the backend's name.
+        "dayz_mcp/linux_launcher.py",
+        "dayz_mcp/linux_worker_host.py",
     }
 )
 _PROCESS_CALLABLES = frozenset(
     {
+        "_posixsubprocess.fork_exec",
         "asyncio.create_subprocess_exec",
         "asyncio.create_subprocess_shell",
+        "os.fork",
+        "os.forkpty",
         "os.popen",
+        "os.posix_spawn",
+        "os.posix_spawnp",
         "os.startfile",
         "os.system",
+        "pty.fork",
+        "pty.spawn",
         "subprocess.call",
         "subprocess.check_call",
         "subprocess.check_output",
@@ -1268,7 +1720,7 @@ _PROCESS_CALLABLES = frozenset(
         "subprocess.run",
     }
 )
-_PROCESS_MODULES = frozenset({"asyncio", "os", "subprocess"})
+_PROCESS_MODULES = frozenset({"_posixsubprocess", "asyncio", "os", "pty", "subprocess"})
 _DYNAMIC_PROCESS_CALLABLES = frozenset(
     {
         "__import__",
@@ -1307,6 +1759,12 @@ class _ProcessCreationVisitor(ast.NodeVisitor):
         self.findings: list[ProcessCreationFinding] = []
         self.direct_create_process_calls = 0
         self.canonical_create_flags_definitions = 0
+        self.linux_relay_popen_calls: dict[str, int] = {}
+        self.module: ast.Module | None = None
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self.module = node
+        self.generic_visit(node)
 
     @property
     def aliases(self) -> dict[str, str]:
@@ -1360,6 +1818,354 @@ class _ProcessCreationVisitor(ast.NodeVisitor):
             and isinstance(node.args[0], ast.Name)
             and node.args[0].id == expected
         )
+
+    def _keyword(self, node: ast.Call, name: str) -> ast.expr | None:
+        for keyword in node.keywords:
+            if keyword.arg == name:
+                return keyword.value
+        return None
+
+    def _is_subprocess_attr(self, node: ast.AST | None, attr: str) -> bool:
+        return node is not None and self._resolve(node) == f"subprocess.{attr}"
+
+    def _enclosing_def(self) -> ast.FunctionDef | None:
+        return _top_level_def(self.module, self.function)
+
+    def _env_call_ok(self, node: ast.Call, expected_env: str) -> bool:
+        env_call = self._keyword(node, "env")
+        if not isinstance(env_call, ast.Call) or not self._is_name(env_call.func, expected_env):
+            return False
+        if not _is_sole_top_level_def(self.module, expected_env):
+            return False
+        if self.relative_path == "dayz_mcp/linux_build.py":
+            return not env_call.args and not env_call.keywords
+        if len(env_call.args) != 1 or env_call.keywords:
+            return False
+        argument = env_call.args[0]
+        if isinstance(argument, ast.Dict):
+            return all(
+                isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+                and key.value in _LINUX_CHILD_EXTRA_ENV_KEYS
+                for key in argument.keys
+            )
+        if isinstance(argument, ast.Name):
+            enclosing = self._enclosing_def()
+            if enclosing is None:
+                return False
+            params = {
+                arg.arg
+                for arg in (
+                    list(enclosing.args.posonlyargs)
+                    + list(enclosing.args.args)
+                    + list(enclosing.args.kwonlyargs)
+                )
+            }
+            if argument.id not in params:
+                return False
+            rebound = {
+                child.id
+                for child in ast.walk(enclosing)
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store)
+            }
+            return argument.id not in rebound
+        return False
+
+    def _find_function(self, qualified: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        if self.module is None:
+            return None
+
+        def search(body: list[ast.stmt], prefix: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+            for item in body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    name = prefix + item.name
+                    if name == qualified:
+                        return item
+                    found = search(item.body, prefix)
+                    if found is not None:
+                        return found
+                elif isinstance(item, ast.ClassDef):
+                    found = search(item.body, prefix + item.name + ".")
+                    if found is not None:
+                        return found
+            return None
+
+        return search(self.module.body, "")
+
+    @staticmethod
+    def _parameters(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+        return {
+            argument.arg
+            for argument in (
+                list(node.args.posonlyargs) + list(node.args.args) + list(node.args.kwonlyargs)
+            )
+        } | ({node.args.vararg.arg} if node.args.vararg is not None else set()) | (
+            {node.args.kwarg.arg} if node.args.kwarg is not None else set()
+        )
+
+    @staticmethod
+    def _stores(
+        node: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+    ) -> list[ast.Name]:
+        return [
+            child
+            for child in ast.walk(node)
+            if isinstance(child, ast.Name)
+            and child.id == name
+            and isinstance(child.ctx, ast.Store)
+        ]
+
+    def _stores_before(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        name: str,
+        call: ast.Call,
+    ) -> list[ast.Name]:
+        position = (call.lineno, call.col_offset)
+        return [
+            child
+            for child in self._stores(node, name)
+            if (child.lineno, child.col_offset) < position
+        ]
+
+    @staticmethod
+    def _assignment_of(
+        node: ast.FunctionDef | ast.AsyncFunctionDef, store: ast.Name
+    ) -> ast.Assign | ast.AnnAssign | ast.AugAssign | None:
+        parents: dict[ast.AST, ast.AST] = {}
+        for parent in ast.walk(node):
+            for child in ast.iter_child_nodes(parent):
+                parents[child] = parent
+        current: ast.AST = store
+        while current in parents:
+            current = parents[current]
+            if isinstance(current, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                return current
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                return None
+        return None
+
+    def _sealed_origin_ok(
+        self, enclosing: ast.FunctionDef | None, call: ast.Call
+    ) -> bool:
+        if enclosing is None or not _sealed_dayzmake_ok(self.module):
+            return False
+        assignments: list[ast.Assign | ast.AnnAssign | ast.AugAssign | None] = []
+        for name in ("sealed_fd", "dayzmake"):
+            stores = self._stores_before(enclosing, name, call)
+            if len(stores) != 1:
+                return False
+            assignments.append(self._assignment_of(enclosing, stores[0]))
+        first, second = assignments
+        if first is None or first is not second or not isinstance(first, ast.Assign):
+            return False
+        if len(first.targets) != 1 or not isinstance(first.targets[0], ast.Tuple):
+            return False
+        if [elt.id if isinstance(elt, ast.Name) else "" for elt in first.targets[0].elts] != [
+            "sealed_fd",
+            "dayzmake",
+            "refusal",
+        ]:
+            return False
+        value = first.value
+        return (
+            isinstance(value, ast.Call)
+            and self._is_name(value.func, "_sealed_dayzmake")
+            and not value.args
+            and not value.keywords
+        )
+
+    def _cancel_origin_ok(
+        self, enclosing: ast.FunctionDef | None, call: ast.Call
+    ) -> bool:
+        if enclosing is None:
+            return False
+        stores = self._stores_before(enclosing, "cancel_read", call)
+        if len(stores) != 1:
+            return False
+        assignment = self._assignment_of(enclosing, stores[0])
+        if not isinstance(assignment, ast.Assign) or len(assignment.targets) != 1:
+            return False
+        target = assignment.targets[0]
+        if not isinstance(target, ast.Tuple) or [
+            elt.id if isinstance(elt, ast.Name) else "" for elt in target.elts
+        ] != ["cancel_read", "cancel_write"]:
+            return False
+        value = assignment.value
+        return (
+            isinstance(value, ast.Call)
+            and _attribute_name(value.func) == "os.pipe"
+            and not value.args
+            and not value.keywords
+        )
+
+    def _is_canonical_host_dynamic(self, node: ast.Call, resolved: str | None) -> bool:
+        if self.relative_path != _HOST_PATH or self.function not in _HOST_EXEC_FUNCTIONS:
+            return False
+        if not _host_contract_ok(self.module):
+            return False
+        if resolved == "exec":
+            return (
+                len(node.args) == 2
+                and not node.keywords
+                and isinstance(node.args[0], ast.Call)
+                and self._is_name(node.args[0].func, "compile")
+                and isinstance(node.args[1], ast.Attribute)
+                and node.args[1].attr == "__dict__"
+            )
+        if resolved == "compile":
+            if len(node.args) < 3 or not isinstance(node.args[2], ast.Constant) or node.args[2].value != "exec":
+                return False
+            if not any(
+                keyword.arg == "dont_inherit" and self._is_true(keyword.value) for keyword in node.keywords
+            ):
+                return False
+            first = node.args[0]
+            function = self._find_function(self.function)
+            if function is None:
+                return False
+            if isinstance(first, ast.Name) and first.id == "source":
+                if self.function != "_SealedModuleFinder.exec_module":
+                    return False
+                stores = self._stores(function, "source")
+                if len(stores) != 1:
+                    return False
+                assignment = self._assignment_of(function, stores[0])
+                if not isinstance(assignment, ast.Assign) or len(assignment.targets) != 1:
+                    return False
+                if not self._is_name(assignment.targets[0], "source"):
+                    return False
+                value = assignment.value
+                return (
+                    isinstance(value, ast.Subscript)
+                    and isinstance(value.value, ast.Attribute)
+                    and value.value.attr == "_sources"
+                    and self._is_name(value.value.value, "self")
+                    and isinstance(value.slice, ast.Attribute)
+                    and value.slice.attr == "__name__"
+                    and self._is_name(value.slice.value, "module")
+                )
+            if not (
+                isinstance(first, ast.Subscript)
+                and self._is_name(first.value, "members")
+                and isinstance(first.slice, ast.Constant)
+                and first.slice.value == "__main__.py"
+            ):
+                return False
+            return (
+                self.function == "_load_app_main"
+                and "members" in self._parameters(function)
+                and not self._stores(function, "members")
+            )
+        return False
+
+    def _is_canonical_linux_relay_popen(self, node: ast.Call, resolved: str) -> bool:
+        """The Linux counterpart of the canonical CreateProcessW boundary.
+
+        Accepted: exactly one ``subprocess.Popen`` in each relay function and in
+        ``run_addon_builder``, argv from the file's argv builder, a required
+        ``env`` from its environment builder, ``close_fds=True``, the pinned
+        streams and ``cwd``, ``start_new_session=True`` only in the build, and
+        ``pass_fds`` only as ``(cancel_read,)`` in ``_supervise_worker`` or
+        ``(sealed_fd,)`` in the build. Both builders and every constant they
+        read must be AST-equal to the reviewed sources above.
+        """
+        builders = _LINUX_POPEN_BUILDERS.get(self.relative_path)
+        if resolved != "subprocess.Popen" or builders is None:
+            return False
+        expected_argv, expected_env = builders
+        is_relay = self.relative_path == "dayz_mcp/linux_launcher.py"
+        allowed_functions = _LINUX_RELAY_FUNCTIONS if is_relay else _LINUX_BUILD_FUNCTIONS
+        if (
+            self.function not in allowed_functions
+            or len(node.args) != 1
+            or not isinstance(node.args[0], ast.Call)
+            or not self._is_name(node.args[0].func, expected_argv)
+            or not _is_sole_top_level_def(self.module, expected_argv)
+            or not _is_sole_top_level_def(self.module, expected_env)
+            or not _builder_contract_ok(self.module, self.relative_path)
+            or any(keyword.arg not in _LINUX_POPEN_KEYWORDS for keyword in node.keywords)
+            or any(keyword.arg is None for keyword in node.keywords)
+        ):
+            return False
+        if not self._env_call_ok(node, expected_env):
+            return False
+        argv_call = node.args[0]
+        enclosing = self._enclosing_def()
+        if is_relay:
+            lifecycle = self._keyword(argv_call, "lifecycle")
+            if (
+                len(argv_call.args) != 1
+                or len(argv_call.keywords) != 1
+                or not isinstance(argv_call.args[0], ast.Name)
+                or enclosing is None
+                or argv_call.args[0].id not in self._parameters(enclosing)
+                or self._stores_before(enclosing, argv_call.args[0].id, node)
+                or not isinstance(lifecycle, ast.Constant)
+                or lifecycle.value is not (self.function == "_run_lifecycle_child")
+            ):
+                return False
+            if self.function == "_supervise_worker" and not self._cancel_origin_ok(enclosing, node):
+                return False
+        else:
+            if (
+                len(argv_call.args) != 3
+                or argv_call.keywords
+                or not self._is_name(argv_call.args[0], "dayzmake")
+                or not self._sealed_origin_ok(enclosing, node)
+            ):
+                return False
+        close_fds = self._keyword(node, "close_fds")
+        if close_fds is None or not self._is_true(close_fds):
+            return False
+        start_new_session = self._keyword(node, "start_new_session")
+        pass_fds = self._keyword(node, "pass_fds")
+        cwd = self._keyword(node, "cwd")
+        if is_relay:
+            if start_new_session is not None:
+                return False
+            if self.function == "_supervise_worker":
+                if not (
+                    isinstance(pass_fds, ast.Tuple)
+                    and len(pass_fds.elts) == 1
+                    and self._is_name(pass_fds.elts[0], "cancel_read")
+                ):
+                    return False
+                streams = ("PIPE", "PIPE", "PIPE")
+            else:
+                if pass_fds is not None:
+                    return False
+                streams = ("PIPE", "PIPE", "DEVNULL")
+            if not (isinstance(cwd, ast.Constant) and cwd.value == "/"):
+                return False
+        else:
+            if start_new_session is None or not self._is_true(start_new_session):
+                return False
+            if not (
+                isinstance(pass_fds, ast.Tuple)
+                and len(pass_fds.elts) == 1
+                and self._is_name(pass_fds.elts[0], "sealed_fd")
+            ):
+                return False
+            streams = ("DEVNULL", None, "STDOUT")
+            if not (
+                isinstance(cwd, ast.Call)
+                and self._is_name(cwd.func, "str")
+                and len(cwd.args) == 1
+                and self._is_name(cwd.args[0], "temp")
+                and not cwd.keywords
+            ):
+                return False
+        for name, expected in zip(("stdin", "stdout", "stderr"), streams):
+            value = self._keyword(node, name)
+            if expected is None:
+                if not self._is_name(value, "stream"):
+                    return False
+            elif not self._is_subprocess_attr(value, expected):
+                return False
+        count = self.linux_relay_popen_calls.get(self.function, 0) + 1
+        self.linux_relay_popen_calls[self.function] = count
+        return count == 1
 
     @classmethod
     def _is_canonical_create_process_call(cls, node: ast.Call) -> bool:
@@ -1635,8 +2441,11 @@ class _ProcessCreationVisitor(ast.NodeVisitor):
             resolved is not None
             and resolved.startswith("os.spawn")
         ):
-            self._record(node, "forbidden_python_process_surface")
-        elif resolved in _DYNAMIC_PROCESS_CALLABLES and not (
+            if not self._is_canonical_linux_relay_popen(node, resolved):
+                self._record(node, "forbidden_python_process_surface")
+        elif resolved in _DYNAMIC_PROCESS_CALLABLES and not self._is_canonical_host_dynamic(
+            node, resolved
+        ) and not (
             resolved in {"getattr", "builtins.getattr"}
             and not self._is_dynamic_process_lookup(node)
         ):
@@ -1703,6 +2512,24 @@ def audit_process_creation(tools_dir: Path) -> tuple[ProcessCreationFinding, ...
                     0,
                     "_create_registered_launcher",
                     "create_process_call_missing",
+                )
+            )
+        if relative == "dayz_mcp/linux_build.py" and not _sealed_dayzmake_ok(parsed[module]):
+            findings.append(
+                ProcessCreationFinding(
+                    relative,
+                    0,
+                    "<module>",
+                    "sealed_dayzmake_contract_invalid",
+                )
+            )
+        if relative == _HOST_PATH and not _host_contract_ok(parsed[module]):
+            findings.append(
+                ProcessCreationFinding(
+                    relative,
+                    0,
+                    "<module>",
+                    "host_exec_path_contract_invalid",
                 )
             )
         if (

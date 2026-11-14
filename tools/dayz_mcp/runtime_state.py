@@ -393,8 +393,10 @@ class JsonlAuditWriter:
 def _coordination_fault_transaction(path: Path) -> Iterator[None]:
     """Serialize fault-marker CAS across store instances and daemon candidates."""
 
-    if msvcrt is None:
-        raise RuntimeError("coordination_fault_lock_unavailable")
+    # byte_lock.lock is msvcrt.locking(LK_LOCK) on Windows and an OFD lock with
+    # the same bounded retry elsewhere.
+    from dayz_mcp import byte_lock
+
     with _COORDINATION_FAULT_PROCESS_LOCK:
         path.parent.mkdir(parents=True, exist_ok=True)
         _safe_directory(path.parent)
@@ -417,8 +419,7 @@ def _coordination_fault_transaction(path: Path) -> Iterator[None]:
             if opened.st_size == 0:
                 os.write(descriptor, b"\0")
                 os.fsync(descriptor)
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            byte_lock.lock(descriptor, 0)
             acquired = True
             named = _safe_regular_lstat(lock_path)
             if _stat_identity(opened)[:2] != _stat_identity(named)[:2]:
@@ -436,8 +437,7 @@ def _coordination_fault_transaction(path: Path) -> Iterator[None]:
         finally:
             try:
                 if acquired:
-                    os.lseek(descriptor, 0, os.SEEK_SET)
-                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                    byte_lock.unlock(descriptor, 0)
             finally:
                 os.close(descriptor)
 
