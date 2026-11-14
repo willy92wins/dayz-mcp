@@ -160,7 +160,10 @@ answers ok with `alive: 0`.
 The state-only fields of the shared `MCPAIGroup` reply (`group_present`,
 `alive`, `members_total`, `current_waypoint`, `scene_id`) are only
 filled by `ai_group_state`; a spawn/order/release reply leaves them at
-their defaults.
+their defaults. The release-only fields `dropped_deleted` and
+`dropped_kept` are only filled by `ai_group_release` (from the counts
+the release sweep stored on the group record); every other reply
+leaves them at 0.
 
 Offline coverage: `tools/tests/test_xai_group_state.py` (O4, E7, the O13
 part that reads residues when the census announces no close support, and
@@ -276,14 +279,49 @@ enqueue and again at delivery. On bridge v13 both peers announce
 close: its groups are stopped by `LeaseCloseExtensionStop` and reported
 as `ai_group:<spawn_token>` `residue` entries by
 `LeaseCloseExtensionCensus` until they disappear.
-The close removes the members and the group, nothing else. A member that
-dies drops the item in its hands, usually the loadout's weapon (vanilla
+The close removes the members and the group. Once per group, on its
+`active` -> `releasing` change, the release (the lease close or the
+internal `ai_group_release`) first sweeps the items its members
+dropped: it deletes the items lying in the world within 30 m of a
+member entity whose last holder — Expansion's
+`m_Expansion_PreviousOwner` on `ItemBase`, moved on every inventory
+change by `ItemBase.OnItemLocationChanged`
+(`scripts/4_world/entities/itembase.c:1162-1244`), so it survives the
+clones Expansion makes of loadout items — is a member of the group.
+That covers a weapon dropped on death (vanilla
 `DayZPlayerImplement.DeathDropHandEntity`, called from `OnSimulationEnd`,
-`scripts/4_world/entities/dayzplayerimplement.c:17` and `:635`); from
-then on it is a world item of its own, with the corpse lifetime (`:646`).
-The adapter cannot tell it apart from any other item, so neither
-`ai_group_release` nor the close deletes it or counts it as residue: it
-stays on the ground after a clean close.
+`scripts/4_world/entities/dayzplayerimplement.c:17` and `:635`) or
+cloned to the ground when the member went unconscious. A container (an
+item whose inventory has a cargo) is never deleted: members drop only
+cargo-less items, so one lying in the world got there through a
+player. The sweep also leaves an item a player is taking (an
+inventory juncture, on it or inside it) or that holds something not
+from the group, and it leaves and counts the group's items players
+hold, once per top item (no ancestor between it and the player is
+from the group). An item whose own `m_Expansion_IsOwnerPlayer` flag
+is set is never deleted: Expansion's sticky flag on `ItemBase` is set
+when the item enters a real player's inventory and is never cleared
+on that entity, so such an item is not a candidate, and inside a
+candidate it counts as not from the group, so the root is kept. The
+player flag is per entity. An entity created inside the group's items
+from a player's item does not carry it: an attachment or cargo item
+Expansion clones along with its parent (a member taking that parent
+to its hands, swapping it as gear, or dropping it when going
+unconscious), or a stack split off inside a member's inventory. Such
+an entity reads as the group's and can be deleted with the group item
+it sits in. Reaching it needs a player to put his item into or onto
+one of the group's items while the member is unconscious (or dead,
+for a split) and Expansion to clone or split it there afterwards.
+What remains: an item a player moves straight from a corpse to the
+ground without it ever entering his inventory keeps the flag clear
+and counts as the group's (it is a loadout item). The counts go
+on the release reply (`dropped_deleted`, `dropped_kept`) and to one
+server log line per released group, `ai_group sweep group_id=<id>
+dropped_deleted=<n> dropped_kept=<n>`; the close census keeps waiting
+for those deletions through its existing `deletion_pending` entry.
+Items whose member entity was deleted before the release, or lying
+farther than 30 m from every member entity at the release, are not
+found and stay.
 When a bound peer's
 census announces no close, the spawn, the order and the emote are refused
 with `expansion_unavailable` / `lease_close_not_supported` before anything

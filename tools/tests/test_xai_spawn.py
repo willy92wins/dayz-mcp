@@ -811,7 +811,8 @@ def _record(**overrides) -> SimpleNamespace:
     record = SimpleNamespace(
         spawn_token=EnforceString.of(TOKEN), group_id=0, group=None, expansion_id=7,
         scene_id=EnforceString.of(""), behaviour=EnforceString.of("HOLD"),
-        group_state=EnforceString.of("active"), waypoints=EnforceArray(), members=EnforceArray(),
+        group_state=EnforceString.of("active"), dropped_deleted=0, dropped_kept=0,
+        waypoints=EnforceArray(), members=EnforceArray(),
     )
     for key, value in overrides.items():
         setattr(record, key, value)
@@ -851,6 +852,9 @@ def _spawn_namespace(*, files=(), parse_ok=None, fail_at=None, read_name=None):
     game = SimpleNamespace(
         CreateObject=create_object,
         ObjectDelete=lambda obj: state.__setitem__("deleted_objects", state["deleted_objects"] + 1),
+        GetObjectsAtPosition3D=lambda pos, radius, objects, cargos: None,
+        GetPlayers=lambda players: None,
+        HasInventoryJunctureItem=lambda entity: False,
     )
     namespace: dict = {
         "_S": _WireString,
@@ -862,6 +866,11 @@ def _spawn_namespace(*, files=(), parse_ok=None, fail_at=None, read_name=None):
         "AI_TOTAL_MAX": 24,
         "AI_WAYPOINTS_MAX": 32,
         "AI_MEMBER_RING_M": 1.5,
+        "AI_DROPPED_RADIUS_M": 30.0,
+        "m_LeaseCloseDeletion": EnforceArray(),
+        "Log": lambda message: None,
+        "ItemBase": SimpleNamespace(Cast=lambda obj: None),
+        "InventoryTraversalType": SimpleNamespace(LEVELORDER=0),
         "Math": SimpleNamespace(PI2=math.tau, Cos=math.cos, Sin=math.sin),
         "Vector": lambda x, y, z: EnforceVector((x, y, z)),
         "GetGame": lambda: game,
@@ -910,13 +919,17 @@ def _spawn_namespace(*, files=(), parse_ok=None, fail_at=None, read_name=None):
         "this": object(),
         "_state": state,
     }
-    class_types = ("MCPAIGroupRecord", "MCPAIGroupMemberRecord", "MCPAIGroup", "MCPAIArgsRead", "MCPAIGroupMember", "eAIGroup", "eAIBase", "eAIFaction", "Object", "MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "typename", "GameInventory", "EntityAI", "eAIWaypointBehavior", "MCPArgs", "MCPCommand", "MCPResult")
+    class_types = ("MCPAIGroupRecord", "MCPAIGroupMemberRecord", "MCPAIGroup", "MCPAIArgsRead", "MCPAIGroupMember", "eAIGroup", "eAIBase", "eAIFaction", "Object", "MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "typename", "GameInventory", "EntityAI", "eAIWaypointBehavior", "MCPArgs", "MCPCommand", "MCPResult", "Man", "ItemBase", "CargoBase", "array")
     members = ("m_AIGroups", "m_RuntimeObjects", "m_NextBatchObjectId", "AI_GROUP_COUNT_MAX", "AI_TOTAL_MAX", "AI_WAYPOINTS_MAX", "AI_MEMBER_RING_M")
     for signature in (
         "protected void EnsureAIRegistry()",
         "protected MCPAIGroupRecord FindAIGroupByToken(string spawnToken)",
         "protected bool AIGroupGone(MCPAIGroupRecord record)",
         "protected bool AIGroupOriginalPresent(MCPAIGroupRecord record)",
+        "protected bool AIIsMemberEntity(MCPAIGroupRecord record, Man owner)",
+        "protected bool AILastHeldByGroup(MCPAIGroupRecord record, EntityAI entity)",
+        "protected bool AIDroppedFromGroup(MCPAIGroupRecord record, EntityAI entity)",
+        "protected void AISweepDroppedItems(MCPAIGroupRecord record)",
         "protected bool AIGroupRequestRelease(MCPAIGroupRecord record)",
         "protected bool AIIsSpawnToken(string value)",
         "protected string AINormalizeLoadout(string name)",

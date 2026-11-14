@@ -65,6 +65,8 @@ class MCPAIGroup
 	string release;
 	bool confirmed;
 	int released;
+	int dropped_deleted;
+	int dropped_kept;
 	ref array<int> remaining_ids;
 	ref array<ref MCPAIGroupMember> members;
 	string scene_id;
@@ -114,6 +116,8 @@ class MCPAIGroupRecord
 	string scene_id;
 	string behaviour;
 	string group_state;
+	int dropped_deleted;
+	int dropped_kept;
 	ref array<float> waypoints;
 	ref array<ref MCPAIGroupMemberRecord> members;
 
@@ -159,6 +163,7 @@ modded class MCPBridge
 	protected const int AI_TOTAL_MAX = 24;
 	protected const int AI_WAYPOINTS_MAX = 32;
 	protected const float AI_MEMBER_RING_M = 1.5;
+	protected const float AI_DROPPED_RADIUS_M = 30.0;
 
 	// Must equal EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH in bridge_readiness.py.
 	protected const string EXPANSION_AI_ARG_CONTRACT_HASH = "f1ff4689ba7bc8b2";
@@ -328,6 +333,256 @@ modded class MCPBridge
 		return !AIGroupOriginalPresent(record);
 	}
 
+	// Provenance of a dropped item (9867): Expansion's ItemBase record of
+	// its last holder (m_Expansion_PreviousOwner, Core/Entities/ItemBase.c:43-44),
+	// moved on every inventory change by ItemBase.OnItemLocationChanged
+	// (4_world/entities/itembase.c:1162-1244), so it survives the clones
+	// Expansion makes of loadout items. A null owner never matches, and a
+	// null member slot never matches it either: both read null once the
+	// entity behind them is deleted. Expansion's sticky player flag
+	// (m_Expansion_IsOwnerPlayer, AI/Entities/ItemBase.c:6) is set when an
+	// item enters a real player's inventory (AI/Entities/ItemBase.c:162-172)
+	// and is never cleared on that entity, so an entity whose own flag is
+	// set was a player's. The flag is per entity: an entity Expansion
+	// clones or splits inside a group's item does not carry it (see the
+	// lease-close limit in docs/expansion-ai-adapter.md).
+	protected bool AIIsMemberEntity(MCPAIGroupRecord record, Man owner)
+	{
+		int index = 0;
+		MCPAIGroupMemberRecord memberRecord;
+
+		if (!owner)
+		{
+			return false;
+		}
+
+		while (index < record.members.Count())
+		{
+			memberRecord = record.members.Get(index);
+			if (memberRecord.member == owner)
+			{
+				return true;
+			}
+
+			index = index + 1;
+		}
+
+		return false;
+	}
+
+	protected bool AILastHeldByGroup(MCPAIGroupRecord record, EntityAI entity)
+	{
+		ItemBase item;
+
+		if (!entity)
+		{
+			return false;
+		}
+
+		item = ItemBase.Cast(entity);
+		if (!item)
+		{
+			return false;
+		}
+
+		return AIIsMemberEntity(record, item.m_Expansion_PreviousOwner);
+	}
+
+	protected bool AIDroppedFromGroup(MCPAIGroupRecord record, EntityAI entity)
+	{
+		ItemBase item;
+
+		if (!entity)
+		{
+			return false;
+		}
+
+		item = ItemBase.Cast(entity);
+		if (!item)
+		{
+			return false;
+		}
+
+		if (item.m_Expansion_IsOwnerPlayer)
+		{
+			return false;
+		}
+
+		return AIIsMemberEntity(record, item.m_Expansion_PreviousOwner);
+	}
+
+	// Delete the items this group's members dropped, and only those, once
+	// per group on its active -> releasing change (9867). A candidate lies
+	// in the world within AI_DROPPED_RADIUS_M of a member entity that still
+	// exists and its last holder is a member. A container (an inventory
+	// with a cargo) is never deleted: members drop only cargo-less items,
+	// so one lying in the world got there through a player. Otherwise a
+	// candidate is kept when a player is taking it or anything inside it
+	// (an inventory juncture), or when anything inside it is not from the
+	// group. An item whose own m_Expansion_IsOwnerPlayer flag is set is
+	// never a candidate, and inside a candidate it counts as not from the
+	// group, so the root is kept. The flag is per entity, so an entity
+	// created inside a group's item from a player's item (cloned along
+	// with its parent or split off inside a member's inventory) does not
+	// carry it and can be deleted with the group item it sits in (the
+	// accepted limit in docs/expansion-ai-adapter.md). Items players hold are
+	// left and counted once per top item: no ancestor between the item
+	// and the player was last held by the group.
+	protected void AISweepDroppedItems(MCPAIGroupRecord record)
+	{
+		int deleted = 0;
+		int kept = 0;
+		int memberIndex = 0;
+		int objectIndex = 0;
+		int candidateIndex = 0;
+		int entryIndex = 0;
+		int playerIndex = 0;
+		MCPAIGroupMemberRecord memberRecord;
+		Object worldObject;
+		ItemBase candidate;
+		EntityAI entry;
+		EntityAI ancestor;
+		Man player;
+		GameInventory inventory;
+		array<Object> objects = new array<Object>();
+		array<CargoBase> proxyCargos = new array<CargoBase>();
+		array<EntityAI> candidates = new array<EntityAI>();
+		array<EntityAI> entries = new array<EntityAI>();
+		array<Man> players = new array<Man>();
+		bool shouldKeep = false;
+		bool ancestorFromGroup = false;
+
+		while (memberIndex < record.members.Count())
+		{
+			memberRecord = record.members.Get(memberIndex);
+			if (memberRecord.member)
+			{
+				objects = new array<Object>();
+				proxyCargos = new array<CargoBase>();
+				GetGame().GetObjectsAtPosition3D(memberRecord.member.GetPosition(), AI_DROPPED_RADIUS_M, objects, proxyCargos);
+				objectIndex = 0;
+				while (objectIndex < objects.Count())
+				{
+					worldObject = objects.Get(objectIndex);
+					candidate = ItemBase.Cast(worldObject);
+					if (candidate && !candidate.GetHierarchyParent() && !candidate.IsSetForDeletion() && candidates.Find(candidate) == -1 && AIDroppedFromGroup(record, candidate))
+					{
+						candidates.Insert(candidate);
+					}
+
+					objectIndex = objectIndex + 1;
+				}
+			}
+
+			memberIndex = memberIndex + 1;
+		}
+
+		candidateIndex = 0;
+		while (candidateIndex < candidates.Count())
+		{
+			candidate = ItemBase.Cast(candidates.Get(candidateIndex));
+			shouldKeep = false;
+			inventory = candidate.GetInventory();
+			if (inventory && inventory.GetCargo())
+			{
+				shouldKeep = true;
+			}
+
+			if (GetGame().HasInventoryJunctureItem(candidate))
+			{
+				shouldKeep = true;
+			}
+
+			entries = new array<EntityAI>();
+			if (inventory)
+			{
+				inventory.EnumerateInventory(InventoryTraversalType.LEVELORDER, entries);
+			}
+
+			entryIndex = 0;
+			while (entryIndex < entries.Count())
+			{
+				entry = entries.Get(entryIndex);
+				if (entry != candidate)
+				{
+					if (GetGame().HasInventoryJunctureItem(entry))
+					{
+						shouldKeep = true;
+					}
+
+					if (!AIDroppedFromGroup(record, entry))
+					{
+						shouldKeep = true;
+					}
+				}
+
+				entryIndex = entryIndex + 1;
+			}
+
+			if (shouldKeep)
+			{
+				kept = kept + 1;
+			}
+			else
+			{
+				m_LeaseCloseDeletion.Insert(candidate);
+				GetGame().ObjectDelete(candidate);
+				deleted = deleted + 1;
+			}
+
+			candidateIndex = candidateIndex + 1;
+		}
+
+		players = new array<Man>();
+		GetGame().GetPlayers(players);
+		playerIndex = 0;
+		while (playerIndex < players.Count())
+		{
+			player = players.Get(playerIndex);
+			if (player && !eAIBase.Cast(player))
+			{
+				inventory = player.GetInventory();
+				if (inventory)
+				{
+					entries = new array<EntityAI>();
+					inventory.EnumerateInventory(InventoryTraversalType.LEVELORDER, entries);
+					entryIndex = 0;
+					while (entryIndex < entries.Count())
+					{
+						entry = entries.Get(entryIndex);
+						if (entry != player && AILastHeldByGroup(record, entry))
+						{
+							ancestorFromGroup = false;
+							ancestor = entry.GetHierarchyParent();
+							while (ancestor && ancestor != player)
+							{
+								if (AILastHeldByGroup(record, ancestor))
+								{
+									ancestorFromGroup = true;
+								}
+
+								ancestor = ancestor.GetHierarchyParent();
+							}
+
+							if (!ancestorFromGroup)
+							{
+								kept = kept + 1;
+							}
+						}
+
+						entryIndex = entryIndex + 1;
+					}
+				}
+			}
+
+			playerIndex = playerIndex + 1;
+		}
+
+		record.dropped_deleted = deleted;
+		record.dropped_kept = kept;
+		Log("ai_group sweep group_id=" + record.group_id + " dropped_deleted=" + deleted + " dropped_kept=" + kept);
+	}
+
 	// The release request of plan 3.6, shared by ai_group_release and the
 	// lease-close stop. Deferred deletes only: eAI_Despawn and group Delete
 	// finish later, so this never confirms a deletion it only requested.
@@ -344,6 +599,7 @@ modded class MCPBridge
 
 		if (record.group_state == "active")
 		{
+			AISweepDroppedItems(record);
 			while (index < record.members.Count())
 			{
 				memberRecord = record.members.Get(index);
@@ -2363,6 +2619,8 @@ modded class MCPBridge
 			FillRemainingIds(record, report);
 		}
 
+		report.dropped_deleted = record.dropped_deleted;
+		report.dropped_kept = record.dropped_kept;
 		result.ok = true;
 	}
 };
