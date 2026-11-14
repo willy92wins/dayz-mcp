@@ -128,6 +128,19 @@ if _IS_WINDOWS:
         wintypes.LPWSTR,
         ctypes.POINTER(wintypes.DWORD),
     ]
+    _k32.GetExitCodeProcess.restype = wintypes.BOOL
+    _k32.GetExitCodeProcess.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _k32.GetProcessTimes.restype = wintypes.BOOL
+    _k32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
 else:  # pragma: no cover - POSIX fallback, untested on the Windows target.
     ctypes = None  # type: ignore[assignment]
     _k32 = None
@@ -178,6 +191,52 @@ def close_process_anchor(token: object) -> None:
         _k32.CloseHandle(token)
     except Exception:
         return
+
+
+def read_process_exit(token: object) -> dict | None:
+    """Exit code and time of an anchored process, or None.
+
+    None off Windows, for a None token, while the process runs, or on any
+    failure. Never raises.
+    """
+    if token is None or not _IS_WINDOWS:
+        return None
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        if _k32.WaitForSingleObject(token, 0) != _WAIT_OBJECT_0:
+            return None
+        code = wintypes.DWORD(0)
+        if not _k32.GetExitCodeProcess(token, ctypes.byref(code)):
+            return None
+        exit_time_utc: str | None = None
+        try:
+            creation = wintypes.FILETIME()
+            exited = wintypes.FILETIME()
+            kernel = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            if _k32.GetProcessTimes(
+                token,
+                ctypes.byref(creation),
+                ctypes.byref(exited),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            ):
+                ticks = (int(exited.dwHighDateTime) << 32) | int(
+                    exited.dwLowDateTime
+                )
+                micros = (ticks - 116444736000000000) // 10
+                stamp = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(
+                    microseconds=micros
+                )
+                exit_time_utc = stamp.isoformat(
+                    timespec="microseconds"
+                ).replace("+00:00", "Z")
+        except Exception:
+            exit_time_utc = None
+        return {"exit_code": int(code.value), "exit_time_utc": exit_time_utc}
+    except Exception:
+        return None
 
 
 def wait_for_parent_exit(handle: object) -> int:

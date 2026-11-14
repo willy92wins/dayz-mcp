@@ -1910,6 +1910,142 @@ def _steam_prep_token(value: object) -> str | None:
     return value if type(value) is str and _STEAM_PREP_TOKEN.fullmatch(value) else None
 
 
+_CLIENT_EXIT_CLASSIFICATIONS = frozenset(
+    {"unknown", "mcp_ordered", "spontaneous"}
+)
+
+
+def _client_exit_from_status(
+    status: object, run_id: str | None
+) -> dict[str, object] | None:
+    """Project the dead-client diagnosis of one run, or None. Pure."""
+    if not isinstance(status, dict) or not run_id:
+        return None
+    raw_runs = status.get("runs")
+    if not isinstance(raw_runs, list):
+        return None
+    runs = [item for item in raw_runs if isinstance(item, dict)]
+    run = next((item for item in runs if item.get("run_id") == run_id), None)
+    if run is None:
+        return None
+    raw_processes = run.get("processes")
+    if not isinstance(raw_processes, list):
+        return None
+    pid: int | None = None
+    for proc in raw_processes:
+        if not isinstance(proc, dict):
+            continue
+        if proc.get("role") == "client":
+            candidate = proc.get("pid")
+            if type(candidate) is int:
+                pid = candidate
+            break
+    if pid is None:
+        return None
+    raw_diagnostics = run.get("client_diagnostics")
+    if not isinstance(raw_diagnostics, list):
+        return None
+    row: dict[str, object] | None = None
+    for item in raw_diagnostics:
+        if not isinstance(item, dict):
+            continue
+        if (
+            item.get("current") is True
+            and type(item.get("pid")) is int
+            and item.get("pid") == pid
+            and item.get("state") == "dead"
+        ):
+            row = item
+            break
+    if row is None:
+        return None
+    exit_code = row.get("exit_code")
+    if type(exit_code) is not int:
+        exit_code = None
+    exit_time = row.get("exit_time_utc")
+    if not isinstance(exit_time, str) or not exit_time:
+        exit_time = None
+    diagnosis = row.get("exit_diagnosis")
+    if not isinstance(diagnosis, dict):
+        return {
+            "pid": pid,
+            "classification": "unknown",
+            "exit_code": exit_code,
+            "exit_time_utc": exit_time,
+            "lifetime_s": None,
+            "close_posted": None,
+            "lifecycle_actions": [],
+            "bridge_polled": None,
+            "rpt_path": None,
+            "rpt_clean_termination": None,
+            "rpt_tail": [],
+        }
+    classification = diagnosis.get("classification")
+    if not isinstance(classification, str) or (
+        classification not in _CLIENT_EXIT_CLASSIFICATIONS
+    ):
+        classification = "unknown"
+    lifetime = diagnosis.get("lifetime_s")
+    if type(lifetime) not in (int, float) or isinstance(lifetime, bool):
+        lifetime = None
+    close_posted = diagnosis.get("close_posted")
+    if type(close_posted) is not bool:
+        close_posted = None
+    actions: list[dict[str, object]] = []
+    raw_actions = diagnosis.get("lifecycle_actions")
+    if isinstance(raw_actions, list):
+        for item in raw_actions[:8]:
+            if not isinstance(item, dict):
+                continue
+            action = item.get("action")
+            source = item.get("source")
+            at_utc = item.get("at_utc")
+            outcome = item.get("outcome")
+            if not (
+                isinstance(action, str)
+                and isinstance(source, str)
+                and isinstance(at_utc, str)
+                and (outcome is None or isinstance(outcome, str))
+            ):
+                continue
+            actions.append(
+                {
+                    "action": action,
+                    "source": source,
+                    "at_utc": at_utc,
+                    "outcome": outcome,
+                }
+            )
+    bridge_polled = diagnosis.get("bridge_polled")
+    if type(bridge_polled) is not bool:
+        bridge_polled = None
+    rpt_path = diagnosis.get("rpt_path")
+    if not isinstance(rpt_path, str) or not rpt_path:
+        rpt_path = None
+    rpt_clean = diagnosis.get("rpt_clean_termination")
+    if type(rpt_clean) is not bool:
+        rpt_clean = None
+    tail: list[str] = []
+    raw_tail = diagnosis.get("rpt_tail")
+    if isinstance(raw_tail, list):
+        for item in raw_tail[:6]:
+            if isinstance(item, str):
+                tail.append(item[:200])
+    return {
+        "pid": pid,
+        "classification": classification,
+        "exit_code": exit_code,
+        "exit_time_utc": exit_time,
+        "lifetime_s": lifetime,
+        "close_posted": close_posted,
+        "lifecycle_actions": actions,
+        "bridge_polled": bridge_polled,
+        "rpt_path": rpt_path,
+        "rpt_clean_termination": rpt_clean,
+        "rpt_tail": tail,
+    }
+
+
 def _compact_result(
     *,
     terminal: WorkerTerminal,
@@ -1940,6 +2076,7 @@ def _compact_result(
     storage_reset_notice: str | None = None,
     server_boot: dict[str, object] | None = None,
     project_mod_replaced: bool = False,
+    client_exit: dict[str, object] | None = None,
 ) -> dict[str, object]:
     projection = readiness or _NULL_READINESS
     startup = _steam_prep_token(steam_startup)
@@ -2030,6 +2167,7 @@ def _compact_result(
         "session_idle_s": None,
         "display_timeout_s": None,
         "server_boot": server_boot,
+        "client_exit": client_exit,
     }
     if terminal.attestation is not None:
         result["attestation"] = terminal.attestation
@@ -2317,6 +2455,8 @@ async def _execute_request(
         storage_operation = None
     server_alive: bool | None = None
     client_alive: bool | None = None
+    client_exit: dict[str, object] | None = None
+    bridge_snapshot: object = None
     readiness: LaunchReadinessProjection | None = None
     client_terminated: int | None = None
     client_relaunched: bool | None = None
@@ -2338,12 +2478,12 @@ async def _execute_request(
         server_alive, client_alive = _liveness_from_status(status, terminal.run_id)
         if _mode_starts_client(public_mode):
             try:
-                snapshot = await runtime.bridge_status_payload()
+                bridge_snapshot = await runtime.bridge_status_payload()
             except Exception:
                 # A snapshot we could not read is not a bridge that is not
                 # ready; it is no answer, and it says so.
-                snapshot = None
-            readiness = _project_launch_readiness(client_alive, snapshot)
+                bridge_snapshot = None
+            readiness = _project_launch_readiness(client_alive, bridge_snapshot)
         # Same projection as the readiness branch above: a call that started
         # a client and lost it failed, whatever the mode is called. The
         # literal set it replaces omitted client -- the one mode whose whole
@@ -2351,6 +2491,7 @@ async def _execute_request(
         # this function. preflight returns before this block; a stop does
         # reach it and starts no client, so it is never accused of one.
         if _mode_starts_client(public_mode) and client_alive is False:
+            client_exit = _client_exit_from_status(status, terminal.run_id)
             terminal = replace(
                 terminal,
                 ok=False,
@@ -2381,6 +2522,36 @@ async def _execute_request(
         floor_s=server_boot_floor_s,
         server_wait_s=server_wait_s,
     )
+    if (
+        terminal.ok
+        and not preflight
+        and terminal.run_id
+        and _mode_starts_client(public_mode)
+        and public_mode in {"server", "all"}
+        and client_alive is not False
+    ):
+        try:
+            second_status = await runtime.lifecycle_status()
+        except Exception:
+            second_status = None
+        _second_server, second_client = _liveness_from_status(
+            second_status, terminal.run_id
+        )
+        if type(second_client) is bool and second_client != client_alive:
+            client_alive = second_client
+            # Same already-read snapshot: no second bridge read (M19).
+            readiness = _project_launch_readiness(client_alive, bridge_snapshot)
+        if client_alive is False:
+            terminal = replace(
+                terminal,
+                ok=False,
+                error_code="client_dead_after_ack",
+                exit_code=1,
+            )
+            client_exit = _client_exit_from_status(
+                second_status, terminal.run_id
+            )
+            readiness = _project_launch_readiness(client_alive, bridge_snapshot)
     result = _compact_result(
         terminal=terminal,
         project=policy.mod,
@@ -2416,7 +2587,10 @@ async def _execute_request(
         storage_backup=storage_backup,
         storage_reset_notice=storage_reset_notice,
         server_boot=server_boot_report,
+        client_exit=client_exit,
     )
+    if public_mode == "stop":
+        result.pop("client_exit", None)
     if not terminal.ok and terminal.error_code == WORKER_INTERNAL_FAILURE:
         # 4fdf: the stage is known here, the exception class is not (see above).
         result["reason"] = WORKER_INTERNAL_FAILURE_REASON
@@ -3731,6 +3905,7 @@ def _direct_stop_envelope(
         artifacts_paths=[],
         phase="completed" if ok else "stopping",
     )
+    envelope.pop("client_exit", None)
     if ok:
         stop_method = result.get("stop_method")
         envelope["stop_method"] = (

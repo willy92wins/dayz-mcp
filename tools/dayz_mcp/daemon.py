@@ -743,6 +743,7 @@ def _activate_server_coordination(
             orphan_guard.open_process_anchor,
             orphan_guard.close_process_anchor,
         ),
+        anchor_exit=orphan_guard.read_process_exit,
         game_path=game_path if game_path is not None else _lifecycle_game_path(None),
         recovery_fault_arm=arm_lifecycle_recovery_fault,
         bindings=state,

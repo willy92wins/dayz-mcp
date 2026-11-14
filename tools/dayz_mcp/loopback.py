@@ -4740,6 +4740,34 @@ class ServerState:
                 f"{binding.creation_time_utc}"
             )
 
+    def process_polled(
+        self, run_id: str, pid: int, creation_time_utc: str
+    ) -> bool | None:
+        """Whether the bound process for this identity has polled, or None."""
+        if (
+            not isinstance(run_id, str)
+            or not run_id
+            or not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid <= 0
+        ):
+            return None
+        wanted = normalize_creation_time_utc(creation_time_utc)
+        if wanted is None:
+            return None
+        with self._lock:
+            for binding in self._bindings.values():
+                if _binding_run_id(binding) != run_id:
+                    continue
+                if getattr(binding, "pid", None) != pid:
+                    continue
+                if normalize_creation_time_utc(
+                    getattr(binding, "creation_time_utc", None)
+                ) != wanted:
+                    continue
+                return binding.last_poll_at is not None
+            return None
+
     def run_has_bound_binding(self, run_id: str) -> bool:
         """True iff a present binding for this run is BOUND. STARTING does not dispatch."""
 
@@ -7390,6 +7418,7 @@ class ServerState:
                     self._peer_last_class[peer] = bind_label
                     if bind_label == BINDING_BOUND:
                         accredited = True
+                        binding.last_poll_at = now
                         self._bound_last_poll_at[peer] = now
                         run_id = _binding_run_id(binding)
                         if self._poll_should_hold_commands(run_id):
