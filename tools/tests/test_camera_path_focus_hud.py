@@ -613,11 +613,12 @@ class _ClientBridge:
 
 _CAMERA_SET_METHODS = (
     "protected bool DispatchCameraSet(MCPCommand command, MCPResult result)",
+    "protected void ApplyCameraFocusDefaults(MCPArgs args)",
     "protected bool ProcessCameraSetJob(MCPJob job)",
     "protected string CameraReadError()",
 )
 _CAMERA_SET_SIBLINGS = (
-    "ValidateCameraArgs|IsValidCameraFocus|HasExclusiveJob|ApplyCameraSet|RestoreGameplay|"
+    "ValidateCameraArgs|IsValidCameraFocus|ApplyCameraFocusDefaults|HasExclusiveJob|ApplyCameraSet|RestoreGameplay|"
     "ResolveSettleSeconds|CameraReadError|ResolveLiveSeatedTransport|IsClientInGame|Log"
 )
 _BRIDGE_CONSTANT = re.compile(r"protected const (int|float) (CAMERA_\w+) = ([^;]+);")
@@ -649,8 +650,8 @@ def _new_job() -> SimpleNamespace:
 
 
 class _CameraSetBridge:
-    """DispatchCameraSet, ProcessCameraSetJob and CameraReadError translated;
-    what they call is a log.
+    """DispatchCameraSet, ApplyCameraFocusDefaults, ProcessCameraSetJob and
+    CameraReadError translated; what they call is a log.
 
     ApplyCameraSet stands for the whole apply (path stop, SuppressGameplay, the
     camera, SetFOV, OverrideDOF; ExecutedApplyTest runs the real one) and logs
