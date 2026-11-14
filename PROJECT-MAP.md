@@ -36,7 +36,7 @@ Detener la lectura inicial en `LIVE-STATE:END`; buscar después solo las seccion
 No fijar números de línea, límites de lectura ni tamaños: el bloque cambia en cada cierre.
 El histórico separado, si existe, está en `HANDOFF-ARCHIVE.md`.
 
-## Enforce scripts (27 files, 840 KB)
+## Enforce scripts (28 files, 857 KB)
 
 Rutas relativas a la fuente del mod: `addon`.
 Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (incluidos junctions).
@@ -55,6 +55,7 @@ Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (inclui
 - `scripts/4_World/MCP_PlayerCare.c` - 15 KB
 - `scripts/4_World/MCP_PlayerMove.c` - 34 KB
 - `scripts/4_World/MCP_PlayerTrace.c` - 17 KB
+- `scripts/4_World/MCP_PlayerTriggers.c` - 6 KB
 - `scripts/4_World/MCP_Weapon.c` - 37 KB
 
 **5_Mission/**
@@ -63,13 +64,13 @@ Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (inclui
 - `scripts/5_Mission/MCP_BotControl.c` - 10 KB
 - `scripts/5_Mission/MCP_CameraPath.c` - 11 KB
 - `scripts/5_Mission/MCP_SurvivorDrive.c` - 8 KB
-- `scripts/5_Mission/MCPBridge.c` - 234 KB
+- `scripts/5_Mission/MCPBridge.c` - 236 KB
 - `scripts/5_Mission/MCPCallbacks.c` - 2 KB
 - `scripts/5_Mission/MCPChatLog.c` - 12 KB
 - `scripts/5_Mission/MCPClientBridge.c` - 252 KB
 - `scripts/5_Mission/MCPDialogController.c` - 17 KB
 - `scripts/5_Mission/MCPJobRunner.c` - 3 KB
-- `scripts/5_Mission/MCPMessages.c` - 49 KB
+- `scripts/5_Mission/MCPMessages.c` - 50 KB
 - `scripts/5_Mission/MCPVehicleEject.c` - 12 KB
 - `scripts/5_Mission/MissionGameplay.c` - 2 KB
 - `scripts/5_Mission/MissionServer.c` - 3 KB
