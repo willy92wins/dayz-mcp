@@ -339,7 +339,7 @@ class PollLongPollTest(unittest.TestCase):
             start = _brace_body(source, "protected void StartPoll()")
             literal = 'request = request + "&wait_ms=800";'
             self.assertEqual(start.count(literal), 1, name)
-            self.assertLess(start.index('"&caps="'), start.index(literal), name)
+            self.assertLess(start.index('"&cm="'), start.index(literal), name)
             self.assertLess(start.index(literal), start.index(get_line), name)
             self.assertIn('m_PeerInstance != ""', start)
             self.assertIn("&inst=", start)

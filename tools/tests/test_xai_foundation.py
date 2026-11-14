@@ -1485,7 +1485,7 @@ class ExpansionBaseHooksTest(unittest.TestCase):
         poll_params = method_body(source, "protected string ExtensionPollParams()")
         self.assertIn('return "";', poll_params)
         caps = method_body(source, "protected string ServerCapabilities()")
-        self.assertIn("return SERVER_CAPABILITIES;", caps)
+        self.assertIn("return SERVER_CAPABILITIES_MASK;", caps)
         self.assertNotIn("ai_group", _base_commands())
         start_poll = method_body(source, "protected void StartPoll()")
         self.assertIn("ServerCapabilities()", start_poll)
