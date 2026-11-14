@@ -164,6 +164,10 @@ class OrphanGuardExit508aTest(unittest.TestCase):
 
         return FakeK32()
 
+    @unittest.skipUnless(
+        sys.platform == "win32",
+        "Windows only: orphan_guard has ctypes=None and no wintypes off Windows",
+    )
     def test_read_process_exit_variants(self) -> None:
         with patch.object(orphan_guard, "_IS_WINDOWS", True), patch.object(
             orphan_guard, "_k32", self._fake(wait=0x102)
@@ -285,6 +289,42 @@ class LifecycleDiagnosis508aTest(unittest.TestCase):
             self.assertEqual(
                 later["exit_diagnosis"]["classification"], "spontaneous"  # type: ignore[index]
             )
+        finally:
+            life.close()
+
+    def test_retained_row_evicted_before_publication_is_omitted(self) -> None:
+        life, run, client = _dead_life(
+            anchor_exit=lambda _t: {"exit_code": 7, "exit_time_utc": EXITED}
+        )
+        try:
+            life.lifecycle._parent_anchors[(RUN_ID, client.pid, CREATED)] = object()
+            life.lifecycle._observation_now = lambda: "2026-07-15T00:00:10.000Z"  # type: ignore[method-assign]
+            entry = life.lifecycle._begin_client_action(
+                RUN_ID, client, "wm_close", "close_run"
+            )
+            life.lifecycle._end_client_action(RUN_ID, client, entry, "posted")
+            diag = life.diagnostics(run)[0]["exit_diagnosis"]
+            self.assertEqual(diag["classification"], "mcp_ordered")  # type: ignore[index]
+            key = life.lifecycle._client_action_key(RUN_ID, client)
+            run.processes = []
+            run.state = "EXITED"
+            life.store.replace(run)
+            original = life.lifecycle._retained_client_observations
+
+            def evicting(*args: object, **kwargs: object):
+                rows = original(*args, **kwargs)  # type: ignore[arg-type]
+                with life.lifecycle._client_observation_lock:
+                    life.lifecycle._client_role_observations.pop(key, None)
+                    life.lifecycle._client_actions.pop(key, None)
+                return rows
+
+            life.lifecycle._retained_client_observations = evicting  # type: ignore[method-assign]
+            rows = life.diagnostics(run)
+            self.assertFalse(any(row.get("pid") == client.pid for row in rows))
+            self.assertFalse(
+                any(row.get("state") == "not_started" for row in rows)
+            )
+            self.assertEqual(rows, [])
         finally:
             life.close()
 
@@ -646,6 +686,7 @@ class LifecycleDiagnosis508aTest(unittest.TestCase):
                 "mcp_ordered",
             )
             run.processes = []
+            run.state = "EXITED"
             life.store.replace(run)
             for index in range(64):
                 rec = _record(
@@ -672,6 +713,7 @@ class LifecycleDiagnosis508aTest(unittest.TestCase):
             life.lifecycle._client_launch_output_dirs[key] = "some-folder"
             life.lifecycle._client_exit_deferrals[key] = 2
             run.processes = []
+            run.state = "EXITED"
             life.store.replace(run)
             generation = life.lifecycle._current_generation()
             for index in range(40):

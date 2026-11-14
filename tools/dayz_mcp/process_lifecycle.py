@@ -3365,10 +3365,12 @@ class ProcessLifecycle:
         self,
         key: tuple[str, str, int, str],
         fallback: dict[str, object],
-    ) -> dict[str, object]:
+    ) -> dict[str, object] | None:
         with self._client_observation_lock:
             stored = self._client_role_observations.get(key)
-            row = dict(stored) if isinstance(stored, dict) else dict(fallback)
+            if not isinstance(stored, dict):
+                return None
+            row = dict(stored)
             if isinstance(row.get("exit_evidence"), dict):
                 row["exit_evidence"] = dict(row["exit_evidence"])  # type: ignore[arg-type]
             actions = [
@@ -3383,7 +3385,9 @@ class ProcessLifecycle:
         row["exit_diagnosis"] = _derive_exit_diagnosis(internal, actions)
         return row
 
-    def _observe_client_record(self, run: RunRecord, record: ProcessRecord) -> dict[str, object]:
+    def _observe_client_record(
+        self, run: RunRecord, record: ProcessRecord
+    ) -> dict[str, object] | None:
         """Identity-aware liveness of one registered client. Never terminates."""
 
         generation = self._current_generation()
@@ -3498,16 +3502,22 @@ class ProcessLifecycle:
         generation = self._current_generation()
         current: list[dict[str, object]] = []
         current_keys: set[tuple[str, str, int, str]] = set()
+        has_client_record = any(
+            record.role == "client" for record in run.processes
+        )
         for record in run.processes:
             if record.role != "client":
                 continue
             current_keys.add(
                 (generation, run.run_id, record.pid, record.creation_time_utc)
             )
-            current.append(self._observe_client_record(run, record))
+            observed = self._observe_client_record(run, record)
+            if observed is not None:
+                current.append(observed)
         retained = self._retained_client_observations(
             generation, run.run_id, current_keys
         )
+        had_retained = bool(retained)
         finalized: list[dict[str, object]] = []
         for row in retained:
             pid = row.get("pid")
@@ -3525,14 +3535,17 @@ class ProcessLifecycle:
                     )
                 except Exception:
                     pass
-                row = self._published_client_row(key, row)
+                published = self._published_client_row(key, row)
+                if published is None:
+                    continue
+                row = published
                 row["current"] = False
             else:
                 row.pop("exit_evidence", None)
                 row["exit_diagnosis"] = None
             finalized.append(row)
         retained = finalized
-        if not current and not retained:
+        if not has_client_record and not had_retained:
             return [
                 {
                     "role": "client",
