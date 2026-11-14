@@ -428,6 +428,61 @@ class DecoderTest(unittest.TestCase):
                 self.assertEqual(parse_capability_mask(peer, raw), (names, "ok"))
                 self.assertEqual(encode_capability_mask(peer, names), raw)
 
+    def _assert_client_appended_bit_vectors(self) -> None:
+        # Independent of CLIENT_EPOCH1 (46 names, indices 0..45): bits 46
+        # and 47 are the post-epoch1 appends. 1 << 46 == 0x400000000000 and
+        # 1 << 47 == 0x800000000000, so each raw below sets exactly one bit.
+        self.assertEqual(
+            parse_capability_mask("client", "1.400000000000"),
+            (("ui_menu_set",), "ok"),
+        )
+        self.assertEqual(
+            parse_capability_mask("client", "1.800000000000"),
+            (("ui_map_set",), "ok"),
+        )
+        self.assertEqual(
+            encode_capability_mask("client", ("ui_menu_set",)),
+            "1.400000000000",
+        )
+        self.assertEqual(
+            encode_capability_mask("client", ("ui_map_set",)),
+            "1.800000000000",
+        )
+
+    def test_client_bits_46_and_47_known_answers(self) -> None:
+        self._assert_client_appended_bit_vectors()
+
+    def test_swapping_client_bits_46_and_47_breaks_known_answers(self) -> None:
+        original = CAPABILITY_MASK_TABLES["client"][1]
+        self.assertEqual(original[46:48], ("ui_menu_set", "ui_map_set"))
+        swapped = original[:46] + (original[47], original[46]) + original[48:]
+        CAPABILITY_MASK_TABLES["client"][1] = swapped
+        try:
+            with self.assertRaises(AssertionError):
+                self._assert_client_appended_bit_vectors()
+            # The permuted table decodes each raw to the other verb: the
+            # failure above is the swap, not a broken decoder.
+            self.assertEqual(
+                parse_capability_mask("client", "1.400000000000"),
+                (("ui_map_set",), "ok"),
+            )
+            self.assertEqual(
+                parse_capability_mask("client", "1.800000000000"),
+                (("ui_menu_set",), "ok"),
+            )
+            self.assertEqual(
+                encode_capability_mask("client", ("ui_menu_set",)),
+                "1.800000000000",
+            )
+            self.assertEqual(
+                encode_capability_mask("client", ("ui_map_set",)),
+                "1.400000000000",
+            )
+        finally:
+            CAPABILITY_MASK_TABLES["client"][1] = original
+        self.assertEqual(CAPABILITY_MASK_TABLES["client"][1], CLIENT_CAPABILITY_BITS)
+        self._assert_client_appended_bit_vectors()
+
     def test_every_epoch1_position(self) -> None:
         for peer, frozen in (("server", SERVER_EPOCH1), ("client", CLIENT_EPOCH1)):
             for index, name in enumerate(frozen):
