@@ -36,9 +36,9 @@ MCP usable por modelos locales gratis (Flash-Next / ~8B) para que el producto pu
 meta+session+pipeline+knowledge (+ dayz_test_* cuando haga falta caja). World/vehicle/ui en pack 2 tras lease.
 
 ## Artefactos
-- `C:\Users\guill\AppData\Local\Temp\fn-mcp-box-full-20260917\` (FN_PILOT_SUMMARY, RECAP-FN-PILOT, transcripts)
-- `C:\Users\guill\AppData\Local\Temp\fn-mcp-local8b-20260917\RECAP.md`
-- `C:\Users\guill\AppData\Local\Temp\fn-mcp-gauntlet-20260917\TOOLS-CATALOG.md`
+- `%USERPROFILE%\AppData\Local\Temp\fn-mcp-box-full-20260917\` (FN_PILOT_SUMMARY, RECAP-FN-PILOT, transcripts)
+- `%USERPROFILE%\AppData\Local\Temp\fn-mcp-local8b-20260917\RECAP.md`
+- `%USERPROFILE%\AppData\Local\Temp\fn-mcp-gauntlet-20260917\TOOLS-CATALOG.md`
 - Repo vivo: `P:\DayZ_MCP_dev` / OneDrive DayZ Projects\DayZ_MCP_dev
 
 ## Pedido a Cursor MCP

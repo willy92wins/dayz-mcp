@@ -1055,6 +1055,17 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         )
         vpp_patcher.start()
         self.addCleanup(vpp_patcher.stop)
+        boot_clock = _FakeBootClock()
+        clock_patcher = patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=boot_clock.now
+        )
+        clock_patcher.start()
+        self.addCleanup(clock_patcher.stop)
+        sleep_patcher = patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=boot_clock.sleep
+        )
+        sleep_patcher.start()
+        self.addCleanup(sleep_patcher.stop)
 
     async def _launch_and_capture(self, **kwargs: object):
         policy = kwargs.pop("policy", _policy())
@@ -1258,6 +1269,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "storage_recovery_reason",
                 "session_idle_s",
                 "display_timeout_s",
+                "server_boot",
             },
         )
         self.assertIsNone(result["storage_recovery_reason"])
@@ -1415,6 +1427,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "storage_recovery_reason",
                 "session_idle_s",
                 "display_timeout_s",
+                "server_boot",
             },
         )
         self.assertIsNone(result["storage_recovery_reason"])
@@ -1503,6 +1516,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "storage_recovery_reason",
                 "session_idle_s",
                 "display_timeout_s",
+                "server_boot",
             },
         )
 
@@ -1584,6 +1598,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "storage_recovery_reason",
                 "session_idle_s",
                 "display_timeout_s",
+                "server_boot",
             },
         )
 
@@ -2657,6 +2672,17 @@ class SteamAutoRemediationTest(unittest.IsolatedAsyncioTestCase):
         )
         vpp_patcher.start()
         self.addCleanup(vpp_patcher.stop)
+        boot_clock = _FakeBootClock()
+        clock_patcher = patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=boot_clock.now
+        )
+        clock_patcher.start()
+        self.addCleanup(clock_patcher.stop)
+        sleep_patcher = patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=boot_clock.sleep
+        )
+        sleep_patcher.start()
+        self.addCleanup(sleep_patcher.stop)
         desktop_patcher = patch.object(
             dayz_test_tool,
             "evaluate_prerun_desktop",
@@ -2840,6 +2866,1410 @@ class SteamAutoRemediationTest(unittest.IsolatedAsyncioTestCase):
             .parameters["auto_remediate_steam"]
             .default,
             False,
+        )
+
+
+def _boot_pbo_bytes(entries: list[str]) -> bytes:
+    import struct
+
+    buf = bytearray(b"\x00" + struct.pack("<5I", 0x56657273, 0, 0, 0, 0))
+    buf.extend(b"prefix\x00scripts\x00\x00")
+    for item in entries:
+        buf.extend(item.encode("utf-8") + b"\x00" + struct.pack("<5I", 0, 16, 0, 0, 16))
+    buf.extend(b"\x00" + struct.pack("<5I", 0, 0, 0, 0, 0))
+    return bytes(buf)
+
+
+def _backdate_file_times(path: str, unix_ts: float) -> None:
+    os.utime(path, (unix_ts, unix_ts))
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        set_file_time = kernel32.SetFileTime
+        set_file_time.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(ctypes.c_uint64),
+        ]
+        set_file_time.restype = ctypes.c_int
+        ticks = int(unix_ts * 10_000_000) + 116_444_736_000_000_000
+        stamp = ctypes.c_uint64(ticks)
+        with open(path, "r+b") as handle:
+            osf = msvcrt.get_osfhandle(handle.fileno())
+            if not set_file_time(
+                ctypes.c_void_p(osf),
+                ctypes.byref(stamp),
+                ctypes.byref(stamp),
+                ctypes.byref(stamp),
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+
+
+class _FakeBootClock:
+    def __init__(self) -> None:
+        self.elapsed = 0.0
+        self.sleeps: list[float] = []
+        self.on_sleep = None
+
+    def now(self) -> float:
+        return self.elapsed
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.elapsed += seconds
+        if self.on_sleep is not None:
+            self.on_sleep(len(self.sleeps))
+
+
+class _TempRuntimeBundle(_Bundle):
+    def __init__(
+        self,
+        sealed_policies: tuple[object, ...],
+        *,
+        game_directory: str,
+    ) -> None:
+        super().__init__(sealed_policies)
+        self._game_directory = game_directory
+
+    def validated_worker_runtime(self, mod: str, dev_root: str):
+        policy = self.sealed_policies[0].policy
+        if policy.mod != mod or policy.dev_root != dev_root:
+            raise ValueError("runtime_policy_invalid")
+        from dayz_mcp.dayz_test_worker import (
+            WorkerRuntimePolicy,
+            runtime_policy_acceptable,
+        )
+
+        built = WorkerRuntimePolicy(
+            dev_root=dev_root,
+            mod=mod,
+            diag_executable=self._game_directory + r"\DayZDiag_x64.exe",
+            game_directory=self._game_directory,
+            mission_aliases=(
+                ("chernarus", dev_root + r"\_server\mpmissions\dayzOffline.chernarusplus"),
+                ("livonia", dev_root + r"\_server\mpmissions\dayzOffline.enoch"),
+                ("sakhal", dev_root + r"\_server\mpmissions\dayzOffline.sakhal"),
+                ("lfheli", dev_root + r"\_server\mpmissions\lfheli"),
+            ),
+            mods_root=policy.mod_roots[0],
+            build_temp_root=dev_root + r"\_build",
+            build_source_basename=None,
+        )
+        if not runtime_policy_acceptable(built):
+            raise ValueError("runtime_policy_invalid")
+        return built
+
+
+class DayzTestServerBootTest(unittest.IsolatedAsyncioTestCase):
+    _INCOMPLETE_SCRIPT_LOG = (
+        '04:36:51.817 SCRIPT       : Module: GameLib; loaded 1x files; 2x classes; defines: "…"\n'
+        '04:36:52.464 SCRIPT       : Module: Game; loaded 2x files; 4x classes; defines: "…"\n'
+        '04:36:54.618 SCRIPT       : Module: World; loaded 4x files; 8x classes; defines: "…"\n'
+    )
+    _MISSION_LINE = (
+        '04:37:09.995  SCRIPT       : Module: Mission; loaded 3x files; 6x classes; defines: "…"\n'
+    )
+    _NORMAL_RPT = (
+        "=====================================================================\n"
+        "Version 1.30.164289.70\n"
+        "=====================================================================\n"
+    )
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.dev_root = root / "Suite"
+        self.game_dir = root / "DayZ"
+        self.mods_dir = root / "Mods"
+        (self.game_dir / "dta").mkdir(parents=True, exist_ok=True)
+        (self.game_dir / "DayZDiag_x64.exe").write_bytes(b"MZ")
+        mission_dir = self.dev_root / "_server" / "mpmissions" / "dayzOffline.chernarusplus"
+        mission_dir.mkdir(parents=True, exist_ok=True)
+        (mission_dir / "init.c").write_text("// init\n", encoding="utf-8")
+        (self.game_dir / "dta" / "scripts.pbo").write_bytes(
+            _boot_pbo_bytes(
+                [
+                    r"2_GameLib\g.c",
+                    r"3_Game\a.c",
+                    r"3_Game\b.c",
+                    r"4_World\w1.c",
+                    r"4_World\w2.c",
+                    r"4_World\w3.c",
+                    r"5_Mission\m1.c",
+                ]
+            )
+        )
+        (self.mods_dir / "@DayZ_MCP" / "addons").mkdir(parents=True, exist_ok=True)
+        (self.mods_dir / "@DayZ_MCP" / "addons" / "dayz_mcp.pbo").write_bytes(
+            _boot_pbo_bytes(
+                [
+                    r"DayZ_MCP\scripts\4_World\mw.c",
+                    r"DayZ_MCP\scripts\5_Mission\mm1.c",
+                    r"DayZ_MCP\scripts\5_Mission\mm2.c",
+                ]
+            )
+        )
+        self.policy = dayz_test_request.RequestProjectPolicy(
+            mod="DayZ_MCP",
+            dev_root=str(self.dev_root),
+            default_source=str(root / "DayZ_MCP_src"),
+            default_base_mods=(),
+            mission_roots=(str(self.dev_root / "_server" / "mpmissions"),),
+            mod_roots=(str(self.mods_dir),),
+        )
+
+        steam_patcher = patch.object(
+            dayz_test_tool,
+            "evaluate_steam_session",
+            return_value=steam_preflight.SteamSessionResult(
+                error_code=None,
+                steam_registered_pid=1,
+                steam_live_pids=(1,),
+                remediation=steam_preflight.REMEDIATION,
+            ),
+        )
+        steam_patcher.start()
+        self.addCleanup(steam_patcher.stop)
+
+        desktop_patcher = patch.object(
+            dayz_test_tool,
+            "evaluate_prerun_desktop",
+            return_value=mcp_capture.PrerunDesktopResult(
+                error_code=None,
+                desktop="unlocked",
+                mean_brightness=80.0,
+                nonblack_ratio=0.9,
+                waited_s=0.01,
+                remediation="",
+            ),
+        )
+        desktop_patcher.start()
+        self.addCleanup(desktop_patcher.stop)
+
+        vpp_patcher = patch.object(
+            dayz_test_tool,
+            "preflight_vpp_request",
+            return_value=native_launcher_transaction.VppPreflightResult(
+                error_code=None,
+                missing=(),
+                warnings=(),
+                hint=native_launcher_transaction.VPP_PREFLIGHT_HINT,
+            ),
+        )
+        vpp_patcher.start()
+        self.addCleanup(vpp_patcher.stop)
+        boot_clock = _FakeBootClock()
+        clock_patcher = patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=boot_clock.now
+        )
+        clock_patcher.start()
+        self.addCleanup(clock_patcher.stop)
+        sleep_patcher = patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=boot_clock.sleep
+        )
+        sleep_patcher.start()
+        self.addCleanup(sleep_patcher.stop)
+
+    @property
+    def server_profiles(self):
+        from pathlib import Path
+
+        return Path(self.dev_root) / "_server" / "profiles"
+
+    def _bundle(self) -> _TempRuntimeBundle:
+        return _TempRuntimeBundle(
+            _sealed(self.policy), game_directory=str(self.game_dir)
+        )
+
+    async def _run_tool(
+        self,
+        *,
+        mode: str = "server",
+        terminal_payload: dict[str, object] | None = None,
+        on_executing=None,
+        runtime: _Runtime | None = None,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        term = terminal_payload or {
+            "cleanup_degraded": False,
+            "error_code": None,
+            "exit_code": 0,
+            "ok": True,
+            "run_id": RUN_ID,
+        }
+        exit_code = int(term["exit_code"])
+
+        async def launch(_raw_request: bytes, **launch_kwargs: object) -> int:
+            await launch_kwargs["execution_started_cb"]()
+            if on_executing is not None:
+                on_executing()
+            launch_kwargs["output_sink"]("stdout", _terminal(term))
+            return exit_code
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=self._bundle(),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch,
+        ):
+            return await dayz_test_tool.execute_dayz_test_run(
+                runtime or _Runtime(),
+                project=self.policy.mod,
+                mode=mode,
+                **kwargs,
+            )
+
+    async def test_server_boot_is_null_in_client_offline_preflight_and_kill(
+        self,
+    ) -> None:
+        self.server_profiles.mkdir(parents=True, exist_ok=True)
+        (self.server_profiles / "DayZDiag_x64_2026-11-11_04-36-48.RPT").write_text(
+            self._NORMAL_RPT, encoding="utf-8"
+        )
+        (self.server_profiles / "script_2026-11-11_04-36-48.log").write_text(
+            self._INCOMPLETE_SCRIPT_LOG + self._MISSION_LINE, encoding="utf-8"
+        )
+
+        client_res = await self._run_tool(
+            mode="client", connect_host="203.0.113.10"
+        )
+        self.assertIn("server_boot", client_res)
+        self.assertIsNone(client_res["server_boot"])
+
+        preflight_res = await self._run_tool(mode="server", preflight=True)
+        self.assertIn("server_boot", preflight_res)
+        self.assertIsNone(preflight_res["server_boot"])
+
+        raw_offline, selected = dayz_test_tool.build_run_request(
+            _sealed(self.policy), project=self.policy.mod, mode="offline"
+        )
+
+        async def launch_ok(_raw: bytes, **launch_kwargs: object) -> int:
+            await launch_kwargs["execution_started_cb"]()
+            launch_kwargs["output_sink"](
+                "stdout",
+                _terminal(
+                    {
+                        "cleanup_degraded": False,
+                        "error_code": None,
+                        "exit_code": 0,
+                        "ok": True,
+                        "run_id": RUN_ID,
+                    }
+                ),
+            )
+            return 0
+
+        with patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch_ok,
+        ):
+            offline_res = await dayz_test_tool._execute_request(
+                _Runtime(),
+                opened_launcher=_Opened(),
+                verified_bundle=self._bundle(),
+                raw_request=raw_offline,
+                policy=selected,
+                public_mode="offline",
+                artifacts_paths=[],
+                started_at=0.0,
+                preflight=False,
+                expected_run_id=None,
+                progress_cb=None,
+            )
+        self.assertIn("server_boot", offline_res)
+        self.assertIsNone(offline_res["server_boot"])
+
+        stop_runtime = _Runtime(
+            {
+                "runs": [
+                    {
+                        "run_id": RUN_ID,
+                        "state": "RUNNING_IDLE",
+                        "mod": "@" + self.policy.mod,
+                        "profiles": str(self.server_profiles),
+                        "processes": [],
+                    }
+                ]
+            }
+        )
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=self._bundle(),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch_ok,
+        ):
+            kill_res = await dayz_test_tool.execute_dayz_test_stop(
+                stop_runtime, RUN_ID
+            )
+        assert kill_res is not None
+        self.assertIn("server_boot", kill_res)
+        self.assertIsNone(kill_res["server_boot"])
+
+    async def test_server_mode_reads_only_new_logs_and_returns_null_when_only_old(
+        self,
+    ) -> None:
+        from pathlib import Path
+        import time
+
+        self.server_profiles.mkdir(parents=True, exist_ok=True)
+        old_rpt = self.server_profiles / "DayZDiag_x64_2026-11-11_03-00-00.RPT"
+        old_script = self.server_profiles / "script_2026-11-11_03-00-00.log"
+        old_rpt.write_text(
+            " 3:00:10.000 [Server] :: termination in: 10\n", encoding="utf-8"
+        )
+        old_script.write_text(
+            "03:00:01.000 SCRIPT    (E): old error\n"
+            '03:00:02.000 SCRIPT       : Module: GameLib; loaded 99x files; 1x classes; defines: "…"\n'
+            '03:00:09.000  SCRIPT       : Module: Mission; loaded 999x files; 1x classes; defines: "…"\n',
+            encoding="utf-8",
+        )
+        stale_epoch = time.time() - 120.0
+        _backdate_file_times(str(old_rpt), stale_epoch)
+        _backdate_file_times(str(old_script), stale_epoch)
+        self.assertLess(old_rpt.stat().st_ctime, time.time() - 30.0)
+
+        real_read = dayz_test_tool.server_boot.read_log_text
+        only_old_reads: list[str] = []
+
+        def spy_only_old_read(path, **kwargs):
+            only_old_reads.append(str(Path(path)))
+            return real_read(path, **kwargs)
+
+        only_old_clock = _FakeBootClock()
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=only_old_clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=only_old_clock.sleep
+        ), patch.object(
+            dayz_test_tool.server_boot, "read_log_text", side_effect=spy_only_old_read
+        ):
+            only_old = await self._run_tool(mode="server")
+        self.assertEqual(only_old["status"], "succeeded")
+        self.assertIsNone(only_old["server_boot"])
+        self.assertEqual(only_old_clock.now(), 60.0)
+        self.assertNotIn(str(old_rpt), only_old_reads)
+        self.assertNotIn(str(old_script), only_old_reads)
+        self.assertEqual(only_old_reads, [])
+
+        new_rpt = self.server_profiles / "DayZDiag_x64_2026-11-11_04-36-48.RPT"
+        new_script = self.server_profiles / "script_2026-11-11_04-36-48.log"
+
+        def write_current_logs() -> None:
+            new_rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+            new_script.write_text(
+                self._INCOMPLETE_SCRIPT_LOG + self._MISSION_LINE,
+                encoding="utf-8",
+            )
+
+        with_new_reads: list[str] = []
+
+        def spy_with_new_read(path, **kwargs):
+            with_new_reads.append(str(Path(path)))
+            return real_read(path, **kwargs)
+
+        with patch.object(
+            dayz_test_tool.server_boot, "read_log_text", side_effect=spy_with_new_read
+        ):
+            with_new = await self._run_tool(
+                mode="server", on_executing=write_current_logs
+            )
+        self.assertEqual(with_new["status"], "succeeded")
+        self.assertNotIn(str(old_rpt), with_new_reads)
+        self.assertNotIn(str(old_script), with_new_reads)
+        self.assertEqual(with_new_reads, [str(new_rpt), str(new_script)])
+        self.assertEqual(
+            with_new["server_boot"],
+            {
+                "modules": {"GameLib": 1, "Game": 2, "World": 4, "Mission": 3},
+                "complete": True,
+                "script_errors": 0,
+                "termination_countdown": False,
+                "vanilla_files": {"GameLib": 1, "Game": 2, "World": 3, "Mission": 1},
+                "mod_files": {"GameLib": 0, "Game": 0, "World": 1, "Mission": 2},
+                "missing_files": {"GameLib": 0, "Game": 0, "World": 0, "Mission": 0},
+            },
+        )
+
+    async def test_server_mode_waits_two_sleeps_for_mission_line_at_one_second(
+        self,
+    ) -> None:
+        self.server_profiles.mkdir(parents=True, exist_ok=True)
+        rpt = self.server_profiles / "DayZDiag_x64_2026-11-11_04-36-48.RPT"
+        script = self.server_profiles / "script_2026-11-11_04-36-48.log"
+
+        def write_initial() -> None:
+            rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+            script.write_text(self._INCOMPLETE_SCRIPT_LOG, encoding="utf-8")
+
+        clock = _FakeBootClock()
+
+        def after_sleep(step: int) -> None:
+            if step == 2:
+                script.write_text(
+                    self._INCOMPLETE_SCRIPT_LOG + self._MISSION_LINE,
+                    encoding="utf-8",
+                )
+
+        clock.on_sleep = after_sleep
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=clock.sleep
+        ):
+            result = await self._run_tool(mode="server", on_executing=write_initial)
+
+        self.assertEqual(clock.sleeps, [0.5, 0.5])
+        self.assertEqual(clock.now(), 1.0)
+        self.assertIs(result["server_boot"]["complete"], True)
+        self.assertEqual(
+            result["server_boot"]["modules"],
+            {"GameLib": 1, "Game": 2, "World": 4, "Mission": 3},
+        )
+
+    async def test_server_mode_without_mission_honors_server_wait_s_and_caps_at_sixty(
+        self,
+    ) -> None:
+        self.server_profiles.mkdir(parents=True, exist_ok=True)
+        rpt = self.server_profiles / "DayZDiag_x64_2026-11-11_04-36-48.RPT"
+        script = self.server_profiles / "script_2026-11-11_04-36-48.log"
+
+        def write_incomplete() -> None:
+            rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+            script.write_text(self._INCOMPLETE_SCRIPT_LOG, encoding="utf-8")
+
+        short_clock = _FakeBootClock()
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=short_clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=short_clock.sleep
+        ):
+            short_res = await self._run_tool(
+                mode="server", server_wait_s=3, on_executing=write_incomplete
+            )
+        self.assertIs(short_res["server_boot"]["complete"], False)
+        self.assertEqual(short_clock.now(), 3.0)
+
+        capped_clock = _FakeBootClock()
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=capped_clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=capped_clock.sleep
+        ):
+            capped_res = await self._run_tool(
+                mode="server", server_wait_s=600, on_executing=write_incomplete
+            )
+        self.assertIs(capped_res["server_boot"]["complete"], False)
+        self.assertEqual(capped_clock.now(), 60.0)
+
+    async def test_server_mode_stops_waiting_when_rpt_has_termination_countdown(
+        self,
+    ) -> None:
+        self.server_profiles.mkdir(parents=True, exist_ok=True)
+        rpt = self.server_profiles / "DayZDiag_x64_2026-11-11_04-36-48.RPT"
+        script = self.server_profiles / "script_2026-11-11_04-36-48.log"
+
+        def write_initial() -> None:
+            rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+            script.write_text(self._INCOMPLETE_SCRIPT_LOG, encoding="utf-8")
+
+        clock = _FakeBootClock()
+
+        def add_countdown_on_first_sleep(step: int) -> None:
+            if step == 1:
+                rpt.write_text(
+                    self._NORMAL_RPT + " 5:55:22.583 [Server] :: termination in: 10\n",
+                    encoding="utf-8",
+                )
+
+        clock.on_sleep = add_countdown_on_first_sleep
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=clock.sleep
+        ):
+            result = await self._run_tool(mode="server", on_executing=write_initial)
+
+        self.assertEqual(clock.now(), 0.5)
+        self.assertIs(result["server_boot"]["termination_countdown"], True)
+        self.assertIs(result["server_boot"]["complete"], False)
+
+    async def test_failed_terminal_readiness_timeout_reads_once_without_sleeping(
+        self,
+    ) -> None:
+        self.server_profiles.mkdir(parents=True, exist_ok=True)
+        rpt = self.server_profiles / "DayZDiag_x64_2026-11-11_04-36-48.RPT"
+        script = self.server_profiles / "script_2026-11-11_04-36-48.log"
+
+        def write_incomplete() -> None:
+            rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+            script.write_text(self._INCOMPLETE_SCRIPT_LOG, encoding="utf-8")
+
+        clock = _FakeBootClock()
+        reads: list[str] = []
+        real_read = dayz_test_tool.server_boot.read_log_text
+
+        def counting_read(path, **kwargs):
+            reads.append(str(path))
+            return real_read(path, **kwargs)
+
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=clock.sleep
+        ), patch.object(
+            dayz_test_tool.server_boot, "read_log_text", side_effect=counting_read
+        ):
+            result = await self._run_tool(
+                mode="server",
+                terminal_payload={
+                    "cleanup_degraded": False,
+                    "error_code": "readiness_timeout",
+                    "exit_code": 1,
+                    "ok": False,
+                    "run_id": None,
+                },
+                on_executing=write_incomplete,
+            )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "readiness_timeout")
+        self.assertEqual(clock.sleeps, [])
+        self.assertEqual(reads, [str(rpt), str(script)])
+        self.assertIs(result["server_boot"]["complete"], False)
+
+    async def test_unreadable_profile_folder_returns_null_and_preserves_response(
+        self,
+    ) -> None:
+        baseline = await self._run_tool(mode="server")
+        self.assertIsNone(baseline["server_boot"])
+
+        self.server_profiles.parent.mkdir(parents=True, exist_ok=True)
+        self.server_profiles.write_bytes(b"not-a-directory")
+        not_a_dir = await self._run_tool(mode="server")
+        self.assertIsNone(not_a_dir["server_boot"])
+        self.assertEqual(
+            dict(not_a_dir, elapsed_s=0.0),
+            dict(baseline, elapsed_s=0.0),
+        )
+
+        with patch.object(
+            dayz_test_tool,
+            "_list_rpt_files",
+            side_effect=PermissionError("access denied"),
+        ):
+            denied = await self._run_tool(mode="server")
+
+        self.assertIsNone(denied["server_boot"])
+        baseline_copy = dict(baseline, elapsed_s=0.0)
+        denied_copy = dict(denied, elapsed_s=0.0)
+        self.assertEqual(denied_copy, baseline_copy)
+
+    async def test_rpt_without_script_log_or_with_non_script_log_is_null_while_empty_script_reports(
+        self,
+    ) -> None:
+        from pathlib import Path
+
+        self.server_profiles.mkdir(parents=True, exist_ok=True)
+        rpt = self.server_profiles / "DayZDiag_x64_2026-11-11_04-36-48.RPT"
+        failed_terminal = {
+            "cleanup_degraded": False,
+            "error_code": "readiness_timeout",
+            "exit_code": 1,
+            "ok": False,
+            "run_id": None,
+        }
+
+        def write_rpt_only() -> None:
+            rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+
+        fail_clock = _FakeBootClock()
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=fail_clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=fail_clock.sleep
+        ):
+            failed_no_script = await self._run_tool(
+                mode="server",
+                terminal_payload=failed_terminal,
+                on_executing=write_rpt_only,
+            )
+        self.assertEqual(failed_no_script["status"], "failed")
+        self.assertEqual(fail_clock.sleeps, [])
+        self.assertIsNone(failed_no_script["server_boot"])
+
+        wait_clock = _FakeBootClock()
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=wait_clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=wait_clock.sleep
+        ):
+            waited_no_script = await self._run_tool(
+                mode="server",
+                server_wait_s=2,
+                on_executing=write_rpt_only,
+            )
+        self.assertEqual(waited_no_script["status"], "succeeded")
+        self.assertEqual(wait_clock.now(), 2.0)
+        self.assertIsNone(waited_no_script["server_boot"])
+
+        other_log = self.server_profiles / "error_2026-11-11_04-36-48.log"
+
+        def write_rpt_and_other_log() -> None:
+            rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+            other_log.write_text(
+                "04:36:52.464 SCRIPT    (E): not a script log\n"
+                + self._INCOMPLETE_SCRIPT_LOG
+                + self._MISSION_LINE,
+                encoding="utf-8",
+            )
+
+        reads: list[str] = []
+        real_read = dayz_test_tool.server_boot.read_log_text
+
+        def spy_read(path, **kwargs):
+            reads.append(str(path))
+            return real_read(path, **kwargs)
+
+        other_fail_clock = _FakeBootClock()
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=other_fail_clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=other_fail_clock.sleep
+        ), patch.object(
+            dayz_test_tool.server_boot, "read_log_text", side_effect=spy_read
+        ):
+            other_failed = await self._run_tool(
+                mode="server",
+                terminal_payload=failed_terminal,
+                on_executing=write_rpt_and_other_log,
+            )
+        self.assertIsNone(other_failed["server_boot"])
+        self.assertNotIn(str(other_log), reads)
+
+        other_wait_clock = _FakeBootClock()
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=other_wait_clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=other_wait_clock.sleep
+        ), patch.object(
+            dayz_test_tool.server_boot, "read_log_text", side_effect=spy_read
+        ):
+            other_waited = await self._run_tool(
+                mode="server",
+                server_wait_s=2,
+                on_executing=write_rpt_and_other_log,
+            )
+        self.assertEqual(other_wait_clock.now(), 2.0)
+        self.assertIsNone(other_waited["server_boot"])
+        self.assertNotIn(str(other_log), reads)
+
+        script = self.server_profiles / "SCRIPT_2026-11-11_04-36-48.log"
+
+        def write_empty_script() -> None:
+            rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+            script.write_text("", encoding="utf-8")
+
+        empty_clock = _FakeBootClock()
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=empty_clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=empty_clock.sleep
+        ):
+            empty_res = await self._run_tool(
+                mode="server",
+                server_wait_s=1,
+                on_executing=write_empty_script,
+            )
+        self.assertEqual(empty_clock.now(), 1.0)
+        self.assertIsNotNone(empty_res["server_boot"])
+        self.assertEqual(empty_res["server_boot"]["modules"], {})
+        self.assertIs(empty_res["server_boot"]["complete"], False)
+        self.assertEqual(empty_res["server_boot"]["missing_files"], {})
+
+        def fail_on_script(path, **kwargs):
+            if Path(path) == script:
+                raise PermissionError("script log locked")
+            return real_read(path, **kwargs)
+
+        with patch.object(
+            dayz_test_tool.server_boot, "read_log_text", side_effect=fail_on_script
+        ):
+            unreadable_script = await self._run_tool(
+                mode="server",
+                terminal_payload=failed_terminal,
+                on_executing=write_empty_script,
+            )
+        self.assertIsNone(unreadable_script["server_boot"])
+
+    async def test_newer_rpt_pair_appearing_during_wait_is_ignored(self) -> None:
+        import time
+
+        self.server_profiles.mkdir(parents=True, exist_ok=True)
+        rpt_a = self.server_profiles / "DayZDiag_x64_2026-11-11_04-36-48.RPT"
+        script_a = self.server_profiles / "script_2026-11-11_04-36-48.log"
+        rpt_b = self.server_profiles / "DayZDiag_x64_2026-11-11_04-36-55.RPT"
+        script_b = self.server_profiles / "script_2026-11-11_04-36-55.log"
+
+        def write_launch_a() -> None:
+            rpt_a.write_text(self._NORMAL_RPT, encoding="utf-8")
+            script_a.write_text(
+                '04:36:51.817 SCRIPT       : Module: GameLib; loaded 1x files; 2x classes; defines: "…"\n',
+                encoding="utf-8",
+            )
+
+        clock = _FakeBootClock()
+
+        def spawn_launch_b_on_sleep(step: int) -> None:
+            if step == 1:
+                rpt_b.write_text(
+                    self._NORMAL_RPT + " 5:55:22.583 [Server] :: termination in: 10\n",
+                    encoding="utf-8",
+                )
+                script_b.write_text(
+                    "04:36:56.000 SCRIPT    (E): foreign launch error\n"
+                    + self._INCOMPLETE_SCRIPT_LOG
+                    + '04:37:09.995  SCRIPT       : Module: Mission; loaded 999x files; 6x classes; defines: "…"\n',
+                    encoding="utf-8",
+                )
+                newer = time.time() + 10.0
+                os.utime(rpt_b, (newer, newer))
+                os.utime(script_b, (newer, newer))
+
+        clock.on_sleep = spawn_launch_b_on_sleep
+        reads: list[str] = []
+        real_read = dayz_test_tool.server_boot.read_log_text
+
+        def spy_read(path, **kwargs):
+            reads.append(str(path))
+            return real_read(path, **kwargs)
+
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=clock.sleep
+        ), patch.object(
+            dayz_test_tool.server_boot, "read_log_text", side_effect=spy_read
+        ):
+            result = await self._run_tool(
+                mode="server", server_wait_s=2, on_executing=write_launch_a
+            )
+
+        self.assertEqual(clock.now(), 2.0)
+        self.assertNotIn(str(rpt_b), reads)
+        self.assertNotIn(str(script_b), reads)
+        self.assertEqual(result["server_boot"]["modules"], {"GameLib": 1})
+        self.assertIs(result["server_boot"]["complete"], False)
+        self.assertIs(result["server_boot"]["termination_countdown"], False)
+        self.assertEqual(result["server_boot"]["script_errors"], 0)
+
+    async def test_rpt_with_old_ctime_and_recent_mtime_is_rejected(self) -> None:
+        import time
+
+        self.server_profiles.mkdir(parents=True, exist_ok=True)
+        rpt = self.server_profiles / "DayZDiag_x64_2026-11-11_03-00-00.RPT"
+        script = self.server_profiles / "script_2026-11-11_03-00-00.log"
+        rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+        script.write_text(
+            self._INCOMPLETE_SCRIPT_LOG + self._MISSION_LINE, encoding="utf-8"
+        )
+        stale_epoch = time.time() - 120.0
+        _backdate_file_times(str(rpt), stale_epoch)
+        _backdate_file_times(str(script), stale_epoch)
+
+        touched: list[float] = []
+
+        def touch_mtime_only() -> None:
+            now = time.time()
+            touched.append(now)
+            os.utime(rpt, (now + 5.0, now + 5.0))
+            os.utime(script, (now + 5.0, now + 5.0))
+
+        clock = _FakeBootClock()
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=clock.sleep
+        ):
+            result = await self._run_tool(
+                mode="server", server_wait_s=2, on_executing=touch_mtime_only
+            )
+
+        self.assertEqual(len(touched), 1)
+        stat = rpt.stat()
+        self.assertLess(stat.st_ctime, touched[0] - 30.0)
+        self.assertGreaterEqual(stat.st_mtime, touched[0])
+        self.assertEqual(clock.now(), 2.0)
+        self.assertIsNone(result["server_boot"])
+
+    async def test_ok_terminal_polls_when_rpt_pair_or_script_log_appears_after_sleep(
+        self,
+    ) -> None:
+        self.server_profiles.mkdir(parents=True, exist_ok=True)
+        rpt = self.server_profiles / "DayZDiag_x64_2026-11-11_04-36-48.RPT"
+        script = self.server_profiles / "script_2026-11-11_04-36-48.log"
+
+        clock = _FakeBootClock()
+
+        def create_pair_on_first_sleep(step: int) -> None:
+            if step == 1:
+                rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+                script.write_text(
+                    self._INCOMPLETE_SCRIPT_LOG + self._MISSION_LINE,
+                    encoding="utf-8",
+                )
+
+        clock.on_sleep = create_pair_on_first_sleep
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=clock.sleep
+        ):
+            late_pair = await self._run_tool(mode="server")
+
+        self.assertEqual(clock.sleeps, [0.5])
+        self.assertEqual(clock.now(), 0.5)
+        self.assertIs(late_pair["server_boot"]["complete"], True)
+        self.assertEqual(
+            late_pair["server_boot"]["modules"],
+            {"GameLib": 1, "Game": 2, "World": 4, "Mission": 3},
+        )
+
+        script.unlink()
+        clock_script = _FakeBootClock()
+
+        def write_rpt_then_late_script() -> None:
+            rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+
+        def create_script_on_first_sleep(step: int) -> None:
+            if step == 1:
+                script.write_text(
+                    self._INCOMPLETE_SCRIPT_LOG + self._MISSION_LINE,
+                    encoding="utf-8",
+                )
+
+        clock_script.on_sleep = create_script_on_first_sleep
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=clock_script.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=clock_script.sleep
+        ):
+            late_script = await self._run_tool(
+                mode="server", on_executing=write_rpt_then_late_script
+            )
+
+        self.assertEqual(clock_script.sleeps, [0.5])
+        self.assertEqual(clock_script.now(), 0.5)
+        self.assertIs(late_script["server_boot"]["complete"], True)
+
+    async def test_termination_countdown_ends_wait_without_or_with_script_log(
+        self,
+    ) -> None:
+        self.server_profiles.mkdir(parents=True, exist_ok=True)
+        rpt = self.server_profiles / "DayZServer_x64_2026-11-10_05-55-15.RPT"
+        script = self.server_profiles / "script_2026-11-10_05-55-15.log"
+        facts_section_4_rpt = (
+            " 5:55:22.582 NETWORK      : server: Player dpid=2 added at playerIndex=0\n"
+            " 5:55:22.583 [Server] :: termination in: 10\n"
+            " 5:55:23.587 [Server] :: termination in: 9\n"
+            " 5:55:24.598 [Server] :: termination in: 8\n"
+            " 5:55:25.611 [Server] :: termination in: 7\n"
+            " 5:55:26.620 [Server] :: termination in: 6\n"
+            " 5:55:27.626 [Server] :: termination in: 5\n"
+            " 5:55:28.638 [Server] :: termination in: 4\n"
+            " 5:55:29.648 [Server] :: termination in: 3\n"
+            " 5:55:30.663 [Server] :: termination in: 2\n"
+            " 5:55:31.673 [Server] :: termination in: 1\n"
+            " 5:55:32.737 ENGINE       : Destroying game\n"
+            " 5:55:32.737  SCRIPT       : ~DayZGame()\n"
+            " 5:55:32.859  ENGINE       : Game destroyed.\n"
+            " 5:55:32.862 ENGINE       : Destroying game\n"
+            " 5:55:32.862  ENGINE       : Game destroyed.\n"
+            " 5:55:33.73   --- Termination successfully completed --- \n"
+        )
+
+        def write_countdown_rpt_only() -> None:
+            rpt.write_text(facts_section_4_rpt, encoding="utf-8")
+
+        no_script_clock = _FakeBootClock()
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=no_script_clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=no_script_clock.sleep
+        ):
+            no_script_res = await self._run_tool(
+                mode="server", on_executing=write_countdown_rpt_only
+            )
+
+        self.assertEqual(no_script_res["status"], "succeeded")
+        self.assertEqual(no_script_clock.sleeps, [])
+        self.assertEqual(no_script_clock.now(), 0.0)
+        self.assertIsNone(no_script_res["server_boot"])
+
+        rpt.unlink()
+
+        def write_countdown_rpt_and_script() -> None:
+            rpt.write_text(facts_section_4_rpt, encoding="utf-8")
+            script.write_text(self._INCOMPLETE_SCRIPT_LOG, encoding="utf-8")
+
+        with_script_clock = _FakeBootClock()
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=with_script_clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=with_script_clock.sleep
+        ):
+            with_script_res = await self._run_tool(
+                mode="server", on_executing=write_countdown_rpt_and_script
+            )
+
+        self.assertEqual(with_script_res["status"], "succeeded")
+        self.assertEqual(with_script_clock.sleeps, [])
+        self.assertEqual(with_script_clock.now(), 0.0)
+        self.assertIsNotNone(with_script_res["server_boot"])
+        self.assertIs(with_script_res["server_boot"]["termination_countdown"], True)
+        self.assertIs(with_script_res["server_boot"]["complete"], False)
+        self.assertEqual(
+            with_script_res["server_boot"]["modules"],
+            {"GameLib": 1, "Game": 2, "World": 4},
+        )
+
+    async def test_slow_read_past_deadline_stops_without_further_read_pbo_or_sleep(
+        self,
+    ) -> None:
+        from pathlib import Path
+
+        self.server_profiles.mkdir(parents=True, exist_ok=True)
+        rpt = self.server_profiles / "DayZDiag_x64_2026-11-11_04-36-48.RPT"
+        script = self.server_profiles / "script_2026-11-11_04-36-48.log"
+
+        real_read = dayz_test_tool.server_boot.read_log_text
+        real_script_lookup = dayz_test_tool._server_boot_script_log
+        real_pbo = dayz_test_tool._measure_server_boot_pbos
+        real_to_thread = dayz_test_tool.asyncio.to_thread
+        boot_to_thread_calls: list[object] = []
+
+        async def spy_to_thread(func, /, *args, **kwargs):
+            if func is not dayz_test_tool.preflight_bridge_contract_request:
+                boot_to_thread_calls.append(func)
+            return await real_to_thread(func, *args, **kwargs)
+
+        def write_complete() -> None:
+            rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+            script.write_text(
+                self._INCOMPLETE_SCRIPT_LOG + self._MISSION_LINE,
+                encoding="utf-8",
+            )
+
+        slow_rpt_clock = _FakeBootClock()
+        reads: list[str] = []
+        script_lookups: list[str] = []
+        pbo_calls = 0
+
+        def slow_first_read(path, **kwargs):
+            reads.append(str(path))
+            text = real_read(path, **kwargs)
+            slow_rpt_clock.elapsed += 6.0
+            return text
+
+        def spy_script_lookup(rpt_path):
+            script_lookups.append(str(rpt_path))
+            return real_script_lookup(rpt_path)
+
+        def spy_pbo(*args, **kwargs):
+            nonlocal pbo_calls
+            pbo_calls += 1
+            return real_pbo(*args, **kwargs)
+
+        with patch.object(
+            dayz_test_tool.asyncio, "to_thread", side_effect=spy_to_thread
+        ), patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=slow_rpt_clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=slow_rpt_clock.sleep
+        ), patch.object(
+            dayz_test_tool.server_boot, "read_log_text", side_effect=slow_first_read
+        ), patch.object(
+            dayz_test_tool, "_server_boot_script_log", side_effect=spy_script_lookup
+        ), patch.object(
+            dayz_test_tool, "_measure_server_boot_pbos", side_effect=spy_pbo
+        ):
+            expired_res = await self._run_tool(
+                mode="server", server_wait_s=5, on_executing=write_complete
+            )
+
+        self.assertEqual(reads, [str(rpt)])
+        self.assertEqual(script_lookups, [])
+        self.assertEqual(pbo_calls, 0)
+        self.assertEqual(slow_rpt_clock.sleeps, [])
+        self.assertEqual(expired_res["status"], "succeeded")
+        self.assertIsNone(expired_res["server_boot"])
+
+        rpt.unlink()
+        script.unlink()
+
+        def write_incomplete() -> None:
+            rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+            script.write_text(self._INCOMPLETE_SCRIPT_LOG, encoding="utf-8")
+
+        slow_script_clock = _FakeBootClock()
+        script_reads: list[str] = []
+
+        def slow_script_read(path, **kwargs):
+            script_reads.append(str(path))
+            text = real_read(path, **kwargs)
+            if Path(path) == script:
+                slow_script_clock.elapsed += 6.0
+            return text
+
+        with patch.object(
+            dayz_test_tool.asyncio, "to_thread", side_effect=spy_to_thread
+        ), patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=slow_script_clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=slow_script_clock.sleep
+        ), patch.object(
+            dayz_test_tool.server_boot, "read_log_text", side_effect=slow_script_read
+        ), patch.object(
+            dayz_test_tool, "_measure_server_boot_pbos", side_effect=spy_pbo
+        ):
+            script_expired_res = await self._run_tool(
+                mode="server", server_wait_s=5, on_executing=write_incomplete
+            )
+
+        self.assertEqual(script_reads, [str(rpt), str(script)])
+        self.assertEqual(pbo_calls, 0)
+        self.assertEqual(slow_script_clock.sleeps, [])
+        self.assertEqual(
+            script_expired_res["server_boot"]["modules"],
+            {"GameLib": 1, "Game": 2, "World": 4},
+        )
+        self.assertIsNone(script_expired_res["server_boot"]["vanilla_files"])
+        self.assertIsNone(script_expired_res["server_boot"]["mod_files"])
+
+        rpt.unlink()
+        script.unlink()
+
+        real_vanilla = dayz_test_tool.server_boot.count_vanilla_files
+        real_mod = dayz_test_tool.server_boot.count_mod_files
+        slow_vanilla_clock = _FakeBootClock()
+        vanilla_reads: list[str] = []
+        vanilla_calls: list[str] = []
+        mod_calls: list[object] = []
+
+        def spy_read_for_vanilla(path, **kwargs):
+            vanilla_reads.append(str(path))
+            return real_read(path, **kwargs)
+
+        def slow_vanilla(game_directory):
+            vanilla_calls.append(str(game_directory))
+            counts = real_vanilla(game_directory)
+            slow_vanilla_clock.elapsed += 6.0
+            return counts
+
+        def spy_mod_unused(mod_directories):
+            mod_calls.append(list(mod_directories))
+            return real_mod(mod_directories)
+
+        with patch.object(
+            dayz_test_tool.asyncio, "to_thread", side_effect=spy_to_thread
+        ), patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=slow_vanilla_clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=slow_vanilla_clock.sleep
+        ), patch.object(
+            dayz_test_tool.server_boot, "read_log_text", side_effect=spy_read_for_vanilla
+        ), patch.object(
+            dayz_test_tool, "_measure_server_boot_pbos", side_effect=spy_pbo
+        ), patch.object(
+            dayz_test_tool.server_boot, "count_vanilla_files", side_effect=slow_vanilla
+        ), patch.object(
+            dayz_test_tool.server_boot, "count_mod_files", side_effect=spy_mod_unused
+        ):
+            vanilla_expired_res = await self._run_tool(
+                mode="server", server_wait_s=5, on_executing=write_incomplete
+            )
+
+        self.assertEqual(pbo_calls, 1)
+        self.assertEqual(vanilla_calls, [str(self.game_dir)])
+        self.assertEqual(mod_calls, [])
+        self.assertEqual(vanilla_reads, [str(rpt), str(script)])
+        self.assertEqual(slow_vanilla_clock.sleeps, [])
+        self.assertEqual(
+            vanilla_expired_res["server_boot"],
+            {
+                "modules": {"GameLib": 1, "Game": 2, "World": 4},
+                "complete": False,
+                "script_errors": 0,
+                "termination_countdown": False,
+                "vanilla_files": {"GameLib": 1, "Game": 2, "World": 3, "Mission": 1},
+                "mod_files": None,
+                "missing_files": None,
+            },
+        )
+
+        rpt.unlink()
+        script.unlink()
+
+        slow_pbo_clock = _FakeBootClock()
+        pbo_reads: list[str] = []
+        slow_mod_calls: list[object] = []
+
+        def spy_read_for_pbo(path, **kwargs):
+            pbo_reads.append(str(path))
+            return real_read(path, **kwargs)
+
+        def slow_mod(mod_directories):
+            slow_mod_calls.append(list(mod_directories))
+            counts = real_mod(mod_directories)
+            slow_pbo_clock.elapsed += 6.0
+            return counts
+
+        with patch.object(
+            dayz_test_tool.asyncio, "to_thread", side_effect=spy_to_thread
+        ), patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=slow_pbo_clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=slow_pbo_clock.sleep
+        ), patch.object(
+            dayz_test_tool.server_boot, "read_log_text", side_effect=spy_read_for_pbo
+        ), patch.object(
+            dayz_test_tool, "_measure_server_boot_pbos", side_effect=spy_pbo
+        ), patch.object(
+            dayz_test_tool.server_boot, "count_mod_files", side_effect=slow_mod
+        ):
+            pbo_expired_res = await self._run_tool(
+                mode="server", server_wait_s=5, on_executing=write_incomplete
+            )
+
+        self.assertEqual(pbo_calls, 2)
+        self.assertEqual(len(slow_mod_calls), 1)
+        self.assertEqual(pbo_reads, [str(rpt), str(script)])
+        self.assertEqual(slow_pbo_clock.sleeps, [])
+        self.assertIs(pbo_expired_res["server_boot"]["complete"], False)
+        self.assertEqual(
+            pbo_expired_res["server_boot"]["mod_files"],
+            {"GameLib": 0, "Game": 0, "World": 1, "Mission": 2},
+        )
+        self.assertEqual(
+            pbo_expired_res["server_boot"]["missing_files"],
+            {"GameLib": 0, "Game": 0, "World": 0},
+        )
+        self.assertEqual(boot_to_thread_calls, [])
+
+    async def test_script_log_must_match_pinned_rpt_launch_stamp(self) -> None:
+        import time
+
+        self.server_profiles.mkdir(parents=True, exist_ok=True)
+        rpt_a = self.server_profiles / "DayZDiag_x64_2026-11-11_04-36-48.RPT"
+        script_a = self.server_profiles / "script_2026-11-11_04-36-48.log"
+        script_b = self.server_profiles / "script_2026-11-11_04-36-55.log"
+        foreign_script_b = (
+            "04:36:56.000 SCRIPT    (E): foreign launch error\n"
+            + self._INCOMPLETE_SCRIPT_LOG
+            + '04:37:09.995  SCRIPT       : Module: Mission; loaded 999x files; 6x classes; defines: "…"\n'
+        )
+        real_read = dayz_test_tool.server_boot.read_log_text
+        real_parse = dayz_test_tool.server_boot.parse_script_log
+
+        def write_rpt_a_only() -> None:
+            rpt_a.write_text(self._NORMAL_RPT, encoding="utf-8")
+
+        clock_1 = _FakeBootClock()
+
+        def spawn_script_b_on_first_sleep(step: int) -> None:
+            if step == 1:
+                script_b.write_text(foreign_script_b, encoding="utf-8")
+                newer = time.time() + 10.0
+                os.utime(script_b, (newer, newer))
+
+        clock_1.on_sleep = spawn_script_b_on_first_sleep
+        reads_1: list[str] = []
+        parsed_1: list[str] = []
+
+        def spy_read_1(path, **kwargs):
+            reads_1.append(str(path))
+            return real_read(path, **kwargs)
+
+        def spy_parse_1(text: str):
+            parsed_1.append(text)
+            return real_parse(text)
+
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=clock_1.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=clock_1.sleep
+        ), patch.object(
+            dayz_test_tool.server_boot, "read_log_text", side_effect=spy_read_1
+        ), patch.object(
+            dayz_test_tool.server_boot, "parse_script_log", side_effect=spy_parse_1
+        ):
+            res_1 = await self._run_tool(
+                mode="server", server_wait_s=2, on_executing=write_rpt_a_only
+            )
+
+        self.assertEqual(clock_1.now(), 2.0)
+        self.assertNotIn(str(script_b), reads_1)
+        self.assertEqual(parsed_1, [])
+        self.assertIsNone(res_1["server_boot"])
+
+        rpt_a.unlink()
+        script_b.unlink()
+
+        def write_a_and_newer_b() -> None:
+            rpt_a.write_text(self._NORMAL_RPT, encoding="utf-8")
+            script_a.write_text(
+                self._INCOMPLETE_SCRIPT_LOG + self._MISSION_LINE,
+                encoding="utf-8",
+            )
+            script_b.write_text(foreign_script_b, encoding="utf-8")
+            newer = time.time() + 10.0
+            os.utime(script_b, (newer, newer))
+
+        clock_2 = _FakeBootClock()
+        reads_2: list[str] = []
+        parsed_2: list[str] = []
+
+        def spy_read_2(path, **kwargs):
+            reads_2.append(str(path))
+            return real_read(path, **kwargs)
+
+        def spy_parse_2(text: str):
+            parsed_2.append(text)
+            return real_parse(text)
+
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=clock_2.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=clock_2.sleep
+        ), patch.object(
+            dayz_test_tool.server_boot, "read_log_text", side_effect=spy_read_2
+        ), patch.object(
+            dayz_test_tool.server_boot, "parse_script_log", side_effect=spy_parse_2
+        ):
+            res_2 = await self._run_tool(
+                mode="server", server_wait_s=2, on_executing=write_a_and_newer_b
+            )
+
+        self.assertEqual(dayz_test_tool._script_log_for_server_rpt(rpt_a), script_b)
+        self.assertEqual(clock_2.now(), 2.0)
+        self.assertNotIn(str(script_b), reads_2)
+        self.assertNotIn(str(script_a), reads_2)
+        self.assertEqual(parsed_2, [])
+        self.assertIsNone(res_2["server_boot"])
+
+        rpt_a.unlink()
+        script_a.unlink()
+        script_b.unlink()
+
+        def write_a_pair() -> None:
+            rpt_a.write_text(self._NORMAL_RPT, encoding="utf-8")
+            script_a.write_text(
+                self._INCOMPLETE_SCRIPT_LOG + self._MISSION_LINE,
+                encoding="utf-8",
+            )
+
+        clock_3 = _FakeBootClock()
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=clock_3.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=clock_3.sleep
+        ):
+            res_3 = await self._run_tool(
+                mode="server", server_wait_s=2, on_executing=write_a_pair
+            )
+
+        self.assertEqual(clock_3.sleeps, [])
+        self.assertIsNotNone(res_3["server_boot"])
+        self.assertIs(res_3["server_boot"]["complete"], True)
+        self.assertEqual(
+            res_3["server_boot"]["modules"],
+            {"GameLib": 1, "Game": 2, "World": 4, "Mission": 3},
+        )
+
+        rpt_a.unlink()
+        script_a.unlink()
+        plain_rpt = self.server_profiles / "DayZDiag_x64.RPT"
+        plain_script = self.server_profiles / "script_custom.log"
+        plain_rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+        plain_script.write_text(self._INCOMPLETE_SCRIPT_LOG, encoding="utf-8")
+        self.assertEqual(dayz_test_tool._server_boot_script_log(plain_rpt), plain_script)
+        plain_script.unlink()
+        (self.server_profiles / "error.log").write_text("err\n", encoding="utf-8")
+        self.assertIsNone(dayz_test_tool._server_boot_script_log(plain_rpt))
+
+    async def test_vanilla_count_past_deadline_skips_mod_count(self) -> None:
+        self.server_profiles.mkdir(parents=True, exist_ok=True)
+        rpt = self.server_profiles / "DayZDiag_x64_2026-11-11_04-36-48.RPT"
+        script = self.server_profiles / "script_2026-11-11_04-36-48.log"
+
+        def write_logs() -> None:
+            rpt.write_text(self._NORMAL_RPT, encoding="utf-8")
+            script.write_text(
+                self._INCOMPLETE_SCRIPT_LOG + self._MISSION_LINE,
+                encoding="utf-8",
+            )
+
+        clock = _FakeBootClock()
+        real_vanilla = dayz_test_tool.server_boot.count_vanilla_files
+        real_mod = dayz_test_tool.server_boot.count_mod_files
+        vanilla_calls: list[str] = []
+        mod_calls: list[object] = []
+
+        def fake_vanilla(game_directory):
+            vanilla_calls.append(str(game_directory))
+            counts = real_vanilla(game_directory)
+            clock.elapsed += 61.0
+            return counts
+
+        def spy_mod(mod_directories):
+            mod_calls.append(list(mod_directories))
+            return real_mod(mod_directories)
+
+        with patch.object(
+            dayz_test_tool, "_server_boot_clock", side_effect=clock.now
+        ), patch.object(
+            dayz_test_tool, "_server_boot_sleep", side_effect=clock.sleep
+        ), patch.object(
+            dayz_test_tool.server_boot, "count_vanilla_files", side_effect=fake_vanilla
+        ), patch.object(
+            dayz_test_tool.server_boot, "count_mod_files", side_effect=spy_mod
+        ):
+            result = await self._run_tool(mode="server", on_executing=write_logs)
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(clock.now(), 61.0)
+        self.assertEqual(clock.sleeps, [])
+        self.assertEqual(vanilla_calls, [str(self.game_dir)])
+        self.assertEqual(mod_calls, [])
+        self.assertEqual(
+            result["server_boot"],
+            {
+                "modules": {"GameLib": 1, "Game": 2, "World": 4, "Mission": 3},
+                "complete": True,
+                "script_errors": 0,
+                "termination_countdown": False,
+                "vanilla_files": {"GameLib": 1, "Game": 2, "World": 3, "Mission": 1},
+                "mod_files": None,
+                "missing_files": None,
+            },
         )
 
 

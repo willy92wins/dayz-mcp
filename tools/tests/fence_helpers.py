@@ -169,11 +169,12 @@ def _seed_guard_snapshots(lifecycle: object, processes: list[object]) -> None:
 
 
 def poll_census_query(peer: str) -> dict[str, str]:
-    """``caps=``/``ach=`` a real Enforce bridge sends on every GET /poll.
+    """``caps=``/``ach=`` a fake poller sends on every GET /poll.
 
-    MCPBridge.c announces ``caps=`` + ``ach=`` (the server arg contract);
-    MCPClientBridge.c ``caps=`` + ``ach=`` (the client contract, #377/#380).
-    Fake pollers must do the same or the 0878 gate in
+    The real Enforce bridges now send the census as ``cm=`` plus ``ach=``
+    (MCPBridge.c the server arg contract; MCPClientBridge.c the client
+    contract, #377/#380). Fake pollers keep the legacy ``caps=`` form the
+    daemon still accepts, with the same ``ach=``, or the 0878 gate in
     ``compute_bridge_ready`` stays ``capabilities_unknown`` forever (#102).
     """
     from dayz_mcp import bridge_readiness, server

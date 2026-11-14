@@ -1,7 +1,7 @@
 commit 44de5ff221133ebe3fb90f1e645e1f29a2359778
-Author:     willy92wins <guillermo_92@msn.com>
+Author:     willy92wins <<email>>
 AuthorDate: Sun Sep 6 22:27:15 2026 +0200
-Commit:     willy92wins <guillermo_92@msn.com>
+Commit:     willy92wins <<email>>
 CommitDate: Sun Sep 6 22:27:15 2026 +0200
 
     server: a daemon enqueue refusal reaches the caller with its code and hint instead of a bare remote_error (ficha f45d)

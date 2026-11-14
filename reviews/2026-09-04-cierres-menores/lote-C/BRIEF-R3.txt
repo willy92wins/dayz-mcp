@@ -6,9 +6,9 @@ disco. Si algo te bloquea, dilo en el dictamen y sigue con el resto.
 ===============================================================================
 
 Eres una sesión nueva. Dictámenes previos del lote C (fb-20260829-221423-b2c4), léelos:
-  C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-C\REVIEW-CODEX.md      (ronda 1: B-01, corregido en ronda 2)
-  C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-C\REVIEW-CODEX-R2.md   (ronda 2: B-01 cerrado; B-02 = el mutante (a) sobrevivía al negativo plano)
-Árbol vivo: C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev (rama work/inbox-20260830-modules,
+  %USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-C\REVIEW-CODEX.md      (ronda 1: B-01, corregido en ronda 2)
+  %USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-C\REVIEW-CODEX-R2.md   (ronda 2: B-01 cerrado; B-02 = el mutante (a) sobrevivía al negativo plano)
+Árbol vivo: %USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev (rama work/inbox-20260830-modules,
 HEAD adc1c22), SIN commitear. Diff completo de la ronda en DIFF-C3.patch (tres ficheros).
 
 Lo que cambió respecto a la ronda 2 — SOLO el fichero de tests
@@ -35,7 +35,7 @@ Tu producto es UN dictamen sobre exactamente esto:
         el parche entregado, y que server.py tiene el sha citado arriba (nada de producción cambió).
 Bloqueante SOLO con repro que falle. No repitas B-01/B-02 salvo que los veas reabiertos.
 
-Intérprete OBLIGATORIO: C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+Intérprete OBLIGATORIO: %USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
 Desde tools/: $env:PYTHONPATH='.'; $env:PYTHONDONTWRITEBYTECODE='1'. Sin pytest: unittest.
 
 ===============================================================================
@@ -48,7 +48,7 @@ Desde tools/: $env:PYTHONPATH='.'; $env:PYTHONDONTWRITEBYTECODE='1'. Sin pytest:
 ===============================================================================
 §2. ENTREGABLE
 ===============================================================================
-Escribe C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-C\REVIEW-CODEX-R3.md con:
+Escribe %USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-C\REVIEW-CODEX-R3.md con:
 ## VEREDICTO
 BLOQUEANTES=N.
 ## R-01 … R-03

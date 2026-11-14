@@ -314,13 +314,23 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 409, refused)
         self.assertEqual(refused.get("error"), "run_protected", refused)
         await runtime_b.session_release(acquired_b["lease_token"])
+        # B's lease_close is delivered on a later server poll; wait for it
+        # instead of snapshotting the command log right after the release.
+        await self.wait_until(
+            lambda: server_peer.command_names().count("lease_close") == 2
+        )
 
         mutations = [
             name
             for name in server_peer.command_names()
             if name != "query_player_state"
         ]
-        self.assertEqual(mutations, ["world_spawn", "world_time_set"])
+        # The owners' mutations stay FIFO and non-interleaved; each lease
+        # end then delivers its own aggregated server close (\u00a72.12),
+        # after that owner's mutations, never between them.
+        self.assertEqual(
+            mutations, ["world_spawn", "world_time_set", "lease_close", "lease_close"]
+        )
 
     @slow_test
     async def test_abandoned_head_is_never_blind_granted_and_next_live_wait_claims(self) -> None:
@@ -426,14 +436,20 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(released["cleanup"]["cancelled"], 0)
         await asyncio.sleep(0.1)
         self.assertFalse(delivered.done())
-        self.assertEqual(server_peer.command_names(), ["world_spawn"])
+        # The delivered spawn is never replayed (it appears once); the
+        # lease end adds only its aggregated server close after it.
+        await self.wait_until(
+            lambda: server_peer.command_names() == ["world_spawn", "lease_close"]
+        )
+        self.assertEqual(server_peer.command_names().count("world_spawn"), 1)
+        self.assertFalse(delivered.done())
 
         delivered.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await delivered
 
     @slow_test
-    async def test_vehicle_release_cleanup_is_enqueued_exactly_once(self) -> None:
+    async def test_lease_close_cleanup_is_enqueued_exactly_once(self) -> None:
         runtime_a = self.client("codex")
         client_peer = self.peer("client")
         acquired_a = await runtime_a.session_acquire("drive")
@@ -443,10 +459,14 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         )
 
         released = await runtime_a.session_release(acquired_a["lease_token"])
-        self.assertEqual(released["cleanup"]["vehicle_release_enqueued"], 1)
+        # \u00a72.14: with a lease-end round, the aggregated close replaces
+        # vehicle_release. Exactly one close goes to the client, and its
+        # dispatch restores gameplay and releases the camera in the bridge.
+        self.assertEqual(released["cleanup"]["vehicle_release_enqueued"], 0)
+        self.assertEqual(released["cleanup"]["lease_close_enqueued"], 1)
         await self.wait_until(
             lambda: client_peer.command_names()
-            == ["vehicle_control", "vehicle_release"]
+            == ["vehicle_control", "lease_close_client"]
         )
 
     @slow_test

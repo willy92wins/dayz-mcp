@@ -5,8 +5,9 @@ values, and chat_read gained per-line visibility and hud_shown, both at bridge
 version 12 with the census unchanged. The client bridge now announces
 ``ach=`` (the hash of bridge_readiness.CLIENT_CONTRACT) and loopback refuses
 those two verbs with arg_contract_mismatch to a client without it. The bridge
-version stays 12 so tools that predate the gate, which require exactly 12 and
-never read the client's ach, keep serving the newer bridge.
+version stays 13 on the merged tree (this gate does not bump it) so tools that
+predate the gate, which require exactly 13 and never read the client's ach,
+keep serving the newer bridge.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ CANONICAL = (
     "chat_read=alpha,hud_shown,replaced,screen_h,screen_w,screen_x,screen_y,shown_at_ms,visible_hierarchy"
 )
 ACH_WIRE = 'request = request + "&ach=" + CLIENT_CONTRACT_HASH;'
-CAPS_WIRE = 'request = request + "&caps=" + m_PollCapabilities;'
+CAPS_WIRE = 'request = request + "&cm=" + m_PollCapabilities;'
 
 
 def _source(path) -> str:
@@ -87,15 +88,23 @@ class ClientContractHashTest(unittest.TestCase):
 
     def test_the_bridge_version_is_not_what_tells_them_apart(self) -> None:
         # The older bridges polled with "12~<game>" (9810aafd, 3e5c2460) and
-        # this one polls with the version the tools expect. Older tools
-        # require that version exactly, so the gate is the client ach, which
-        # they never read, rather than a version bump that would refuse this
-        # bridge to them.
+        # this one polls with the version the merged tools expect (13). On
+        # the merged tree a bridge that predates this contract but carries
+        # the v13 lease-close bump (#343) polls with that same version 13,
+        # so the version cannot tell it from the current bridge: both pass
+        # the version gate and announce the same verbs at version 13. The
+        # gate is therefore the client ach, which older tools never read,
+        # rather than a version bump that would refuse this bridge to them
+        # (they require exactly 13).
         self.assertIn(
             f'const string MCP_BRIDGE_VERSION = "{core.EXPECTED_BRIDGE_VERSION}";', _source(MESSAGES)
         )
         self.assertEqual(
-            core.version_state_for("12~1.29", require_version=True, expected_game_version=None),
+            core.version_state_for(
+                f"{core.EXPECTED_BRIDGE_VERSION}~1.29",
+                require_version=True,
+                expected_game_version=None,
+            ),
             ("ok", "version accepted"),
         )
 
@@ -108,14 +117,16 @@ class OlderClientChatReadTest(unittest.TestCase):
         self.state = loopback.ServerState("test-key")
         bind_both_peers(self.state)
         # The client bridge of 3e5c2460, before chat_read's visibility: the
-        # same census at bridge version 12, with no ach=.
+        # same census at bridge version 12, with no ach=. _announce
+        # re-announces it at the merged tree's expected version (13), so
+        # this test isolates the ach gate from the version gate.
         self.census = sorted(bridge_readiness._BRIDGE_COMMAND_TOOLS["client"])
         self.assertIn("chat_read", self.census)
 
     def _announce(self, ach: str | None) -> tuple[int, dict]:
         return self.state.record_poll(
             "client",
-            "12~1.29",
+            f"{core.EXPECTED_BRIDGE_VERSION}~1.29",
             instance=INST_CLIENT,
             source_pid=PID_CLIENT,
             caps=",".join(self.census),
@@ -169,6 +180,78 @@ class OlderClientChatReadTest(unittest.TestCase):
                     block["announced_arg_contract_hash"] = ach
                 result = bridge_readiness._compare_bridge_capabilities("client", block, registered)
                 self.assertEqual((result["state"], result["reason"]), ("match", "ok"))
+
+
+class ClientContractMaskCensusTest(unittest.TestCase):
+    """The merged PBO announces the census as cm= (#406), not caps=.
+
+    bridge_readiness.encode_capability_mask("client", names) builds the
+    cm= value (bridge_readiness.py:583); ServerState.record_poll takes it
+    as cm= (loopback.py:7282) and _record_poll_caps_locked expands it to
+    the same names as caps= (loopback.py:8847), so the ach gate in
+    _client_announce_refusal_locked (loopback.py:5638) must behave the
+    same through that path.
+    """
+
+    _ARGS: dict[str, dict] = {
+        "chat_read": {},
+        "camera_set_focus": {
+            "cam_mode": "orient",
+            "cam_pos": [0.0, 2.0, 0.0],
+            "cam_orientation": [90.0, 0.0, 0.0],
+            "fov": 0.0,
+            "settle_ticks": 3,
+            "focus_distance": 2.0,
+            "focus_blur": 1.0,
+            "focus_length": 750.0,
+            "focus_length_near": 500.0,
+            "focus_depth_offset": 10.0,
+        },
+    }
+
+    def setUp(self) -> None:
+        self.state = loopback.ServerState("test-key")
+        bind_both_peers(self.state)
+        self.census = sorted(bridge_readiness._BRIDGE_COMMAND_TOOLS["client"])
+        self.cm = bridge_readiness.encode_capability_mask("client", self.census)
+
+    def _announce(self, ach: str | None) -> tuple[int, dict]:
+        return self.state.record_poll(
+            "client",
+            f"{core.EXPECTED_BRIDGE_VERSION}~1.29",
+            instance=INST_CLIENT,
+            source_pid=PID_CLIENT,
+            cm=self.cm,
+            ach=ach,
+        )
+
+    def _enqueue(self, command: str) -> tuple[int, dict]:
+        return self.state.enqueue_command(
+            command, dict(self._ARGS[command]), peer="client", operation_timeout_s=30.0
+        )
+
+    def test_both_verbs_are_queued_with_the_expected_hash_via_cm(self) -> None:
+        self._announce(bridge_readiness.EXPECTED_CLIENT_CONTRACT_HASH)
+        for command in ("chat_read", "camera_set_focus"):
+            with self.subTest(command=command):
+                status, body = self._enqueue(command)
+                self.assertEqual(status, 200, body)
+        self.assertEqual(
+            [row["cmd"] for row in bound_queue(self.state, "client")],
+            ["chat_read", "camera_set_focus"],
+        )
+
+    def test_both_verbs_are_refused_without_or_with_a_wrong_hash_via_cm(self) -> None:
+        for ach in (None, "", "deadbeefdeadbeef"):
+            for command in ("chat_read", "camera_set_focus"):
+                with self.subTest(ach=ach, command=command):
+                    self.setUp()
+                    self._announce(ach)
+                    self.assertEqual(
+                        self._enqueue(command),
+                        (409, {"error": "arg_contract_mismatch"}),
+                    )
+                    self.assertEqual(bound_queue(self.state, "client"), [])
 
 
 if __name__ == "__main__":

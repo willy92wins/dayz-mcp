@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp import bridge_readiness, loopback, result_prune
 from dayz_mcp.server import ServerConfig, build_app
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator, command_requires_lease
@@ -35,11 +36,11 @@ class PublicGameplayToolTest(_ToolCase):
         state = loopback.ServerState("test-key")
         bind_both_peers(state)
         names = sorted(bridge_readiness._BRIDGE_COMMAND_TOOLS["client"])
-        state.record_poll("client", "12~1.30", instance=INST_CLIENT,
+        state.record_poll("client", f"{EXPECTED_BRIDGE_VERSION}~1.30", instance=INST_CLIENT,
                           source_pid=PID_CLIENT, caps=",".join(n for n in names if n != "gameplay_state"))
         self.assertEqual(state.enqueue_command("gameplay_state", {}, peer="client"),
                          (409, {"error": "bridge_capability_missing"}))
-        state.record_poll("client", "12~1.30", instance=INST_CLIENT,
+        state.record_poll("client", f"{EXPECTED_BRIDGE_VERSION}~1.30", instance=INST_CLIENT,
                           source_pid=PID_CLIENT, caps=",".join(names))
         status, body = state.enqueue_command("gameplay_state", {}, peer="client")
         self.assertEqual(status, 200, body)

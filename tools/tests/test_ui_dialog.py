@@ -297,6 +297,32 @@ class UiDialogResultTest(unittest.TestCase):
         )
         self.assertEqual(rejected["reason"], "busy")
 
+    def test_k31_lease_closed_state(self) -> None:
+        # K31 POS: lease_closed is a terminal dialog state (plan §2.6 step 1).
+        result = ui_dialog.interpret_result(
+            self._ack(), _wire({"state": "lease_closed", "elapsed_s": 1.0})
+        )
+        self.assertEqual(result["state"], "lease_closed")
+        self.assertIn("lease_closed", ui_dialog.TERMINAL_STATES)
+        # K31 NEG: a partial values payload on a non-completed state is rejected.
+        with self.assertRaises(ui_dialog.UiDialogError):
+            ui_dialog.interpret_result(
+                self._form(),
+                _wire({"state": "lease_closed", "elapsed_s": 1, "values": [{"id": "name", "value": "x"}]}),
+            )
+        # K31 source pins: six states in product-spec, TryFinish deadline rewrite.
+        spec = (Path(__file__).resolve().parents[2] / "product-spec.md").read_text(encoding="utf-8")
+        self.assertIn("`lease_closed`", spec)
+        controller = (
+            Path(__file__).resolve().parents[2]
+            / "addon" / "scripts" / "5_Mission" / "MCPDialogController.c"
+        ).read_text(encoding="utf-8")
+        self.assertIn('if (DeadlineReached(now))', controller)
+        self.assertIn('finalState = "timed_out";', controller)
+        # Mutant: dropping lease_closed from TERMINAL_STATES must fail the POS.
+        mutant = frozenset(s for s in ui_dialog.TERMINAL_STATES if s != "lease_closed")
+        self.assertNotIn("lease_closed", mutant)
+
     def test_unknown_state_and_mismatched_values_and_bad_choice(self) -> None:
         with self.assertRaises(ui_dialog.UiDialogError) as ctx:
             ui_dialog.interpret_result(

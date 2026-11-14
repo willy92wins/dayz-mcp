@@ -29,7 +29,7 @@ LO QUE NO ES EL PRODUCTO, y no es tu trabajo aunque tengas razón:
 ===============================================================================
 
   - Intérprete, exacto y sin alternativa:
-      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+      %USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
   - **Esa venv NO tiene pytest.** La suite es `unittest`. Un comando con `pytest` falla con
     "No module named pytest" y no dice nada sobre tu código.
       cd tools && PYTHONPATH=. "<intérprete>" -m unittest tests.test_dayz_test_tool

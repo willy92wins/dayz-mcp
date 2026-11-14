@@ -90,7 +90,7 @@ Live acceptance must include the simultaneous-launch negative case, not just lau
 
 ### The reviewer's findings on the first design, which the implementation must not reintroduce
 **F01 — P1 — The proposed classifier reintroduces a first-start deadlock.**  
-Anchors: `DESIGN.md:130`, `DESIGN.md:153`; [identity_migration.py:469](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/identity_migration.py:469), [server.py:1613](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/server.py:1613).
+Anchors: `DESIGN.md:130`, `DESIGN.md:153`; [identity_migration.py:469](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/identity_migration.py:469), [server.py:1613](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/server.py:1613).
 
 The current scanner excludes a **valid client-mode invocation**: `_dayz_mcp_tail_is_writer` returns false for `mode == "client"`. I executed the current parser/classifier in memory: a valid unflagged client returned `False`, while a daemon returned `True`. The design’s description of every client being a global writer is therefore stale against this snapshot.
 
@@ -101,7 +101,7 @@ The current scanner excludes a **valid client-mode invocation**: `_dayz_mcp_tail
 ---
 
 **F02 — P1 — A startup election does not enforce one writer per state root. [DATA-CRITICAL]**  
-Anchors: `DESIGN.md:185`; [daemon.py:1528](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/daemon.py:1528), [daemon.py:1626](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/daemon.py:1626).
+Anchors: `DESIGN.md:185`; [daemon.py:1528](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/daemon.py:1528), [daemon.py:1626](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/daemon.py:1626).
 
 The root election ends after startup, before the daemon’s serving lifetime. Healthy-daemon discovery examines the requested port. The installer rejects port 8765 for named instances but does not establish an immutable token-to-port binding across installations.
 
@@ -112,7 +112,7 @@ The root election ends after startup, before the daemon’s serving lifetime. He
 ---
 
 **F03 — P1 — The legacy exception does not prove migration quiescence. [DATA-CRITICAL]**  
-Anchors: `DESIGN.md:124`, `DESIGN.md:146`, `DESIGN.md:181`; [identity_migration.py:765](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/identity_migration.py:765); `_instance_evidence/dayz-mcp-130.patch`.
+Anchors: `DESIGN.md:124`, `DESIGN.md:146`, `DESIGN.md:181`; [identity_migration.py:765](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/identity_migration.py:765); `_instance_evidence/dayz-mcp-130.patch`.
 
 An omitted flag cannot establish default-root ownership for an unknown older or patched installation. Port and directory-name matches provide additional reasons to **block**, not evidence that every other unflagged process is safe to ignore.
 
@@ -125,7 +125,7 @@ A token in argv likewise proves only what the invocation claims. Unknown code mu
 ---
 
 **F04 — P1 — Registration-name changes do not complete the provenance chain.**  
-Anchors: `DESIGN.md:82`, `DESIGN.md:110`, `DESIGN.md:220`; [host_config.py:71](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/host_config.py:71), [host_config.py:233](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/host_config.py:233), [host_config.py:390](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/host_config.py:390), [normal_daemon_policy.py:158](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/normal_daemon_policy.py:158).
+Anchors: `DESIGN.md:82`, `DESIGN.md:110`, `DESIGN.md:220`; [host_config.py:71](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/host_config.py:71), [host_config.py:233](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/host_config.py:233), [host_config.py:390](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/host_config.py:390), [normal_daemon_policy.py:158](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/normal_daemon_policy.py:158).
 
 Missing changes include:
 
@@ -145,7 +145,7 @@ The optional registration environment also conflicts with the existing schema: n
 ---
 
 **F05 — P1 — Foreign-process detection is not an atomic physical-box interlock. [DATA-CRITICAL]**  
-Anchors: `DESIGN.md:159–167`; [process_lifecycle.py:1857](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/process_lifecycle.py:1857), [process_lifecycle.py:3610](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/process_lifecycle.py:3610), [process_lifecycle.py:3645](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/process_lifecycle.py:3645), [steam_prepare_supervisor.py:131](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/steam_prepare_supervisor.py:131).
+Anchors: `DESIGN.md:159–167`; [process_lifecycle.py:1857](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/process_lifecycle.py:1857), [process_lifecycle.py:3610](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/process_lifecycle.py:3610), [process_lifecycle.py:3645](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/process_lifecycle.py:3645), [steam_prepare_supervisor.py:131](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/steam_prepare_supervisor.py:131).
 
 The lifecycle and Steam locks are process-local. The source expressly acknowledges the window between its final port observation and DayZ binding.
 
@@ -160,7 +160,7 @@ The observed refusal against an **already running** foreign game proves only tha
 ---
 
 **F06 — P1 — Existing profile configuration can route the new game to the wrong daemon.**  
-Anchors: `DESIGN.md:165`; [loopback.py:1668](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/loopback.py:1668), [loopback.py:1708](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/loopback.py:1708), [dayz_test_worker.py:256](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/dayz_test_worker.py:256).
+Anchors: `DESIGN.md:165`; [loopback.py:1668](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/loopback.py:1668), [loopback.py:1708](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/loopback.py:1708), [dayz_test_worker.py:256](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/dayz_test_worker.py:256).
 
 Profiles derive from the project’s sealed `dev_root`, not the daemon state root. `prepare` seeds URL/key only when the file is absent; an existing file receives a new launch UUID while retaining its old endpoint and key.
 
@@ -173,7 +173,7 @@ I reproduced that preservation using the actual `prepare` method with an in-memo
 ---
 
 **F07 — P2 — Per-instance journals are unsafe for recovery of shared host configuration files. [DATA-CRITICAL]**  
-Anchors: `DESIGN.md:83`; [host_config.py:1091](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/host_config.py:1091), [host_config.py:1141](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/host_config.py:1141), [host_config.py:1217](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/host_config.py:1217).
+Anchors: `DESIGN.md:83`; [host_config.py:1091](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/host_config.py:1091), [host_config.py:1141](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/host_config.py:1141), [host_config.py:1217](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/host_config.py:1217).
 
 These transactions store and recover **whole Claude/Codex files**, which remain shared between instances.
 
@@ -184,7 +184,7 @@ These transactions store and recover **whole Claude/Codex files**, which remain 
 ---
 
 **F08 — P2 — The documented receipt recovery and rename procedures are incomplete. [DATA-CRITICAL]**  
-Anchors: `DESIGN.md:179`, `DESIGN.md:181`; [identity_migration.py:958](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/identity_migration.py:958), [identity_migration.py:1182](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/identity_migration.py:1182).
+Anchors: `DESIGN.md:179`, `DESIGN.md:181`; [identity_migration.py:958](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/identity_migration.py:958), [identity_migration.py:1182](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/identity_migration.py:1182).
 
 **Failure scenarios:**
 
@@ -196,7 +196,7 @@ Anchors: `DESIGN.md:179`, `DESIGN.md:181`; [identity_migration.py:958](C:/Users/
 ---
 
 **F09 — P2 — The reseal explanation identifies the wrong packaged code and misses game-policy alignment.**  
-Anchors: `DESIGN.md:13`, `DESIGN.md:222`; [build_native_launcher.py:56](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/build_native_launcher.py:56), [build_native_launcher.py:1050](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/build_native_launcher.py:1050), [dayz_test_worker.py:263](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/dayz_test_worker.py:263), [process_lifecycle.py:2680](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/process_lifecycle.py:2680).
+Anchors: `DESIGN.md:13`, `DESIGN.md:222`; [build_native_launcher.py:56](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/build_native_launcher.py:56), [build_native_launcher.py:1050](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/build_native_launcher.py:1050), [dayz_test_worker.py:263](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/dayz_test_worker.py:263), [process_lifecycle.py:2680](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/dayz_mcp/process_lifecycle.py:2680).
 
 `resolve_launcher_policy_path` and `_cache_path` are builder functions, not packaged launcher modules. Conversely, `host_config.py`, `server_cli.py`, `daemon_contract.py`, and `normal_daemon_policy.py` are packaged.
 
@@ -207,7 +207,7 @@ Anchors: `DESIGN.md:13`, `DESIGN.md:222`; [build_native_launcher.py:56](C:/Users
 ---
 
 **F10 — P2 — Full-resolution capture files still collide.**  
-Anchors: `DESIGN.md:32`, `DESIGN.md:220`; [mcp_capture.py:1454](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/mcp_capture.py:1454), [mcp_capture.py:1464](C:/Users/guill/dzmcp_gauntlet/d97de/ws/tools/mcp_capture.py:1464).
+Anchors: `DESIGN.md:32`, `DESIGN.md:220`; [mcp_capture.py:1454](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/mcp_capture.py:1454), [mcp_capture.py:1464](%USERPROFILE%/dzmcp_gauntlet/d97de/ws/tools/mcp_capture.py:1464).
 
 Splitting the frame-state sidecar does not split the default output directory. Filenames contain only a timestamp through milliseconds and saves overwrite that path.
 

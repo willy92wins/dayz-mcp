@@ -2,7 +2,7 @@
 
 **Corrección vinculante: no reintentar un `start` que ya respondió `storage_recovery_required`.** El worker sustituye la respuesta que contiene la pareja por el rechazo del segundo intento. Después, la tool recupera solamente el código desde `last_start_error`, lo que explica el resultado medido.
 
-**Base y alcance.** Árbol exportado `C:\Users\guill\dzmcp_gauntlet\base_v11f`, identificado por el encargo como main `46833d7`; sin `.git` para verificar HEAD. Cambio funcional limitado a `tools/dayz_mcp/dayz_test_worker.py`, más pruebas y lock regenerado. Sin cambios Enforce, PBO, formato de storage ni contrato público.
+**Base y alcance.** Árbol exportado `%USERPROFILE%\dzmcp_gauntlet\base_v11f`, identificado por el encargo como main `46833d7`; sin `.git` para verificar HEAD. Cambio funcional limitado a `tools/dayz_mcp/dayz_test_worker.py`, más pruebas y lock regenerado. Sin cambios Enforce, PBO, formato de storage ni contrato público.
 
 Se comprobó por lectura host que `process_lifecycle.py`, `loopback.py` y `dayz_test_tool.py` coinciden con la copia LIVE tras normalizar CRLF. El bundle LIVE `tools/native-launchers/dayz-test-v1/app.pyz`, SHA256 `8B932082A1664EF7734A499ABD39BA43BB4FF7A03EE9F64FD7D4E83A82D9A43C`, contiene el mismo worker y `app_main.py` que este export.
 
@@ -54,7 +54,7 @@ El primer intento quedó asentado como `EXITED`, sin propietario. El segundo usa
 3967:                         )
 ```
 
-La auditoría real `C:\Users\guill\AppData\Local\DayZ_MCP\audit\events.jsonl:12611` confirma la secuencia. Extractos de campos:
+La auditoría real `%USERPROFILE%\AppData\Local\DayZ_MCP\audit\events.jsonl:12611` confirma la secuencia. Extractos de campos:
 
 ```text
 12611: lifecycle_storage_recovery_required / journal_name_invalid / rejected
@@ -124,7 +124,7 @@ Añadir negativos de pareja ausente, incompleta, razón desconocida y guía inco
 
 **Corrección vinculante: detectar sesiones mediante marcadores técnicos del RPT y aceptar la finalización correlacionada de `[Disconnect]`, conservando la vía legacy inglesa y `[Logout]`.** `logoutTime 0` no autoriza a omitir al jugador ni confirma que haya terminado.
 
-**Base y alcance.** `C:\Users\guill\dzmcp_gauntlet\base_v11f`, export identificado como main `46833d7`. Cambio limitado a los lectores de jugadores/logout de `tools/dayz_mcp/dayz_test_tool.py` y sus pruebas. Sin cambios de protocolo público, Enforce ni cierre de procesos.
+**Base y alcance.** `%USERPROFILE%\dzmcp_gauntlet\base_v11f`, export identificado como main `46833d7`. Cambio limitado a los lectores de jugadores/logout de `tools/dayz_mcp/dayz_test_tool.py` y sus pruebas. Sin cambios de protocolo público, Enforce ni cierre de procesos.
 
 **Evidencia [EXACT].** El detector actual depende del idioma. `tools/dayz_mcp/dayz_test_tool.py:3311`:
 
@@ -161,7 +161,7 @@ Se leyeron los RPT originales desde host. Los identificadores persistentes sigui
 566: 15:39:09.681 [Disconnect]: DisconnectPlayerFinish 15690878
 ```
 
-En 1.29, `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_server\profiles\DayZDiag_x64_2026-10-08_15-41-24.RPT:1338`:
+En 1.29, `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_server\profiles\DayZDiag_x64_2026-10-08_15-41-24.RPT:1338`:
 
 ```text
 1338: 15:42:24.956 Player "Dev" (steamID=<uid> pos=<12842.5, 8573.6, 6.3>) is connected

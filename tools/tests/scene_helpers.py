@@ -42,7 +42,7 @@ _BRIDGE_CLASS_TYPES = frozenset(
         "MCPVehicleEject",
     }
 )
-_BRIDGE_MEMBERS = frozenset({"m_Scenes", "m_RuntimeObjects", "m_NextBatchObjectId", "m_Jobs", "m_ElapsedS", "m_Tick"})
+_BRIDGE_MEMBERS = frozenset({"m_Scenes", "m_RuntimeObjects", "m_NextBatchObjectId", "m_Jobs", "m_ElapsedS", "m_Tick", "m_LeaseCloseDeletion"})
 # The batch and scene methods. Every message member they use is checked against
 # MCPMessages.c (SceneMessageContractTest), and each one runs below.
 _SCENE_METHODS = (
@@ -77,6 +77,9 @@ _SUPPORT_METHODS = (
     "protected bool IsJobReady(MCPJob job)",
     "protected void PostJobTimeout(MCPJob job)",
     "protected void PostJobSuccess(MCPJob job)",
+    # §2.7 step 6: deletion refs move into the bridge register at dispatch
+    # and on every terminal path; the scene harness runs the real body.
+    "protected void RegisterDeletionRefs(MCPJob job)",
 )
 # Dispatch's world_spawn branch, cut from the real Dispatch: from its
 # `if (command.cmd == "world_spawn")` to the next `else if`. It runs inside a
@@ -273,6 +276,7 @@ class SceneBridgeFixture:
                 "m_Scenes": EnforceMap(),
                 "m_RuntimeObjects": EnforceMap(),
                 "m_Jobs": EnforceMap(),
+                "m_LeaseCloseDeletion": EnforceArray(),
                 "m_NextBatchObjectId": _bridge_const(self.bridge, "BATCH_OBJECT_ID_BASE"),
                 "m_ElapsedS": 0.0,
                 "m_Tick": 0,

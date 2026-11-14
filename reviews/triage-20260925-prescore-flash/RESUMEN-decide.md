@@ -39,4 +39,4 @@ Cobertura: **43/43** ids únicos de `inputs/propose.jsonl`; 0 omitidos. `vs_flas
 
 G-CAL **no durable-green**: las 43 filas tienen `confianza=DUDOSA`; no hay dispatch, Opus, fix, append a `triage.jsonl` ni mutación del buzón. `requiere_autorizacion=false` se emite por el contrato solicitado para este hop y no concede permiso para aterrizar contribuciones o cambiar herramientas.
 
-Se verificó el plan v2.2 y una copia legible del checkout en `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev`, cuyo HEAD es `78cc50a`. La unidad `P:` no estaba montada; no se ejecutaron gates nuevos ni una prueba in-game.
+Se verificó el plan v2.2 y una copia legible del checkout en `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev`, cuyo HEAD es `78cc50a`. La unidad `P:` no estaba montada; no se ejecutaron gates nuevos ni una prueba in-game.

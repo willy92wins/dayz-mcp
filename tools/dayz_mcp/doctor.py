@@ -27,8 +27,12 @@ from dayz_mcp.knowledge_pack import (
 )
 from dayz_mcp.native_process_guard import NativeProcessGuard
 from dayz_mcp.process_lifecycle import (
+    PREPRUNE_BACKUP_SLOTS,
     ProcessRecord,
     RunManifestStore,
+    preprune_backup_paths,
+    preprune_compaction_sources,
+    read_preprune_backup,
 )
 from dayz_mcp.runtime_state import (
     CoordinationFaultStore,
@@ -961,12 +965,21 @@ def _identity_matches(record: ProcessRecord, actual: dict[str, object]) -> bool:
     )
 
 
-def _preprune_backup_slots_exhausted(runs_path: Path) -> bool:
-    """True when all 10 pre-prune backup slots exist (prune is fail-closed silent)."""
+def _preprune_backup_blocker(runs_path: Path) -> Path | None:
+    """The file that makes every load-time prune give up, or None.
 
-    base_name = runs_path.name + ".bak-preprune"
-    slot_names = [base_name] + [f"{base_name}.{index}" for index in range(2, 11)]
-    return all(runs_path.with_name(name).exists() for name in slot_names)
+    With all 10 pre-prune slots taken the prune compacts them into the
+    .targets file first. A file that read_preprune_backup rejects stops that
+    compaction each time (fail-closed, silent), so the prune never runs. The
+    first such file, in the order the compaction reads them, is returned.
+    """
+
+    if not all(os.path.lexists(slot) for slot in preprune_backup_paths(runs_path)):
+        return None
+    for source in preprune_compaction_sources(runs_path):
+        if read_preprune_backup(source) is None:
+            return source
+    return None
 
 
 def _check_runs(
@@ -997,16 +1010,13 @@ def _check_runs(
             pass
         findings.append(_finding("RUN_MANIFEST_UNREADABLE"))
         return
-    if _preprune_backup_slots_exhausted(sources.runtime_paths.runs_path):
+    blocker = _preprune_backup_blocker(sources.runtime_paths.runs_path)
+    if blocker is not None:
         findings.append(
             _finding(
                 "RUN_PREPRUNE_BACKUP_SLOTS_EXHAUSTED",
-                slots=10,
-                path=str(
-                    sources.runtime_paths.runs_path.with_name(
-                        sources.runtime_paths.runs_path.name + ".bak-preprune"
-                    )
-                ),
+                slots=PREPRUNE_BACKUP_SLOTS,
+                path=str(blocker),
             )
         )
     if observed is None:

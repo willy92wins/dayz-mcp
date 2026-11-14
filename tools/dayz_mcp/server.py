@@ -112,6 +112,9 @@ from dayz_mcp.server_freshness import (
 )
 from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import (
+    AI_BEHAVIOURS,
+    AI_GROUP_COUNT_MAX,
+    AI_GROUP_WAYPOINTS_MAX,
     ACTOR_EMOTE_END,
     ACTOR_EMOTE_WAIT_MAX_S,
     ACTOR_EMOTE_WAIT_MIN_S,
@@ -121,12 +124,14 @@ from dayz_mcp.loopback import (
     AWAIT_LONG_POLL_MAX_IN_FLIGHT,
     AWAIT_LONG_POLL_MAX_S,
     BOT_START_ACTIONS,
+    BOT_START_INVENTORY_ACTIONS,
     BOT_TTL_MAX_S,
     INPUT_NAME_MAX_CHARS,
     INPUT_TRIGGER_DIK_MAX,
     INPUT_TRIGGER_HOLD_MAX_S,
     INPUT_TRIGGER_PRESS_MAX_TTL_S,
     MAX_CLIENT_DUMP_RUN_IDS,
+    NOTIFY_STRING_MAX_BYTES,
     SCENE_ID_MAX_CHARS,
     SPAWN_BATCH_ITEMS_MAX,
     SPAWN_BATCH_PER_TICK_MAX,
@@ -282,6 +287,7 @@ from dayz_mcp.tool_args import (
     _patch_closed_tool_schema,
     _patch_mode_enum_from_authority,
     _patch_public_argument_alias,
+    _is_wire_number,
     _require_float_list,
     _require_range,
     _require_vec3,
@@ -691,6 +697,10 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "survivor_drive",
     "actor_emote",
     "chat_read",
+    # A mistyped key must not spawn a group on defaults: refused, not dropped.
+    "ai_group_spawn",
+    # A mistyped order key must not order a group on defaults.
+    "ai_group_order",
 )
 
 
@@ -3890,6 +3900,152 @@ def _scan_log_for_pattern(
     return None, scanned, truncated
 
 
+def _steam_auth_login(line: str) -> tuple[str, str | None] | None:
+    """Classify one server RPT login line and extract its dpnid.
+
+    A kick in WaitAuthPlayerLoginState is the server giving up on a Steam
+    ticket; an Entering ...LoginState line is a (new) login attempt. Each
+    is classified by its structure, anchored to the event at the end of
+    the line: a kick is ``(<id>) kicked from server: <code>
+    (...(WaitAuthPlayerLoginState))``, whatever sits between its
+    parentheses, and an Entering line is
+    ``[StateMachine]: Player ... Entering <...LoginState>``, with or
+    without its parenthesised field, so text
+    inside the player name, between ``Player`` and the real field, can
+    turn neither kind into the other. The dpnid is taken from the last
+    structural field anchored to the line's real state: the ``(dpnid
+    <digits> uid ...)`` group right before the final
+    `` Entering <...LoginState>`` at the end of an Entering line, whose
+    uid field may not cross an opening parenthesis, and the
+    ``(<digits>)`` right before `` kicked
+    from server`` on a kick line, so a player name that itself spells
+    that field (``dpnid``, digits, parentheses, even the whole delimiter)
+    cannot supply or shadow the id. A kick whose id is empty or not
+    digits carries no dpnid. Returns ``(kind, dpnid)`` with dpnid
+    None when the line carries no structural dpnid.
+    """
+    kind: str | None = None
+    if re.search(
+        r"\([^()]*\)\s+kicked from server[:]\s*\d+\s*\(.*"
+        r"\(WaitAuthPlayerLoginState\)\)?\s*$",
+        line,
+    ):
+        kind = "kick"
+    elif re.search(
+        r"\[StateMachine\]: Player .+ Entering\s+\S*LoginState\s*$",
+        line,
+    ):
+        kind = "entering"
+    if kind is None:
+        return None
+    if kind == "kick":
+        matches = re.findall(r"\(([^()]*)\)\s+kicked from server", line)
+        candidate = matches[-1] if matches else None
+        return kind, (
+            candidate if candidate and candidate.isdigit() else None
+        )
+    matches = re.findall(
+        r"\(dpnid\s+(\d+)\s+uid(?:\s[^()]*)?\)\s+Entering\s+"
+        r"\S*LoginState\s*$",
+        line,
+    )
+    return kind, (matches[-1] if matches else None)
+
+
+def _steam_auth_state_for_lines(
+    lines: Any,
+    state: dict[str, tuple[str, str | None]],
+    last_kick_line: str | None,
+    unknown_login: bool,
+) -> tuple[dict[str, tuple[str, str | None]], str | None, bool]:
+    """Fold login lines, in file order, into per-dpnid last-line state."""
+    for line in lines:
+        found = _steam_auth_login(line)
+        if found is None:
+            continue
+        kind, dpnid = found
+        if dpnid is None:
+            unknown_login = True
+            continue
+        state[dpnid] = (kind, line if kind == "kick" else None)
+        if kind == "kick":
+            last_kick_line = line
+    return state, last_kick_line, unknown_login
+
+
+def _steam_auth_kick_if_all_kicked(
+    state: dict[str, tuple[str, str | None]],
+    last_kick_line: str | None,
+    unknown_login: bool,
+) -> str | None:
+    """The kick line to abort with, when every seen dpnid was kicked.
+
+    A dpnid whose last login line is an Entering is an attempt in course,
+    a new attempt or a player already inside, and blocks the abort; so
+    does a login line that carried no dpnid, whose attempt is untracked.
+    """
+    if unknown_login or not state or last_kick_line is None:
+        return None
+    if all(kind == "kick" for kind, _line in state.values()):
+        return last_kick_line
+    return None
+
+
+def _scan_log_for_steam_auth(
+    path: str, max_bytes: int
+) -> tuple[dict[str, tuple[str, str | None]], str | None, bool, bool]:
+    """Per-dpnid login state of ``path``, scanning from byte 0.
+
+    Streams in chunks like ``_scan_log_for_pattern``; the last return is
+    True when the read was cut by ``max_bytes`` or the file ends in a
+    final line without its line feed. Raises
+    ``log_tail.LogTailError`` when the file cannot be read.
+    """
+    state: dict[str, tuple[str, str | None]] = {}
+    last_kick_line: str | None = None
+    unknown_login = False
+    truncated = False
+    consumed = 0
+    carry = b""
+    try:
+        with open(path, "rb") as handle:
+            while True:
+                budget = max_bytes - consumed
+                if budget <= 0:
+                    # Measured, not assumed: only truncated if bytes remain.
+                    truncated = bool(handle.read(1))
+                    break
+                chunk = handle.read(min(_LAUNCH_SCAN_CHUNK_BYTES, budget))
+                if not chunk:
+                    break
+                consumed += len(chunk)
+                carry += chunk
+                start = 0
+                while True:
+                    end = carry.find(b"\n", start)
+                    if end == -1:
+                        break
+                    line = carry[start:end].decode("utf-8", errors="replace")
+                    state, last_kick_line, unknown_login = (
+                        _steam_auth_state_for_lines(
+                            [line.rstrip("\r")],
+                            state,
+                            last_kick_line,
+                            unknown_login,
+                        )
+                    )
+                    start = end + 1
+                carry = carry[start:]
+    except OSError as error:
+        raise log_tail.LogTailError("log_unavailable") from error
+    if carry and not truncated:
+        # A final fragment without its line feed is incomplete history:
+        # it may be the Entering that decides another attempt, so it is
+        # reported as a cut read and never classified as a login line.
+        truncated = True
+    return state, last_kick_line, unknown_login, truncated
+
+
 def _wait_for_response(
     *,
     condition: str,
@@ -4841,6 +4997,100 @@ async def execute_wait_for(
     unreadable: set[str] = set()
     scan_truncated = False
     scan_mode = "marker" if marker_state is not None else lookback_from
+    # players_at_least only (fb-20261112-163422-f09e): watch this launch's
+    # server RPT for a kick in WaitAuthPlayerLoginState. Resolving the logs
+    # can fail (no live run, no server profile); then the check stays off
+    # for this call and wait_for behaves exactly as before.
+    steam_auth_paths: list[str] = []
+    steam_auth_markers: dict[str, log_tail.TailMarker] = {}
+    steam_auth_state: dict[str, tuple[str, str | None]] = {}
+    steam_auth_kick_line: str | None = None
+    steam_auth_unknown_login = False
+    steam_auth_force_first_probe = False
+
+    def _disable_steam_auth_check() -> None:
+        """Switch the WaitAuth abort check off for the rest of this call.
+
+        The one reset every failed, cut or marker-less log read of the
+        check goes through: without the complete launch history a later
+        kick alone cannot decide the abort, so the call can then only
+        end by success or timeout, never by the steam-auth abort.
+        """
+        nonlocal steam_auth_paths, steam_auth_markers, steam_auth_state
+        nonlocal steam_auth_kick_line, steam_auth_unknown_login
+        steam_auth_paths = []
+        steam_auth_markers = {}
+        steam_auth_state = {}
+        steam_auth_kick_line = None
+        steam_auth_unknown_login = False
+
+    if condition == "players_at_least":
+        # The resolution is bounded by this call's budget: if it does not
+        # fit, the check stays off for this call and the wait still makes
+        # the players_at_least probe it would have made today.
+        resolved_paths: list[str] = []
+        resolution_remaining = deadline - time.monotonic()
+        if resolution_remaining > 0.0:
+            try:
+                resolved_paths = await asyncio.wait_for(
+                    _wait_for_script_log_paths(runtime, "server"),
+                    timeout=resolution_remaining,
+                )
+            except (ToolError, TimeoutError):
+                resolved_paths = []
+        steam_auth_paths = [
+            path
+            for path in resolved_paths
+            if Path(path).suffix.casefold() == ".rpt"
+        ]
+        if steam_auth_paths:
+            # Markers FIRST, then the whole-file scan, as in the log_matches
+            # launch scan: a line written between the two is read twice,
+            # which costs nothing; the other order could drop it.
+            try:
+                steam_auth_markers = _log_markers_at_end(steam_auth_paths)
+            except log_tail.LogTailError:
+                _disable_steam_auth_check()
+            if steam_auth_paths and any(
+                steam_path not in steam_auth_markers
+                for steam_path in steam_auth_paths
+            ):
+                # _log_markers_at_end silently omits a path whose read
+                # failed; without its marker the launch history of that
+                # RPT cannot be followed, so the check stays off.
+                _disable_steam_auth_check()
+            for steam_path in steam_auth_paths:
+                try:
+                    found_state, found_kick, found_unknown, found_cut = (
+                        _scan_log_for_steam_auth(
+                            steam_path, WAIT_FOR_LAUNCH_SCAN_MAX_BYTES
+                        )
+                    )
+                except log_tail.LogTailError:
+                    # Without the launch history an Entering of another
+                    # dpnid may be missing, so a later kick alone cannot
+                    # decide the abort: the check stays off for this call.
+                    _disable_steam_auth_check()
+                    break
+                if found_cut:
+                    # A cut read may have lost the line that decides an
+                    # attempt: the check stays off for the rest of the call.
+                    _disable_steam_auth_check()
+                    break
+                steam_auth_state.update(found_state)
+                if found_kick is not None:
+                    steam_auth_kick_line = found_kick
+                steam_auth_unknown_login = (
+                    steam_auth_unknown_login or found_unknown
+                )
+        # One deadline check for the whole start -- resolution, markers,
+        # the initial scan and every early exit above (a failed or empty
+        # resolution, an unreadable or cut RPT): if the deadline has
+        # passed by here, the check stays off for this call and the wait
+        # still makes its first players_at_least probe.
+        if time.monotonic() >= deadline:
+            _disable_steam_auth_check()
+            steam_auth_force_first_probe = True
 
     def scan_summary() -> dict[str, Any] | None:
         if condition != "log_matches":
@@ -4935,16 +5185,22 @@ async def execute_wait_for(
                             scanned=scan_summary(),
                         )
 
-    while time.monotonic() < deadline:
+    while time.monotonic() < deadline or (
+        steam_auth_force_first_probe and probes == 0
+    ):
         async with _tool_lock_until(runtime, deadline) as held:
             if not held:
                 last_error = _TOOL_LOCK_BUSY
                 break
             # The while test can pass and this lock still be taken: a free
             # lock does not yield, so the timeout cannot fire first. A probe
-            # must not start once the deadline has passed.
+            # must not start once the deadline has passed, except the one
+            # probe a players_at_least wait whose log resolution overran
+            # its budget still owes (steam_auth_force_first_probe).
             remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
+            if remaining <= 0.0 and not (
+                steam_auth_force_first_probe and probes == 0
+            ):
                 break
             probes += 1
             if condition == "entity_state":
@@ -5048,6 +5304,70 @@ async def execute_wait_for(
                 not_ready_probes=not_ready_probes,
                 last_error=last_error,
             )
+        if condition == "players_at_least" and steam_auth_paths:
+            # Only what is new since the last probe; the wait itself
+            # carries on in silence when an RPT cannot be read, as
+            # before. Read per file here, not via _new_log_lines, so a
+            # read cut by its byte ceiling is seen: it may have lost
+            # the Entering that decides an attempt, so the check stays
+            # off for the rest of this call.
+            steam_auth_cut = False
+            for steam_path in list(steam_auth_paths):
+                try:
+                    steam_result = log_tail.read_since(
+                        steam_path, steam_auth_markers.get(steam_path)
+                    )
+                except log_tail.LogTailError:
+                    # A failed incremental read may have lost the
+                    # Entering that decides an attempt, so a kick
+                    # recorded earlier alone cannot decide the abort.
+                    _disable_steam_auth_check()
+                    break
+                steam_marker: Any = steam_result["marker"]
+                steam_auth_markers[steam_path] = steam_marker
+                try:
+                    steam_pending = (
+                        os.path.getsize(steam_path) > steam_marker.offset
+                    )
+                except OSError:
+                    # A failed re-stat is a failed read of the check.
+                    _disable_steam_auth_check()
+                    break
+                if bool(steam_result["truncated"]) or steam_pending:
+                    # log_tail withholds a trailing partial line, and its
+                    # marker size is taken before its read, so only this
+                    # re-stat sees bytes appended in between: pending
+                    # bytes mean the history is incomplete, like a cut
+                    # read, and may hide the deciding Entering.
+                    steam_auth_cut = True
+                    continue
+                (
+                    steam_auth_state,
+                    steam_auth_kick_line,
+                    steam_auth_unknown_login,
+                ) = _steam_auth_state_for_lines(
+                    steam_result["lines"],
+                    steam_auth_state,
+                    steam_auth_kick_line,
+                    steam_auth_unknown_login,
+                )
+            if steam_auth_cut:
+                _disable_steam_auth_check()
+            elif steam_auth_paths:
+                abort_kick = _steam_auth_kick_if_all_kicked(
+                    steam_auth_state,
+                    steam_auth_kick_line,
+                    steam_auth_unknown_login,
+                )
+                if abort_kick is not None:
+                    now = time.monotonic()
+                    raise ToolError(
+                        f"wait_for aborted waiting for {condition}; "
+                        f"reason=steam_auth_timeout; "
+                        f"kicked={abort_kick}; "
+                        f"elapsed_s={now - started:.3f}; "
+                        f"timeout_s={timeout_s:g}"
+                    )
         # Sleep outside the lock. Do not wrap this loop in tool_lock. The sleep
         # is bounded by the single deadline: a poll interval longer than the
         # remaining budget must not extend the call past timeout_s.
@@ -5309,6 +5629,7 @@ def _failed_active_run_result(
                 "cleanup_degraded": False,
                 "server_alive": None,
                 "client_alive": None,
+                "server_boot": None,
                 **extra,
             },
             box,
@@ -5805,8 +6126,14 @@ def _lease_renewal_contract(ttl_s: float) -> str:
         f"{ttl_s:g} s the lease expires; an adopted run then becomes "
         "ownerless RUNNING_IDLE and the next client verb on that run "
         "returns run_not_owned. session_heartbeat keeps the lease across "
-        "a longer pause. An owner read renews only on a daemon that still "
-        "has the previous behaviour; this process does not."
+        "a longer pause. With a RUNNING run bound to the bridge, "
+        "session_heartbeat stops renewing the lease after 1800 s with no "
+        "command or read under its lease, no human input on that run, and "
+        "the input signal good, without gaps, for those 1800 s; the lease "
+        "then expires like any other, and wait_for(file_matches), which "
+        "renews by heartbeat, does not count either. An owner read "
+        "renews only on a daemon that still has the previous behaviour; "
+        "this process does not."
     )
 
 
@@ -6381,6 +6708,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "active_run_exists without that reason or a queue_offer. A failed "
             "launch whose run_id the run store does not list (dayz_test_stop "
             "would answer run_not_found) returns run_id null. "
+            "server_boot reports what this launch's server compiled per module "
+            "according to its script log, where missing_files > 0 is a hint "
+            "that a module .c file from a mod's PBOs was not loaded; with "
+            "mode=server the call waits for the Mission line up to "
+            "server_wait_s (capped at 60 s), and server_boot is null when the "
+            "mode starts no server or the logs could not be read. "
             "A DayZ server holding a game port counts as an "
             "occupied box even without a run record, and a launch onto a "
             "port held by a process that is not ours is refused "
@@ -6802,6 +7135,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         isinstance(stop_result, dict)
                         and stop_result.get("status") == "failed"
                     ):
+                        # The stop envelope answers this launch, so it carries
+                        # the server_boot key of every dayz_test_run answer.
+                        stop_result.setdefault("server_boot", None)
                         return annotated(stop_result)
                     evicted_run_id = target
                 execute_error, result = await execute(
@@ -7368,7 +7704,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "call. Each item is an object with type, pos and optional flags and "
             "rotation, as in world_spawn (rotation an RF_* int from -2147483648 "
             "to 2147483647), except that pos [x, y, z] takes y null to put the "
-            "item on the ground surface_query reads at (x, z), and that ypr "
+            "item on the first surface the game finds at (x, z) (the game "
+            "places it with ECE_PLACE_ON_SURFACE, which carries ECE_TRACE, "
+            "\"trace under entity when being placed\" from the point of "
+            "creation, so a rock, a wall or another object counts), which "
+            "can be higher than the terrain height surface_query reads at "
+            "(x, z) (clear ground: within 1 cm; on a rock wall: 0.22 to "
+            "0.99 m above), and that ypr "
             "[yaw, pitch, roll] in degrees may replace rotation (not both): the "
             "object is turned to it once created. flags takes world_spawn's "
             "allowlist; an item whose class is a DayZInfected gets ECE_INITAI "
@@ -7742,7 +8084,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "non-empty uid targets that identity. Returns error=no_players "
             "when the server reports zero connected players. timeout_s is "
             "the total budget for the player check plus send; a failed "
-            "player query still attempts the notification."
+            "player query still attempts the notification. title, detail "
+            "and icon each must be at most 1023 UTF-8 bytes (not "
+            "characters); that bound comes from a one-string ScriptRPC "
+            "probe, and the combined size of the three strings in one RPC "
+            "was not measured."
         )
     )
     async def notify_players(
@@ -7769,6 +8115,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("icon", icon, "be a string"))
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a string"))
+        for field, value in (("title", title), ("detail", detail), ("icon", icon)):
+            byte_length = len(value.encode("utf-8", "surrogatepass"))
+            if byte_length > NOTIFY_STRING_MAX_BYTES:
+                raise ToolError(
+                    f"bad_args: {field} must be at most "
+                    f"{NOTIFY_STRING_MAX_BYTES} UTF-8 bytes; it is "
+                    f"{byte_length} UTF-8 bytes (the limit counts UTF-8 "
+                    "bytes, not characters; it comes from a one-string "
+                    "ScriptRPC probe and the combined size of the three "
+                    "strings in one RPC was not measured)"
+                )
         _require_admin_uid(uid)
         args: dict[str, Any] = {
             "show_time": show_time_value,
@@ -8294,12 +8651,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "id. The dummy must be a living PlayerBase with no connected "
             "identity. action is one of the 1.30 debug transitions "
             "(PLAYER_BOT_RANDOMIZE_STANCE, PLAYER_BOT_RANDOMIZE_MOVEMENT, "
-            "PLAYER_BOT_SPAM_USER_ACTIONS, "
-            "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE, "
+            "PLAYER_BOT_SPAM_USER_ACTIONS, PLAYER_BOT_TEST_SPAWN_OPEN, "
+            "PLAYER_BOT_TEST_SPAWN_OPEN_DESTROY, "
+            "PLAYER_BOT_TEST_SPAWN_OPEN_EAT). The four vanilla inventory "
+            "actions (PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE, "
             "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH, "
-            "PLAYER_BOT_TEST_SPAWN_OPEN, PLAYER_BOT_TEST_SPAWN_OPEN_DESTROY, "
-            "PLAYER_BOT_TEST_SPAWN_OPEN_EAT, PLAYER_BOT_TEST_SWAP_G2H, "
-            "PLAYER_BOT_TEST_SWAP_INTERNAL). ttl_s is how long the server keeps "
+            "PLAYER_BOT_TEST_SWAP_G2H, PLAYER_BOT_TEST_SWAP_INTERNAL) are "
+            "omitted and refused with bad_args because they raise vanilla "
+            "script exceptions on a server dummy. "
+            "ttl_s is how long the server keeps "
             "it running, from just above 0 to 30 seconds, default 5. A second "
             "start while one is active is bot_busy. A survivor that "
             "survivor_drive walks is drive_busy and nothing changes: release "
@@ -8308,15 +8668,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "bot_unavailable and nothing is initialized. The answer is bot: "
             "object_id, action, started, ttl_s. started means the bot FSM "
             "accepted the transition, not that the action's effect happened. "
-            "Measured on 2026-11-11 on a SurvivorM_Mirek on the server: all "
-            "ten actions start and bot_stop stops them, but "
-            "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE and "
-            "PLAYER_BOT_TEST_SWAP_INTERNAL fill the server script log with "
-            "vanilla Virtual Machine Exceptions, about 30 a second while they "
-            "run (a NULL player in vanilla's "
-            "DayZPlayerInventory.HandleTakeToDst and HandleForceSwapEntities), "
-            "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH and "
-            "PLAYER_BOT_TEST_SWAP_G2H raise one each, and "
+            "Measured on 2026-11-11 on a SurvivorM_Mirek on the server: the "
+            "six actions start and bot_stop stops them, and "
             "PLAYER_BOT_RANDOMIZE_MOVEMENT only moves forward (inbox 6b52). "
             "Errors: bad_args, bot_unavailable, drive_busy, object_not_found, "
             "not_dummy_player, player_dead, bot_busy, bot_action_rejected."
@@ -8331,6 +8684,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if isinstance(object_id, bool) or not isinstance(object_id, int) or object_id <= 0:
             raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
         if not isinstance(action, str) or action not in BOT_START_ACTIONS:
+            if isinstance(action, str) and action in BOT_START_INVENTORY_ACTIONS:
+                raise ToolError(
+                    _bad_args(
+                        "action",
+                        action,
+                        "not be one of the vanilla bot inventory actions: "
+                        "they raise vanilla script exceptions on a server dummy",
+                    )
+                )
             raise ToolError(
                 _bad_args("action", action, "be one of the debug-bot action names")
             )
@@ -8512,16 +8874,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Impose heading/speed on an infected by classname near pos, through its "
             "AI input controller. heading is DEGREES (0=north), speed 0-5 "
             "(0 idle, 1 walk, 2 run, 3 sprint). Pass mode='release' to hand control "
-            "back to the vanilla AI. Measured on 2026-11-11 (DayZDiag 1.30.164289, "
-            "ZmbM_CitizenASkinny_Blue, player 100 m away): one call moves the "
-            "infected for 1.6 to 8.5 s, then it stops on its own, so re-send the "
-            "drive every second, with pos set to the pos_real of the "
-            "last reply (the infected is looked up by type within 25 m "
-            "of pos), to keep it moving (inbox 7c86). Re-sent every "
+            "back to the vanilla AI. The bridge re-applies the drive on every server "
+            "tick until mode='release', the infected's death or deletion, or the end "
+            "of the lease that sent it; to release it, pos is the infected's current "
+            "position (the infected is looked up by type within 25 m of pos). "
+            "Measured on 2026-11-11 (DayZDiag 1.30.164289, ZmbM_CitizenASkinny_Blue, "
+            "player 100 m away), before the bridge re-applied it: one call moved the "
+            "infected for 1.6 to 8.5 s, then it stopped on its own; re-sent every "
             "second, speed 0.5, 1, 1.5, 2, 2.5, 3 and 4 gave 0.24, 0.45, 0.52, "
             "2.0, 4.9, 5.5 and 5.9 m/s, within 0.5 degrees of heading: 1 and 1.5 "
             "are the same walk, 2 alternates walking and running, and 2.5 and up "
-            "run. With the player 1 m away it barely moves (0.56 m/s)."
+            "run. With the player 1 m away it barely moved (0.56 m/s) (inbox 7c86)."
         )
     )
     async def infected_drive(
@@ -8582,7 +8945,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             f"{SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:g} to "
             f"{SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:g}; speed is walk, jog or "
             "sprint (OverrideMovementSpeed 1, 2, 3, as player_move; not m/s). "
-            "Measured on 2026-11-11 (DayZDiag 1.30.164289, SurvivorM_Mirek): "
+            "The survivor turns its body toward heading with OverrideAimChangeX "
+            "pulses and then walks forward. "
+            "Measured on 2026-11-11 before the turn pulse (DayZDiag "
+            "1.30.164289, SurvivorM_Mirek): "
             "it moves on heading exactly, but the body keeps the heading it "
             "spawned with (telemetry_read orientation stays [0, 0, 0]), so a "
             "drive off that axis walks sideways or backwards: forward 1.53 m/s "
@@ -8592,16 +8958,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "1899 average fps. "
             "A drive needs both; a new drive on a driven survivor replaces its "
             "heading and speed. mode='release', with neither heading nor speed, "
-            "sets the overrides DISABLED and ends the drive; on a survivor that "
-            "is not driven it changes nothing. The end of the lease that sent "
-            "the drive ends it too: the broker queues its release "
-            "(survivor_drive_release), which stops the drive only while that "
-            "call's drive is the one set. A call that times out or is "
-            "cancelled after the server received it still runs, and its "
-            "release is queued only if its result is not stored yet and the "
-            "queue admits the release: once the result is stored, nothing is "
-            "queued and the drive keeps going until a mode='release' or the "
-            "end of the lease. Nothing else ends a drive but the survivor's "
+            "sets the overrides DISABLED and ends the drive; on a survivor that is not driven it "
+            "changes nothing. The end of the lease that sent the drive ends it too: the server's "
+            "lease close stops every drive. A reachable server whose fresh census lacks the close "
+            "gets none and owes nothing (close_not_supported), so its drives keep going; any other "
+            "server the close does not reach leaves it owed (lease_end.unconfirmed). A call that "
+            "times out or is cancelled after the server received it still runs, and its release "
+            "(survivor_drive_release, which stops the drive only while that call's drive is the one "
+            "set) is queued only if its result is not stored yet and the queue admits the release: "
+            "once the result is stored, nothing is queued and the drive keeps going until a "
+            "mode='release' or the end of the lease. Nothing else ends a drive but the survivor's "
             "death, its object_delete and the bridge shutting down: until one "
             "of those the survivor keeps walking. A probe like "
             "infected_drive: if the survivor does not move, that is the "
@@ -8668,6 +9034,237 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["speed_set"] = True
         async with runtime.tool_lock:
             return await runtime.call_bridge("survivor_drive", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Create a group of Expansion AI survivors with "
+            "the optional DayZ_MCP_ExpansionAI adapter. faction and formation "
+            "are Expansion names the server validates against its registered "
+            "types (an unknown one is bad_args naming the field, with the "
+            "allowed names); loadout is a loadout name under "
+            "$profile:ExpansionMod/Loadouts (empty takes the faction's "
+            "default; a trailing .json is stripped). behaviour is HOLD, ONCE, "
+            "LOOP or ROAM: HOLD sets formation state NONE and waypoint "
+            "behaviour HALT with STATIC speed, the others follow the "
+            "waypoints (ROAM also roams Expansion locations). waypoints are "
+            f"up to {AI_GROUP_WAYPOINTS_MAX} [x, y, z] points. The reply's "
+            "ai_group is read back from the server: group_id, created, the "
+            "faction and formation the group reports, behaviour in tool and "
+            "Expansion names, and members with object_id, type, pos, "
+            "loadout_applied and attachment types. A refusal before creation "
+            "carries created false and args_read. At most "
+            f"{AI_GROUP_COUNT_MAX} members per group and 24 living adapter "
+            "members in total (ai_limit_reached). Without the adapter the "
+            "call is expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch|lease_close_not_supported "
+            "and creates nothing. scene_id "
+            f"registers the members under that scene. {SCENE_CAP_LINE}"
+        )
+    )
+    async def ai_group_spawn(
+        faction: StrictStr,
+        count: Any,
+        pos: list[Any],
+        loadout: StrictStr,
+        formation: StrictStr,
+        behaviour: StrictStr,
+        waypoints: list[Any] | None = None,
+        scene_id: StrictStr = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= AI_GROUP_COUNT_MAX:
+            raise ToolError(_bad_args("count", count, f"be an int from 1 to {AI_GROUP_COUNT_MAX}"))
+        if not isinstance(faction, str) or faction == "" or len(faction) > 64:
+            raise ToolError(_bad_args("faction", faction, "be a non-empty string of at most 64 characters"))
+        if not isinstance(formation, str) or formation == "" or len(formation) > 64:
+            raise ToolError(_bad_args("formation", formation, "be a non-empty string of at most 64 characters"))
+        if not isinstance(loadout, str) or len(loadout) > 64 or re.fullmatch(r"[A-Za-z0-9_.-]*", loadout) is None:
+            raise ToolError(_bad_args("loadout", loadout, "use only A-Z a-z 0-9 _ . - and at most 64 characters"))
+        if behaviour not in AI_BEHAVIOURS:
+            raise ToolError(_bad_args("behaviour", behaviour, "be one of HOLD, ONCE, LOOP, ROAM"))
+        if not isinstance(pos, list) or len(pos) != 3 or not all(_is_wire_number(item) for item in pos):
+            raise ToolError(_bad_args("pos", pos, "be [x, y, z] finite numbers"))
+        pos_wire = [float(item) for item in pos]
+        waypoint_items = [] if waypoints is None else waypoints
+        if not isinstance(waypoint_items, list) or len(waypoint_items) > AI_GROUP_WAYPOINTS_MAX:
+            raise ToolError(_bad_args("waypoints", waypoints, f"be a list of at most {AI_GROUP_WAYPOINTS_MAX} [x, y, z] points"))
+        waypoints_wire: list[float] = []
+        for index, point in enumerate(waypoint_items):
+            if not isinstance(point, list) or len(point) != 3 or not all(_is_wire_number(item) for item in point):
+                raise ToolError(_bad_args(f"waypoints[{index}]", point, "be [x, y, z] finite numbers"))
+            waypoints_wire.extend(float(item) for item in point)
+        if scene_id != "" and not is_scene_id(scene_id):
+            raise ToolError(_bad_args("scene_id", scene_id, SCENE_ID_REQUIREMENT))
+        args: dict[str, Any] = {
+            "faction": faction,
+            "count": count,
+            "pos": pos_wire,
+            "loadout": loadout,
+            "formation": formation,
+            "behaviour": behaviour,
+            "waypoints": waypoints_wire,
+            "spawn_token": uuid.uuid4().hex,
+        }
+        if scene_id != "":
+            args["scene_id"] = scene_id
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("ai_group_spawn", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Order one ai_group_spawn group on the server "
+            "through the Expansion AI adapter (ai_group_order). At least one "
+            "of behaviour, waypoints, formation or speed must be given; with "
+            "none the answer is bad_args and nothing is sent. behaviour is "
+            "HOLD, ONCE, LOOP or ROAM (anything else, lower case included, is "
+            "bad_args naming the four); HOLD stops the group on its mark, and "
+            "ROAM roams to Expansion locations, not only to waypoints. "
+            "waypoints is a list of 1 to 32 [x, y, z] finite triples, sent "
+            "as flat triples. formation is a formation name the server "
+            "validates against its Expansion build. speed is walk, jog or "
+            "sprint and travels as 1, 2 or 3 with speed_set. A group that is "
+            "unknown or releasing answers not_found and changes nothing. "
+            "Every field is validated before any is applied, so a bad "
+            "formation changes nothing, not even the other fields of the same "
+            "call. The reply's ai_group is read after the change: group_id, "
+            "behaviour and behaviour_expansion, formation, formation_state, "
+            "waypoint_count, waypoint_index, in_combat and, when in combat, "
+            "combat_may_override (the combat FSM may ignore the order), plus "
+            "one member row per registered member with object_id, alive, "
+            "speed_limit and speed_limit_threat (limits are 0 when the "
+            "entity is gone). Errors: bad_args (from the server with field= "
+            "and, for behaviour and formation, allowed=), "
+            "not_found, expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch|lease_close_not_supported."
+        )
+    )
+    async def ai_group_order(
+        group_id: StrictInt,
+        behaviour: StrictStr | None = None,
+        waypoints: list[Any] | None = None,
+        formation: StrictStr | None = None,
+        speed: StrictStr | None = None,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id <= 0:
+            raise ToolError(_bad_args("group_id", group_id, "be a positive int"))
+        if behaviour is None and waypoints is None and formation is None and speed is None:
+            raise ToolError(
+                "bad_args: ai_group_order requires at least one of "
+                "behaviour, waypoints, formation, speed"
+            )
+        args: dict[str, Any] = {"group_id": group_id}
+        if behaviour is not None:
+            if behaviour not in AI_BEHAVIOURS:
+                raise ToolError(
+                    _bad_args(
+                        "behaviour",
+                        behaviour,
+                        "be one of " + ", ".join(sorted(AI_BEHAVIOURS)),
+                    )
+                )
+            args["behaviour"] = behaviour
+        if waypoints is not None:
+            if not isinstance(waypoints, list) or not 1 <= len(waypoints) <= AI_GROUP_WAYPOINTS_MAX:
+                raise ToolError(
+                    _bad_args(
+                        "waypoints",
+                        waypoints,
+                        f"be a list of 1 to {AI_GROUP_WAYPOINTS_MAX} [x, y, z] triples",
+                    )
+                )
+            flat: list[float] = []
+            for point in waypoints:
+                if (
+                    not isinstance(point, list)
+                    or len(point) != 3
+                    or not all(_is_wire_number(item) for item in point)
+                ):
+                    raise ToolError(
+                        _bad_args(
+                            "waypoints",
+                            waypoints,
+                            "be a list of [x, y, z] finite number triples",
+                        )
+                    )
+                flat.extend(float(item) for item in point)
+            args["waypoints"] = flat
+        if formation is not None:
+            if not isinstance(formation, str) or not 1 <= len(formation) <= 64:
+                raise ToolError(_bad_args("formation", formation, "be a non-empty string of at most 64 characters"))
+            args["formation"] = formation
+        if speed is not None:
+            speed_values = {"walk": 1, "jog": 2, "sprint": 3}
+            if speed not in speed_values:
+                raise ToolError(
+                    _bad_args("speed", speed, "be one of walk, jog, sprint")
+                )
+            args["speed"] = speed_values[speed]
+            args["speed_set"] = True
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "ai_group_order", args, "server", _timeout(timeout_s)
+            )
+
+    @app.tool(
+        description=(
+            "Read the state of one Expansion AI group, or of every group "
+            "registered under a scene. No lease: this is a read-only read of "
+            "the optional Expansion AI adapter, answered by the server in "
+            "its dispatch with no job and no world change. Exactly one of "
+            "group_id and scene_id must be given; both or neither is "
+            "bad_args, as is a scene_id that is not 1 to "
+            f"{SCENE_ID_MAX_CHARS} characters from A-Z a-z 0-9 _ -. Without "
+            "the adapter PBO, or with one whose arg contract differs, the "
+            "broker answers expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch. With "
+            "group_id the reply's ai_group holds group_id, scene_id, "
+            "faction, formation, formation_state, behaviour and "
+            "behaviour_expansion, waypoint_index, waypoint_count, "
+            "current_waypoint, in_combat, alive (members alive now), "
+            "members_total, group_present and members; with scene_id the "
+            "same rows are in ai_groups, in registration order. Each member "
+            "holds object_id, alive, pos, health, fsm_state, fsm_substate, "
+            "threat, fighting, speed_limit, speed_limit_threat, "
+            "emote_playing and emote_pending; a member whose entity is gone "
+            "answers gone true with its last observation (pos, health, "
+            "alive) marked last_observation true, and a member seen dead "
+            "stays alive false. A releasing group that still has anything "
+            "left carries release pending, the pending member ids in "
+            "remaining_ids and group_present; group fields a disappeared "
+            "group can no longer answer stay empty with waypoint_index -1. "
+            "An unknown group_id, or a releasing group already gone, is "
+            "not_found; a group with no living members answers ok with "
+            "alive 0. A scene nothing was registered under answers "
+            "ai_groups []."
+        )
+    )
+    async def ai_group_state(
+        group_id: StrictInt | None = None,
+        scene_id: StrictStr | None = None,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if (group_id is None) == (scene_id is None):
+            raise ToolError(
+                _bad_args(
+                    "group_id/scene_id",
+                    (group_id, scene_id),
+                    "name exactly one of group_id and scene_id",
+                )
+            )
+        args: dict[str, Any] = {}
+        if group_id is not None:
+            if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id <= 0:
+                raise ToolError(_bad_args("group_id", group_id, "be a positive int"))
+            args["group_id"] = int(group_id)
+        else:
+            if not is_scene_id(scene_id):
+                raise ToolError(_bad_args("scene_id", scene_id, SCENE_ID_REQUIREMENT))
+            args["scene_id"] = scene_id
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "ai_group_state", args, "server", _timeout(timeout_s)
+            )
 
     # Spawn into a player's inventory.
     @app.tool(
@@ -8933,7 +9530,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "verdict in the script "
             "log as [DayZ_MCP] weapon_raise server accepted=0|1 raised=0|1 "
             "reason=...; a full input channel is error input_busy and changes "
-            "neither side. The result is the client's read-back after one "
+            "neither side, and before the connection generation is known it "
+            "is error conn_gen_unknown and changes neither side. The result "
+            "is the client's read-back after one "
             "simulation tick: raised is PlayerBase.IsRaised(), input_raised is "
             "HumanInputController.IsWeaponRaised(), plus expires_at and "
             "hold_ttl_s. Nothing stays ENABLED without an expiry."
@@ -9000,7 +9599,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "first), fires from its CommandHandler and prints its verdict in "
             "the script log as [DayZ_MCP] weapon_fire server accepted=0|1 "
             "reason=...; a full input channel is the completed refusal "
-            "input_busy, and then the client does not fire either. "
+            "input_busy, and then the client does not fire either; before "
+            "the connection generation is known it is the completed refusal "
+            "conn_gen_unknown and the client does not fire either. "
             "accepted=true means the client called Fire, not that the server "
             "counted a shot; confirm the shot with "
             "weapon_state. A completed refusal is ok=true, accepted=false, "
@@ -9654,20 +10255,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "ends, the whole query inside one server frame, so a long path "
             "costs that frame. The answer is points (FindPath's own waypoints, "
             "both ends included, each [x, y, z]), length_m (the sum of their 3D "
-            "segment lengths), from_snapped and to_snapped. The path filter is "
-            "meant to take the walking flags (ground, doors, inside buildings) "
-            "and leave out the disabled and swimming ones, but measured on "
-            "2026-11-11 (DayZDiag 1.30.164289) its masks are wrong: the "
-            "PGPolyFlags members are already bit values at run time (WALK=1, "
-            "DISABLED=2, DOOR=4, INSIDE=8, SWIM=16, SWIM_SEA=32) and the "
-            "bridge shifts them again, so the filter includes 137 (WALK, "
-            "INSIDE and bit 128) and excludes 32770 (DISABLED and bit 32768): "
-            "doors are not admitted, and water stays out only because the "
-            "include mask lacks it. FindPath can also return a path that stops "
-            "short of to_snapped and the tool still answers ok (from "
-            "Chernogorsk to Skalisty Island the last point was 6845 m short), "
-            "so compare the last point with to_snapped; and each call leaks "
-            "one PGFilter until the mission ends (inbox d5d6). A terrain "
+            "segment lengths), from_snapped and to_snapped. One shared PGFilter "
+            "for the bridge's lifetime (calls no longer leak one each; at mission "
+            "close the RPT still reports the shared one once, as measured on "
+            "2026-11-12) passes the unshifted PGPolyFlags bit values measured on "
+            "DayZDiag 1.30.164289: include WALK|DOOR|INSIDE = 13 (1|4|8) and "
+            "exclude DISABLED|SWIM|SWIM_SEA = 50 (2|16|32). FindPath can "
+            "return true on a partial path that stops short of to_snapped; a "
+            "path whose last point is more than 0.5 m from to_snapped answers "
+            "no_path. A terrain "
             "without a navmesh (a custom map that ships none) answers "
             "no_navmesh, or no_navmesh_at_from / no_navmesh_at_to, as does an "
             "end with no navmesh the filter admits within snap_radius (open "
@@ -10184,12 +10780,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "during a path ends it aborted, and so do stop, the engine reporting "
             "the path's camera inactive and vanilla's developer free camera "
             "turned on; another camera turned on from outside the bridge ends it "
-            "only if the engine then reports the path's camera inactive. When the "
-            "lease that played it ends, the daemon queues an internal "
-            "camera_path_release for the client, which ends the path aborted when "
-            "the client runs it; nothing confirms that stop, and the daemon can "
-            "miss a play the client ran out of order or one that followed many "
-            "unanswered plays. path_id is an optional label of up to "
+            "only if the engine then reports the path's camera inactive. When the lease that played "
+            "it ends, the daemon sends no camera_path_release: the client's lease close stops the "
+            "path before it restores gameplay and the camera. A reachable client whose fresh census "
+            "lacks the close gets none and owes nothing (close_not_supported), so its path plays "
+            "on; any other client the close does not reach leaves it owed (lease_end.unconfirmed). "
+            "path_id is an optional label of up to "
             f"{camera_path_contract.PATH_ID_MAX_CHARS} characters from A-Z a-z "
             "0-9 _ -; given to state or stop it must name the current or last "
             "path. Read the pose with camera_get. Errors: bad_args (refused "
@@ -10226,8 +10822,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "command_id (camera_path.command_id returned by camera_path_play). "
         "A positive integer is required. matched=true means it stopped that "
         "play and released its camera and gameplay; false changes nothing "
-        "(already finished or another play is current). The daemon also uses "
-        "this bridge command internally when the owning lease ends."
+        "(already finished or another play is current). The daemon sends it internally "
+        "only to abandon a delivered play; at lease end the client's lease close stops the path."
     ))
     async def camera_path_release(
         command_id: StrictInt,
@@ -10334,7 +10930,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "script_camera while camera_set's camera is mounted "
             "(restore_gameplay first) and busy while an exclusive client job "
             "runs, such as camera_set or player_look_at (a ui_dialog, "
-            "weapon_action, input_trigger, player_move or actor_emote job does not count). "
+            "weapon_action, input_trigger, player_move, actor_emote or "
+            "dev_free_camera_set job does not count). "
             "After the settle the view is already set, and no_player answers "
             "when the player is gone by then, script_camera when camera_set's "
             "camera is mounted by then."
@@ -10357,8 +10954,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "the managed client through EmoteManager.CreateEmoteCBFromMenu, the "
             "call the gestures menu makes: the client asks the server, which "
             "checks it and plays it on every peer as it does a person's "
-            "gesture. Only the local player, by this tool's scope: there is no "
-            "object_id. emote "
+            "gesture. Without object_id, only the local player. With "
+            "object_id (an ai_group_spawn member), the same call goes to the "
+            "server as ai_emote with a lease instead (plan 3.5): it is "
+            "refused with bad_target when the id is not a living member of "
+            "an active group, with npc_dormant when the member's simulation "
+            "is disabled or its FSM state is Dormant (refused before any "
+            "emote request is written, so no request stays pending), and "
+            "its states gain cancelled (end with only "
+            "an Expansion request pending) and every answer carries "
+            "emote_pending, true while a request in either emote layer is "
+            "still pending (on an error answer it travels in the message "
+            "text as emote_pending=true or emote_pending=false); a member "
+            "that dies or vanishes mid-wait answers emote_interrupted, and "
+            "a lease close answers the open job as at wait_s (started or "
+            "emote_timed_out), and that answer never proves the close. emote "
             f"is one of {', '.join(ACTOR_EMOTES)}, or {ACTOR_EMOTE_END}, which "
             "asks the server to end the emote that is playing (a looping one, "
             "such as sita), as the client does to end one. wait_s (default 10, "
@@ -10375,7 +10985,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "request, each absent when not reached (end has no "
             "started_after_s). What the client sees after wait_s changes "
             "nothing. A looping emote (greeting, sita, salute...) "
-            "answers started and plays until emote='end'; a one-time one (nod, "
+            "answers started and plays until emote='end'; on a member a "
+            "static pose also ends by itself about wait_s after it starts "
+            "(Expansion's autoCancel); temporary gestures are not cancelled; "
+            "a one-time one (nod, "
             "clap, shrug...) answers finished when it ends within wait_s. "
             "emote_timed_out, "
             "observed=emote_state=timed_out, also at the first client tick "
@@ -10405,15 +11018,25 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "there. Errors: bad_args "
             "(it lists the allowed names), client_not_in_game, no_player, "
             "no_emote_manager, emote_rejected, no_emote_playing, "
-            "emote_timed_out, and bridge_capability_missing from a PBO "
-            "without the verb, which is never handed it."
+            "emote_timed_out, bridge_capability_missing from a PBO "
+            "without the verb, which is never handed it, and, with "
+            "object_id only, bad_target, npc_dormant, emote_interrupted and "
+            "expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch|lease_close_not_supported."
         )
     )
     async def actor_emote(
         emote: StrictStr,
         wait_s: StrictFloat = 10.0,
+        object_id: StrictInt | None = None,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
+        if object_id is not None and (
+            isinstance(object_id, bool)
+            or not isinstance(object_id, int)
+            or object_id <= 0
+        ):
+            raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
         if emote not in ACTOR_EMOTES and emote != ACTOR_EMOTE_END:
             raise ToolError(
                 _bad_args(
@@ -10435,6 +11058,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         # transport waits wait_s plus the slack, as player_move does for
         # hold_s.
         timeout = max(_timeout(timeout_s), wait + ACTOR_EMOTE_WAIT_SLACK_S)
+        if object_id is not None:
+            # With object_id the same catalog and bounds go to the server as
+            # ai_emote, with a lease; the states gain cancelled and every
+            # answer carries emote_pending (plan 3.5/4).
+            args = {"object_id": int(object_id), "emote": emote, "wait_s": wait}
+            async with runtime.tool_lock:
+                result = await runtime.call_bridge(
+                    "ai_emote", args, "server", timeout
+                )
+            state = result.get("emote_state")
+            if state not in ("started", "finished") or emote == ACTOR_EMOTE_END:
+                result.pop("started_after_s", None)
+            if state != "finished":
+                result.pop("finished_after_s", None)
+            return result
         args = {"emote": emote, "wait_s": wait}
         async with runtime.tool_lock:
             result = await runtime.call_bridge("actor_emote", args, "client", timeout)
@@ -10756,7 +11394,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "no_player, player_dead, player_unconscious, player_restrained, "
         "seated, no_input_controller, not_in_move_command, player_move_busy, "
         "busy (a player_look_at still turning the player), input_busy, "
-        "not_held, aborted."
+        "conn_gen_unknown, not_held, aborted."
     ))
     async def player_move(
         speed: StrictStr = "walk",
@@ -11555,6 +12193,45 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
 
     @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Turn DayZDiag's developer free camera on "
+        "(active=true) or off (active=false) as its numpad divide key does: "
+        "the client calls PluginDeveloper.ToggleFreeCameraBackPos, the method "
+        "DayZDiag binds to KC_DIVIDE, only when the free camera is not already "
+        "in the requested state, and that toggle never teleports the player. "
+        "This is not camera_set's free mode: the bridge does not own this "
+        "camera and does not move it (the real keyboard and mouse move it), so "
+        "turning it on ends a playing camera_path_play aborted on a following "
+        "client tick. "
+        "restore_gameplay turns it off; the lease close turns it off as "
+        "restore_gameplay does, both through ReleaseCamera, also when the "
+        "player turned it on with the key. The "
+        "answer is dev_free_camera {active_before, active_after}, read on the "
+        "client right after the toggle or, when that read does not show the "
+        "requested state yet, on the next client tick. Errors: an active that "
+        "is not a bool is refused with bad_args before anything is sent, and "
+        "the daemon refuses it with bad_args too; client_not_in_game (no local "
+        "player); dev_free_camera_unavailable (no PluginDeveloper or no free "
+        "camera, as on a client that is not DayZDiag; the reason is in the "
+        "client log); dev_free_camera_bridge_owned (camera_set's free mode or "
+        "a camera release holds the free camera); busy (an exclusive client "
+        "job, such as a camera_set that is still settling, is running); these "
+        "change nothing. dev_free_camera_not_switched: the next client tick "
+        "still reads the other state. bridge_capability_missing: the client "
+        "bridge bound to the run does not announce dev_free_camera_set, as "
+        "one older than this release does not; nothing is sent."
+    ))
+    async def dev_free_camera_set(
+        active: StrictBool,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(active, bool):
+            raise ToolError(_bad_args("active", active, "be a bool"))
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "dev_free_camera_set", {"active": active}, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
         f"{LEASE_TOOL_LINE} Client modal (acknowledge/confirm/form). "
         "Blocks up to timeout_s for the local player's answer; "
         "cancelled and timed_out are valid."
@@ -11822,6 +12499,24 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "players_* probes are server reads and need no client: while a "
             "client loads they count the players the server has, so a client "
             "that never joins ends the wait at timeout_s with satisfied false. "
+            "players_at_least also watches the current launch's server RPT: "
+            "login lines are grouped by dpnid, and if every dpnid seen has "
+            "a kick in WaitAuthPlayerLoginState as its last login line, it "
+            "aborts with reason=steam_auth_timeout and the last such kick "
+            "line, instead of waiting out timeout_s. That means the server "
+            "kicked the client because Steam did not validate its ticket "
+            "in time; check that the PC's Steam client is signed in (after "
+            "a 'Session Replaced' it does not reconnect by itself). A "
+            "dpnid whose last login line is an Entering -- an attempt in "
+            "course, a later attempt or a player already inside -- blocks "
+            "the abort, as does a login line with no dpnid; a cut, "
+            "unterminated or unreadable RPT read, a start marker missing "
+            "for the RPT, or resolving, marking or initially scanning "
+            "the logs past "
+            "timeout_s, turns the watch off for that call, which still "
+            "makes its players_at_least probe. "
+            "players_at_most and the other conditions do not watch the "
+            "RPT this way. "
             "A probe refused with run_not_owned (the run has no owner) aborts on "
             "the first probe with the daemon's hint: adopt the run first with "
             "session_acquire_wait, whose grant adopts the single ownerless "
@@ -12062,6 +12757,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     _patch_public_argument_alias(app, "nav_path_query", "from_pos", "from")
     _patch_optional_focus_bool_bad_args(app, "camera_set")
     _patch_optional_focus_bool_bad_args(app, "camera_set_focus")
+    _patch_strict_bool_bad_args(app, "dev_free_camera_set", "active")
     tool_pack_mod.apply_tool_pack(app._tool_manager, config.tool_pack)
     _all_tools = app._tool_manager.list_tools
 
@@ -12133,6 +12829,26 @@ def _patch_optional_focus_bool_bad_args(app: FastMCP, tool_name: str) -> None:
                 value = arguments_to_validate.get(field)
                 if isinstance(value, bool) and camera_path_contract.focus_blur(value) is None:
                     raise ToolError(_bad_args(field, value, _OPTIONAL_FOCUS_REQUIREMENT))
+        return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
+
+    object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
+
+
+def _patch_strict_bool_bad_args(app: FastMCP, tool_name: str, field: str) -> None:
+    # beb3: keep StrictBool in the published schema and answer a value of
+    # `field` that is not a bool (1, 0, "true", null) with bad_args before
+    # Pydantic validation, the code the daemon's ingress gives it
+    # (loopback._is_strict_bool). A missing field is left to Pydantic.
+    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
+    if tool is None:
+        raise RuntimeError(f"missing tool {tool_name}")
+    original = tool.fn_metadata.call_fn_with_arg_validation
+
+    async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
+        if isinstance(arguments_to_validate, dict) and field in arguments_to_validate:
+            value = arguments_to_validate[field]
+            if not isinstance(value, bool):
+                raise ToolError(_bad_args(field, value, "be a bool"))
         return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
 
     object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)

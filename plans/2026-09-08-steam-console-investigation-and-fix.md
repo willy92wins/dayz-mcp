@@ -8,7 +8,7 @@ Hay un defecto reproducible en la creación de la consola del daemon: los flags 
 
 El fallo de Steam se ha reproducido antes de cargar scripts, con registro válido y también sin LFSecure V2. No hay evidencia suficiente para atribuirlo a PATH, al producto V2 o a cerrar la consola. No se ha cerrado el host Windows Terminal compartido para provocar una prueba destructiva sobre pestañas ajenas.
 
-Evidencia durable: [dossier](../evidence/20260908-steam-console-lifecycle/). Fuente Python congelada bajo `source/dayz_mcp`; las sondas, sus salidas y el manifiesto están en el mismo dossier. Investigación inicial en [memoria](C:/Users/guill/ObsidianVault/AI/10_Projects/DayZ_MCP/research/2026-09-08-steam-console-lifecycle-codex.md).
+Evidencia durable: [dossier](../evidence/20260908-steam-console-lifecycle/). Fuente Python congelada bajo `source/dayz_mcp`; las sondas, sus salidas y el manifiesto están en el mismo dossier. Investigación inicial en [memoria](%USERPROFILE%/ObsidianVault/AI/10_Projects/DayZ_MCP/research/2026-09-08-steam-console-lifecycle-codex.md).
 
 ## Descubrimiento antes de implementación
 

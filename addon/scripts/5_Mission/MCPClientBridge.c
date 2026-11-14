@@ -486,14 +486,22 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// outside is refused, never clamped.
 	protected const float ACTOR_EMOTE_WAIT_MIN_S = 0.5;
 	protected const float ACTOR_EMOTE_WAIT_MAX_S = 30.0;
-	//! Capability census announced on every poll as `caps=`: the exact set of
-	//! command.cmd branches Dispatch() handles before falling to unknown_command,
-	//! sorted bytewise and comma-separated. tools/tests/test_bridge_client_capabilities.py
-	//! cross-checks it against the dispatcher chain; the daemon compares it with
-	//! the tools it registers. Written as short literals joined with +, split at
-	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
+	//! Capability census of Dispatch(): the exact set of command.cmd branches
+	//! Dispatch() handles before falling to unknown_command, sorted bytewise
+	//! and comma-separated. tools/tests/test_bridge_client_capabilities.py
+	//! cross-checks it against the dispatcher chain. It is no longer sent on
+	//! the poll: the poll sends the mask constant declared below instead. Written as
+	//! short literals joined with +, split at commas
+	//! (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_pause,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire," + "weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,dev_free_camera_set,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,lease_close_client,player_look_at,player_look_at_release,player_move," + "player_respawn,player_trace,player_view_set,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_pause,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release," + "vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	//! Compact announcement sent on every poll as cm=<epoch>.<hex>: the census
+	//! above as a bitmask. Bit order is bridge_readiness.CLIENT_CAPABILITY_BITS
+	//! in tools/dayz_mcp/bridge_readiness.py (append only, never reorder);
+	//! bit i set means the census name at index i is dispatched. Precomputed:
+	//! no runtime code computes it, and the tests tie it bit for bit to
+	//! CLIENT_POLL_CAPS and to Dispatch().
+	protected const string CLIENT_POLL_CAPS_MASK = "1.3fffffffffff";
 	//! Client contract hash, announced on every poll as `ach=`: 16-hex sha256
 	//! prefix of CLIENT_CONTRACT in tools/dayz_mcp/bridge_readiness.py, the five
 	//! OverrideDOF fields of camera_set_focus and chat_read's visibility fields.
@@ -510,7 +518,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected string m_Key;
 	protected string m_PeerInstance;
 	protected string m_PollVersion;
-	// Pre-encoded once from CLIENT_POLL_CAPS; key and inst are not cached.
+	// Set once from CLIENT_POLL_CAPS_MASK (sent as is, no encoding); key and inst are not cached.
 	protected string m_PollCapabilities;
 	protected float m_PollHz;
 	protected float m_Accum;
@@ -578,6 +586,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected ref array<ref MCPClientResultCallback> m_ResultCallbackPool;
 	protected ref array<ref MCPCommand> m_Pending;
 	protected ref MCPJobRunner m_JobRunner;
+	// §4 #266: actor_emote started an emote that may outlive its job; the
+	// lease close stops and censuses only an emote this flag marks.
+	protected bool m_MCPEmoteStarted;
 	protected ref array<Object> m_ReadyObjects;
 	protected ref array<CargoBase> m_ReadyProxyCargos;
 	protected ref MCPDialogController m_Dialog;
@@ -590,6 +601,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool m_StartPauseDone;
 	protected float m_StartPauseFromS;
 	protected const float START_PAUSE_WINDOW_S = 60.0;
+	//! §2.6 C14 (PX3 a, PX6 a): ui_pause left a queued pause (vanilla
+	//! m_PauseQueued) that was not queued before its call, or opened this
+	//! pause menu (MENU_INGAME). Not ref: the UI manager owns the menu. The
+	//! mark is the instance, so a pause menu the person opens after MCP's
+	//! closed is another menu, not MCP's. MaintainMCPPause keeps each mark as
+	//! long as the pause it names; the lease close cancels the queued one
+	//! and closes MCP's menu (StopLeaseClosePause), and its census counts both.
+	protected bool m_MCPPauseQueued;
+	protected UIScriptedMenu m_MCPPauseMenu;
 	//! Hot-UI preview root. Not ref: the workspace owns the widget tree; this
 	//! pointer only exists so the next reload can Unlink the previous one.
 	protected Widget m_UiPreviewRoot;
@@ -605,7 +625,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_TickPollSent = 0;
 		m_TickPollCallback = 0;
 		m_PollVersion = "";
-		m_PollCapabilities = EncodeQueryValue(CLIENT_POLL_CAPS);
+		m_PollCapabilities = CLIENT_POLL_CAPS_MASK;
 		m_PeerInstance = "";
 		m_PollInFlight = false;
 		m_PollInFlightS = 0.0;
@@ -643,6 +663,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_DialogHostTried = false;
 		m_StartPauseDone = false;
 		m_StartPauseFromS = -1.0;
+		m_MCPPauseQueued = false;
+		m_MCPPauseMenu = null;
 	}
 
 	void ~MCPClientBridge()
@@ -731,6 +753,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// camera_path_play moves its camera here on every frame, never from a
 		// job, by this frame's timeslice. Returns at once while no path plays.
 		TickCameraPath(timeslice);
+		// §4 #266: the MCP-started mark falls as soon as its emote stops,
+		// even after its job ended. Before the job runner.
+		MaintainMCPEmoteStarted();
+		// §2.6 C14: the ui_pause marks fall as soon as their pause does,
+		// even after the job answered. Before the job runner.
+		MaintainMCPPause();
 
 		if (m_JobRunner)
 		{
@@ -966,7 +994,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
 		}
-		request = request + "&caps=" + m_PollCapabilities;
+		request = request + "&cm=" + m_PollCapabilities;
 		request = request + "&ach=" + CLIENT_CONTRACT_HASH;
 		request = request + LoadCounterQuery();
 		// 800 ms is the daemon poll cap. The script cannot change the 10 s read timeout.
@@ -1316,6 +1344,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		int triggerJobs;
 		int moveJobs;
 		int emoteJobs;
+		int freeCameraJobs;
 		if (!m_JobRunner)
 		{
 			return false;
@@ -1323,8 +1352,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		// weapon_action is a one-tick read-back. It must not refuse camera_set.
 		// Nor does an input_trigger click or hold, which waits on a key release,
-		// a player_move hold, which waits on its release, or an actor_emote,
-		// which only watches m_bEmoteIsPlaying.
+		// a player_move hold, which waits on its release, an actor_emote,
+		// which only watches m_bEmoteIsPlaying, or a dev_free_camera_set read,
+		// which reads the free camera on the next tick.
 		blocking = m_JobRunner.CountExcluding("ui_dialog");
 		weaponJobs = m_JobRunner.CountOfKind("weapon_action");
 		triggerJobs = m_JobRunner.CountOfKind("input_trigger");
@@ -1333,6 +1363,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		blocking = blocking - moveJobs;
 		emoteJobs = m_JobRunner.CountOfKind("actor_emote");
 		blocking = blocking - emoteJobs;
+		freeCameraJobs = m_JobRunner.CountOfKind("dev_free_camera_set");
+		blocking = blocking - freeCameraJobs;
 		return blocking > 0;
 	}
 
@@ -1394,6 +1426,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.tick_dispatch = m_Tick;
 		bool postNow = true;
 
+		if (cmd == "dev_free_camera_set" && !command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			Log("dev_free_camera_set requested=-1 before=-1 after=-1 ok=0 error=bad_args");
+			PostResult(result);
+			return;
+		}
+
 		// Fail-closed readiness gate: every client command touches the
 		// local player/camera/vehicle, which the engine has not built during
 		// preload. A stale command delivered before the client is in-game crashed
@@ -1406,11 +1447,19 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			{
 				Log("ui_pause before=-1 after=-1 ok=0 error=client_not_in_game");
 			}
+			if (cmd == "dev_free_camera_set")
+			{
+				Log("dev_free_camera_set requested=-1 before=-1 after=-1 ok=0 error=client_not_in_game");
+			}
 			PostResult(result);
 			return;
 		}
 
-		if (command.cmd == "camera_set")
+		if (command.cmd == "lease_close_client")
+		{
+			postNow = DispatchLeaseCloseClient(command, result);
+		}
+		else if (command.cmd == "camera_set")
 		{
 			postNow = DispatchCameraSet(command, result);
 		}
@@ -1589,6 +1638,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "ui_pause")
 		{
 			postNow = DispatchUiPause(command, result);
+		}
+		else if (command.cmd == "dev_free_camera_set")
+		{
+			postNow = DispatchDevFreeCameraSet(command, result);
 		}
 		else if (command.cmd == "ui_dialog")
 		{
@@ -3573,6 +3626,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// (MCP_PlayerMove.c). Sent first: input_busy leaves both sides as they were.
 		request.move_id = MCPPlayerMoveControl.NextMoveId();
 		serverRequest = MCPPlayerMoveControl.SendStart(request);
+		if (serverRequest == "conn_gen_unknown")
+		{
+			result.ok = false;
+			result.error = "conn_gen_unknown";
+			return true;
+		}
 		if (serverRequest == "input_busy")
 		{
 			result.ok = false;
@@ -4962,7 +5021,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			}
 
 			MCPHoldControl.Begin(amc, player, action, command.args.hold_id, command.args.hold_timeout_s);
+			MCPHoldControl.ArmStart(amc, action);
 			amc.PerformActionStart(action, actionTarget, heldItem, NULL);
+			MCPHoldControl.DisarmStart();
 			if (!MCPHoldControl.HasData() && !MCPHoldControl.Ready())
 			{
 				MCPHoldControl.NoteSetupFailed();
@@ -4986,12 +5047,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 
+		MCPHoldControl.ArmStart(amc, action);
 		MCPActionUseWatch.Begin(action, actionTarget);
 		amc.PerformActionStart(action, actionTarget, heldItem, NULL);
 		int starts = MCPActionUseWatch.End();
 		// 204e: whether the local player is placing once the call ran, which
 		// after ActionTogglePlaceObject says which way the toggle went.
 		result.placing = player.IsPlacingLocal();
+		MCPHoldControl.DisarmStart();
 		// PerformActionStart is void. ActionStart can fail in SetupAction
 		// (typically inventory reservation) and return without ctx.Send
 		// (actionmanagerclient.c:638-643). GetRunningAction() is null then.
@@ -5764,6 +5827,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 
+		if (job.kind == "lease_close")
+		{
+			return LeaseCloseCensusSettled(BuildLeaseCloseCensus(job.args));
+		}
+
 		if (job.kind == "camera_set")
 		{
 			return ProcessCameraSetJob(job);
@@ -5814,6 +5882,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (job.kind == "ui_pause")
 		{
 			return ProcessUiPauseJob(job);
+		}
+		else if (job.kind == "dev_free_camera_set")
+		{
+			return ProcessDevFreeCameraJob(job);
 		}
 		else if (job.kind == "actor_emote")
 		{
@@ -6816,6 +6888,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
+		if (job.kind == "lease_close")
+		{
+			PostLeaseCloseJob(job, false);
+			return;
+		}
+
 		if (job.kind == "camera_set")
 		{
 			MCPResult result = new MCPResult();
@@ -6941,6 +7019,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			PostUiPauseJob(job);
 		}
 
+		if (job.kind == "dev_free_camera_set")
+		{
+			PostDevFreeCameraJob(job);
+		}
+
 		// ProcessActorEmoteJob is done only when it saw the end.
 		if (job.kind == "actor_emote")
 		{
@@ -6985,6 +7068,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
+		if (job && job.kind == "dev_free_camera_set")
+		{
+			PostDevFreeCameraJob(job);
+			return;
+		}
+
 		if (job && job.kind == "ui_dialog")
 		{
 			if (m_Dialog && m_Dialog.IsOpen())
@@ -7015,6 +7104,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		if (!job)
 		{
+			return;
+		}
+
+		if (job.kind == "lease_close")
+		{
+			PostLeaseCloseJob(job, true);
 			return;
 		}
 
@@ -7073,6 +7168,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job.kind == "ui_pause")
 		{
 			PostUiPauseJob(job);
+			return;
+		}
+
+		if (job.kind == "dev_free_camera_set")
+		{
+			PostDevFreeCameraJob(job);
 			return;
 		}
 
@@ -8090,6 +8191,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				return true;
 			}
 			emotes.CreateEmoteCBFromMenu(emoteId);
+			m_MCPEmoteStarted = true;
 		}
 		job = new MCPJob();
 		job.id = command.id;
@@ -8354,6 +8456,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				return false;
 			}
 			job.emote_finished_s = nowS;
+			m_MCPEmoteStarted = false;
 			return true;
 		}
 		if (playing)
@@ -8370,6 +8473,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 		job.emote_finished_s = nowS;
+		m_MCPEmoteStarted = false;
 		return true;
 	}
 
@@ -8447,6 +8551,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// MissionGameplay.OnUpdate runs :308-311 ahead of bridge.OnTick), answering
 	// ok=true if that next update opened MENU_INGAME or pause_not_opened if
 	// loading/respawning kept m_PauseQueued deferred.
+	// Queue cleanup and start-pause window (fb-20261112-003154-59da):
+	// m_MCPPauseQueued records whether this call newly set m_PauseQueued (leaving
+	// a start-up queue from missiongameplay.c:294-299 untouched); any non-ok
+	// completion (sync or PostUiPauseJob) cancels an MCP-queued pause still on
+	// MissionGameplay and logs "ui_pause queue cancelled id=<id>", while any ok
+	// completion only sets m_StartPauseDone so ContinueStartPauseMenu in OnTick
+	// (:730 vs :750) never closes the menu ui_pause opened: the ok branches
+	// leave m_MCPPauseQueued to MaintainMCPPause, which hands it to
+	// m_MCPPauseMenu once vanilla drains the queue (overlapping calls share
+	// the mark, so clearing it here could drop another call's queue).
 	protected bool DispatchUiPause(MCPCommand command, MCPResult result)
 	{
 		MissionGameplay mission;
@@ -8458,7 +8572,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPJob job;
 		int beforeId;
 		int afterId;
+		bool queuedBefore;
 		bool deferred;
+		bool pausedBefore;
 		if (!GetGame() || !GetGame().GetPlayer() || GetGame().IsDedicatedServer())
 		{
 			result.ok = false;
@@ -8484,6 +8600,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				beforeId = menuBefore.GetID();
 			}
 		}
+		queuedBefore = mission.MCP_IsPauseQueued();
+		pausedBefore = mission.IsPaused();
 		mission.Pause();
 		afterId = -1;
 		ui = GetGame().GetUIManager();
@@ -8494,6 +8612,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			{
 				afterId = menuAfter.GetID();
 			}
+		}
+		// §2.6 C14: mark only what this call left for the lease close. A
+		// pause already queued, or a menu already open, is someone else's.
+		if (!queuedBefore && mission.MCP_IsPauseQueued())
+		{
+			m_MCPPauseQueued = true;
+		}
+		if (!pausedBefore && afterId == MENU_INGAME)
+		{
+			m_MCPPauseMenu = menuAfter;
 		}
 		reply = new MCPUiPause();
 		reply.menu_id_before = beforeId;
@@ -8529,6 +8657,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (afterId == MENU_INGAME)
 		{
 			result.ok = true;
+			m_StartPauseDone = true;
 			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=1");
 		}
 		else
@@ -8536,6 +8665,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.ok = false;
 			result.error = "pause_not_opened";
 			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=0 error=pause_not_opened");
+			if (m_MCPPauseQueued && mission.MCP_IsPauseQueued())
+			{
+				mission.MCP_CancelQueuedPause();
+				Log("ui_pause queue cancelled id=" + command.id);
+			}
+			m_MCPPauseQueued = false;
 		}
 		return true;
 	}
@@ -8553,6 +8688,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		MCPResult result;
 		MCPUiPause reply;
+		MissionGameplay mission;
 		UIManager ui;
 		UIScriptedMenu menuAfter;
 		int beforeId;
@@ -8574,6 +8710,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		afterId = -1;
 		if (GetGame())
 		{
+			mission = MissionGameplay.Cast(GetGame().GetMission());
 			ui = GetGame().GetUIManager();
 			if (ui)
 			{
@@ -8597,10 +8734,17 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.ok = false;
 			result.error = job.error;
 			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=0 error=" + job.error);
+			if (m_MCPPauseQueued && mission && mission.MCP_IsPauseQueued())
+			{
+				mission.MCP_CancelQueuedPause();
+				Log("ui_pause queue cancelled id=" + job.id);
+			}
+			m_MCPPauseQueued = false;
 		}
 		else if (afterId == MENU_INGAME)
 		{
 			result.ok = true;
+			m_StartPauseDone = true;
 			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=1");
 		}
 		else
@@ -8608,8 +8752,221 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.ok = false;
 			result.error = "pause_not_opened";
 			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=0 error=pause_not_opened");
+			if (m_MCPPauseQueued && mission && mission.MCP_IsPauseQueued())
+			{
+				mission.MCP_CancelQueuedPause();
+				Log("ui_pause queue cancelled id=" + job.id);
+			}
+			m_MCPPauseQueued = false;
 		}
 		PostResult(result);
+	}
+
+	// dev_free_camera_set (fb-20261112-142535-beb3): DayZDiag's developer free
+	// camera on or off without a keyboard, through the method its KC_DIVIDE key
+	// calls. Vanilla 1.30 reading (P:/scripts/4_world/plugins):
+	// - PluginKeyBinding binds KC_DIVIDE to PluginDeveloper.ToggleFreeCameraBackPos
+	//   under DIAG_DEVELOPER (pluginbase/pluginkeybinding.c:60-66, :63) and calls it
+	//   by name only while the physical key reads pressed (:132-185, :380-383).
+	// - ToggleFreeCameraBackPos is DeveloperFreeCamera.FreeCameraToggle with
+	//   teleport_player false (pluginbase/plugindeveloper.c:49-53): off when
+	//   FreeDebugCamera.GetInstance() is active, on otherwise
+	//   (pluginbase/plugindeveloper/developerfreecamera.c:6-16, :23-26). On is
+	//   SetActive(true) (:36-50); off is SetActive(false) with no teleport
+	//   (:52-74). Both also refresh the debug crosshair, under DEVELOPER only
+	//   (:42-44, :63-67), which a DayZDiag build does not define.
+	// - PluginDeveloper.GetInstance() is GetPlugin(PluginDeveloper)
+	//   (plugindeveloper.c:26-29). The class has no define, but PluginManager.Init
+	//   registers it with RegisterPluginDiag (pluginmanager.c:66), which registers
+	//   under DIAG_DEVELOPER only (:249-256), and GetPlugin answers null for a type
+	//   that is not registered (:327-348). The code that names it is therefore
+	//   under DIAG_DEVELOPER, as MCP_DiagPlugins.c is, and a build without that
+	//   define answers dev_free_camera_unavailable.
+	// - FreeDebugCamera.GetInstance() is a native singleton
+	//   (P:/scripts/3_game/entities/camera.c:84-90) that FreeCameraToggle reads
+	//   with no null check (developerfreecamera.c:25).
+	// The checks run in order and the first that fails answers without changing
+	// anything. The bridge does not own this camera: the camera path,
+	// m_ActiveCam, m_ActiveCamOwned, the player simulation, the HUD and the DOF
+	// are left as they are, as the key leaves them, so a playing camera_path_play
+	// is aborted by TickCameraPath's own check. When the read right after the
+	// toggle does not show the requested state yet, a one-tick read job
+	// (ProcessDevFreeCameraJob, not exclusive) reads it on the next OnTick.
+	protected bool DispatchDevFreeCameraSet(MCPCommand command, MCPResult result)
+	{
+		FreeDebugCamera freeCam;
+		MCPDevFreeCamera reply;
+		MCPJob job;
+		string unavailable;
+		string requestedBit;
+		bool requested;
+		bool before;
+		bool after;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			Log("dev_free_camera_set requested=-1 before=-1 after=-1 ok=0 error=bad_args");
+			return true;
+		}
+		requested = command.args.active;
+		requestedBit = DevFreeCameraBit(requested);
+		if (!GetGame() || !GetGame().GetPlayer() || GetGame().IsDedicatedServer())
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			Log("dev_free_camera_set requested=" + requestedBit + " before=-1 after=-1 ok=0 error=client_not_in_game");
+			return true;
+		}
+		unavailable = "no_diag_developer";
+#ifdef DIAG_DEVELOPER
+		unavailable = "";
+		if (!PluginDeveloper.GetInstance())
+		{
+			unavailable = "plugin_developer_missing";
+		}
+#endif
+		freeCam = FreeDebugCamera.GetInstance();
+		if (unavailable == "" && !freeCam)
+		{
+			unavailable = "free_debug_camera_missing";
+		}
+		if (unavailable != "")
+		{
+			result.ok = false;
+			result.error = "dev_free_camera_unavailable";
+			Log("dev_free_camera_set requested=" + requestedBit + " before=-1 after=-1 ok=0 error=dev_free_camera_unavailable reason=" + unavailable);
+			return true;
+		}
+		// The bridge holds the free camera after camera_set free (ApplyFreeCamera)
+		// and while a release hands off through it (BeginCameraHandoff).
+		if (m_CameraHandoffPending || m_ActiveCam == freeCam)
+		{
+			result.ok = false;
+			result.error = "dev_free_camera_bridge_owned";
+			Log("dev_free_camera_set requested=" + requestedBit + " before=-1 after=-1 ok=0 error=dev_free_camera_bridge_owned");
+			return true;
+		}
+		// A playing camera_path_play is not a job, so it does not refuse this call.
+		if (HasExclusiveJob())
+		{
+			result.ok = false;
+			result.error = "busy";
+			Log("dev_free_camera_set requested=" + requestedBit + " before=-1 after=-1 ok=0 error=busy");
+			return true;
+		}
+		before = freeCam.IsActive();
+#ifdef DIAG_DEVELOPER
+		if (before != requested)
+		{
+			PluginDeveloper.GetInstance().ToggleFreeCameraBackPos();
+		}
+#endif
+		after = freeCam.IsActive();
+		reply = new MCPDevFreeCamera();
+		reply.active_before = before;
+		reply.active_after = after;
+		if (after != requested)
+		{
+			job = new MCPJob();
+			job.id = command.id;
+			job.kind = "dev_free_camera_set";
+			job.args = command.args;
+			job.dev_free_camera = reply;
+			job.sample_start_s = m_JobRunner.GetElapsedS();
+			job.deadline_s = job.sample_start_s + CAMERA_JOB_TIMEOUT_S;
+			job.tick_poll_sent = result.tick_poll_sent;
+			job.tick_poll_callback = result.tick_poll_callback;
+			job.tick_dispatch = result.tick_dispatch;
+			m_JobRunner.AddJob(job);
+			return false;
+		}
+		result.dev_free_camera = reply;
+		result.ok = true;
+		Log("dev_free_camera_set requested=" + requestedBit + " before=" + DevFreeCameraBit(before) + " after=" + DevFreeCameraBit(after) + " ok=1");
+		return true;
+	}
+
+	// One tick, as ProcessUiPauseJob: done on the first job-runner tick after
+	// the dispatch. It only waits; PostDevFreeCameraJob reads.
+	protected bool ProcessDevFreeCameraJob(MCPJob job)
+	{
+		if (!job)
+		{
+			return false;
+		}
+		return m_JobRunner.GetElapsedS() > job.sample_start_s;
+	}
+
+	protected void PostDevFreeCameraJob(MCPJob job)
+	{
+		FreeDebugCamera freeCam;
+		MCPResult result;
+		MCPDevFreeCamera reply;
+		string requestedBit;
+		string beforeBit;
+		string afterBit;
+		bool requested;
+		bool after;
+		if (!job)
+		{
+			return;
+		}
+		reply = job.dev_free_camera;
+		if (!reply)
+		{
+			reply = new MCPDevFreeCamera();
+		}
+		requested = false;
+		if (job.args)
+		{
+			requested = job.args.active;
+		}
+		after = reply.active_after;
+		freeCam = FreeDebugCamera.GetInstance();
+		if (freeCam)
+		{
+			after = freeCam.IsActive();
+		}
+		reply.active_after = after;
+		result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		result.dev_free_camera = reply;
+		requestedBit = DevFreeCameraBit(requested);
+		beforeBit = DevFreeCameraBit(reply.active_before);
+		afterBit = DevFreeCameraBit(after);
+		if (job.error != "")
+		{
+			result.ok = false;
+			result.error = job.error;
+			Log("dev_free_camera_set requested=" + requestedBit + " before=" + beforeBit + " after=" + afterBit + " ok=0 error=" + job.error);
+		}
+		else if (after == requested)
+		{
+			result.ok = true;
+			Log("dev_free_camera_set requested=" + requestedBit + " before=" + beforeBit + " after=" + afterBit + " ok=1");
+		}
+		else
+		{
+			result.ok = false;
+			result.error = "dev_free_camera_not_switched";
+			Log("dev_free_camera_set requested=" + requestedBit + " before=" + beforeBit + " after=" + afterBit + " ok=0 error=dev_free_camera_not_switched");
+		}
+		PostResult(result);
+	}
+
+	// "1" or "0" for a dev_free_camera_set log line: no bool is concatenated into
+	// a string in this file (ui_focus converts its own the same way).
+	protected string DevFreeCameraBit(bool value)
+	{
+		if (value)
+		{
+			return "1";
+		}
+		return "0";
 	}
 
 	// fb-20260822-191204-46b3: the only bridge URL is "http://127.0.0.1:<port>/",
@@ -9258,6 +9615,484 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 			i = i + 1;
 		}
+	}
+
+	// Lease close census (§2.6): state, not jobs. A controller still active
+	// after its stop step is residue naming that controller.
+	protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)
+	{
+		MCPLeaseCloseEntry entry = new MCPLeaseCloseEntry();
+		entry.name = name;
+		if (active)
+		{
+			entry.state = "residue";
+			entry.reason = reason;
+		}
+		else
+		{
+			entry.state = "clean";
+			entry.reason = "";
+		}
+
+		census.entries.Insert(entry);
+	}
+
+	protected void AddCloseDebt(MCPLeaseCloseCensus census, string name, bool active, string reason)
+	{
+		if (!active)
+		{
+			AddCloseEntry(census, name, false, "");
+			return;
+		}
+
+		MCPLeaseCloseEntry entry = new MCPLeaseCloseEntry();
+		entry.name = name;
+		entry.state = "unverified";
+		entry.reason = reason;
+		census.entries.Insert(entry);
+	}
+
+	protected bool LeaseCloseCensusSettled(MCPLeaseCloseCensus census)
+	{
+		if (!census)
+		{
+			return false;
+		}
+
+		int i = 0;
+		while (i < census.entries.Count())
+		{
+			if (census.entries.Get(i).state == "residue")
+			{
+				return false;
+			}
+
+			i = i + 1;
+		}
+
+		return true;
+	}
+
+	protected bool LeaseCloseCensusClean(MCPLeaseCloseCensus census)
+	{
+		if (!census)
+		{
+			return false;
+		}
+
+		int i = 0;
+		while (i < census.entries.Count())
+		{
+			if (census.entries.Get(i).state != "clean")
+			{
+				return false;
+			}
+
+			i = i + 1;
+		}
+
+		return true;
+	}
+
+	protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)
+	{
+		MCPLeaseCloseCensus census = new MCPLeaseCloseCensus();
+		census.peer = "client";
+		if (closeArgs)
+		{
+			census.generation = closeArgs.close_generation;
+			census.lease_id = closeArgs.close_lease_id;
+		}
+
+		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (player)
+		{
+			int closeNetLow = 0;
+			int closeNetHigh = 0;
+			player.GetNetworkID(closeNetLow, closeNetHigh);
+			census.net_low = closeNetLow;
+			census.net_high = closeNetHigh;
+			census.conn_gen = player.MCPConnGenValue();
+		}
+
+		census.move_floor = MCPPlayerMoveControl.Generation();
+		census.weapon_floor = MCPWeaponControl.CloseRequestFloor();
+		census.look_floor = MCPLookAtControl.CloseFloor();
+		AddCloseEntry(census, "vehicle_drive", MCPCarDrive.s_Active, "vehicle_drive");
+		AddCloseEntry(census, "input_trigger", MCPInputTriggerControl.IsHeld(), "input_trigger");
+		bool moveActive = MCPPlayerMoveControl.IsActive();
+		if (MCPPlayerMoveControl.ServerReleasePending())
+		{
+			moveActive = true;
+		}
+
+		AddCloseEntry(census, "player_move", moveActive, "player_move");
+		AddCloseEntry(census, "weapon", MCPWeaponControl.IsBusy(), "weapon");
+		bool lookActive = MCPLookAtControl.IsActive();
+		if (MCPLookAtControl.ServerReleasePending())
+		{
+			lookActive = true;
+		}
+
+		AddCloseEntry(census, "look_at", lookActive, "look_at");
+		bool cameraActive = false;
+		if (m_ActiveCam || m_CameraHandoffPending)
+		{
+			cameraActive = true;
+		}
+
+		AddCloseEntry(census, "camera", cameraActive, "camera");
+		// §4 #263: the path itself, after the stop above. A path that is
+		// still playing is residue the observer re-reads.
+		bool cameraPathPlaying = false;
+		if (m_CameraPath && m_CameraPath.IsPlaying())
+		{
+			cameraPathPlaying = true;
+		}
+
+		AddCloseEntry(census, "camera_path", cameraPathPlaying, "camera_path");
+		// §4 #266: only the emote actor_emote started counts, read through
+		// MCP_IsEmoteLive (playing, pending, surrender or queued launcher),
+		// not m_bEmoteIsPlaying alone.
+		bool emoteActive = false;
+		if (m_MCPEmoteStarted)
+		{
+			EmoteManager closeEmotes;
+			if (player)
+			{
+				closeEmotes = player.GetEmoteManager();
+			}
+
+			if (!closeEmotes || closeEmotes.MCP_IsEmoteLive())
+			{
+				emoteActive = true;
+			}
+			else
+			{
+				m_MCPEmoteStarted = false;
+			}
+		}
+
+		AddCloseEntry(census, "emote", emoteActive, "emote");
+		AddCloseEntry(census, "player_simulation", m_PlayerSimulationDisabled, "player_simulation");
+		AddCloseEntry(census, "controls_hud", m_ControlsSuppressed, "controls_hud");
+		bool dialogOpen = false;
+		if (m_Dialog && m_Dialog.IsOpen())
+		{
+			dialogOpen = true;
+		}
+
+		AddCloseEntry(census, "dialog", dialogOpen, "dialog");
+		bool previewSet = false;
+		if (m_UiPreviewRoot)
+		{
+			previewSet = true;
+		}
+
+		AddCloseEntry(census, "ui_preview", previewSet, "ui_preview");
+		// §2.6 C14: after StopLeaseClosePause, the pause ui_pause queued and
+		// still queued, or the pause menu it opened and still open (under a
+		// submenu too, uimanager.c:160), is residue the 25 s observer
+		// re-reads. A pause MCP neither queued nor opened is not counted.
+		bool pauseActive = false;
+		if (m_MCPPauseQueued || m_MCPPauseMenu)
+		{
+			MissionGameplay closeMission = MissionGameplay.Cast(GetGame().GetMission());
+			if (closeMission)
+			{
+				if (m_MCPPauseQueued && closeMission.MCP_IsPauseQueued())
+				{
+					pauseActive = true;
+				}
+
+				UIManager closeUi = GetGame().GetUIManager();
+				if (m_MCPPauseMenu && closeUi && closeUi.FindMenu(MENU_INGAME) == m_MCPPauseMenu)
+				{
+					pauseActive = true;
+				}
+			}
+		}
+
+		AddCloseEntry(census, "ui_pause", pauseActive, "ui_pause");
+		// §2.9: the client half reads the action manager, not the job, so a
+		// Take that cleared the hold control cannot make this row clean.
+		bool holdActive = MCPHoldControl.IsActive();
+		if (player)
+		{
+			ActionManagerClient holdManager = ActionManagerClient.Cast(player.GetActionManager());
+			if (holdManager && holdManager.MCP_HoldBusy())
+			{
+				holdActive = true;
+			}
+		}
+
+		AddCloseEntry(census, "action_hold", holdActive, "action_hold");
+		// §2.9: interrupt/START debt of this client process, per §2.7 types.
+		AddCloseDebt(census, "action_input_in_flight", MCPHoldControl.InputInFlight(), "action_input_in_flight");
+		bool jobsActive = false;
+		if (m_JobRunner && m_JobRunner.CountExcluding("lease_close") > 0)
+		{
+			jobsActive = true;
+		}
+
+		AddCloseEntry(census, "jobs", jobsActive, "jobs");
+		bool samplerActive = false;
+		if (MCPVehicleTrace.IsActive() || MCPAnimTimeline.IsActive() || MCPPlayerTrace.IsActive())
+		{
+			samplerActive = true;
+		}
+
+		AddCloseEntry(census, "samplers", samplerActive, "samplers");
+		if (census.conn_gen == 0)
+		{
+			AddCloseEntry(census, "conn_gen", true, "conn_gen_unknown");
+		}
+
+		if (LeaseCloseCensusClean(census))
+		{
+			census.state = "clean";
+		}
+		else
+		{
+			census.state = "residue";
+		}
+
+		return census;
+	}
+
+	protected void PostLeaseCloseJob(MCPJob job, bool timedOut)
+	{
+		MCPResult result = new MCPResult();
+		result.id = job.id;
+		result.ok = true;
+		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(job.args);
+		if (timedOut && !LeaseCloseCensusSettled(census))
+		{
+			AddCloseEntry(census, "observer", true, "observer_timeout");
+			census.state = "residue";
+		}
+
+		result.lease_close = census;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		PostResult(result);
+	}
+
+	// §4 #266: the mark lives exactly as long as the emote it names.
+	// Without this, an emote that ended after its job (by wait_s, or a
+	// request the server refused) leaves the mark on, and a later foreign
+	// emote would be ended and counted by the close. No player or no
+	// manager keeps the mark: nothing can be read either way.
+	protected void MaintainMCPEmoteStarted()
+	{
+		PlayerBase player;
+		EmoteManager emotes;
+		if (!m_MCPEmoteStarted)
+		{
+			return;
+		}
+
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (player)
+		{
+			emotes = player.GetEmoteManager();
+		}
+
+		if (!emotes)
+		{
+			return;
+		}
+
+		if (!emotes.MCP_IsEmoteLive())
+		{
+			m_MCPEmoteStarted = false;
+		}
+	}
+
+	// §4 #266: end the emote actor_emote started if it still plays. An
+	// emote MCP did not start is neither ended nor counted. The end is
+	// async: the census below and the 25 s observer read MCP_IsEmoteLive
+	// until it stops.
+	protected void StopLeaseCloseEmote()
+	{
+		PlayerBase player;
+		EmoteManager emotes;
+		if (!m_MCPEmoteStarted)
+		{
+			return;
+		}
+
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!player)
+		{
+			return;
+		}
+
+		emotes = player.GetEmoteManager();
+		if (!emotes)
+		{
+			return;
+		}
+
+		emotes.MCP_CancelQueuedEmote();
+		if (!emotes.MCP_IsEmoteLive())
+		{
+			m_MCPEmoteStarted = false;
+			return;
+		}
+
+		emotes.MCP_RequestEmoteEnd();
+	}
+
+	// §2.6 C14: each ui_pause mark lives as long as the pause it names, as
+	// m_MCPEmoteStarted does (MaintainMCPEmoteStarted). A queued pause that
+	// vanilla then opened (missiongameplay.c:308-311, :1331) makes the open
+	// pause menu MCP's. MCP's menu stops being MCP's once it is not the open
+	// MENU_INGAME, even when the person's Continue and Esc replace it
+	// between two ticks (PX6 a). No mission or UI manager: both fall.
+	protected void MaintainMCPPause()
+	{
+		MissionGameplay mission;
+		UIManager ui;
+		if (!m_MCPPauseQueued && !m_MCPPauseMenu)
+		{
+			return;
+		}
+
+		if (GetGame())
+		{
+			mission = MissionGameplay.Cast(GetGame().GetMission());
+			ui = GetGame().GetUIManager();
+		}
+
+		if (!mission || !ui)
+		{
+			m_MCPPauseQueued = false;
+			m_MCPPauseMenu = null;
+			return;
+		}
+
+		if (m_MCPPauseQueued && !mission.MCP_IsPauseQueued())
+		{
+			m_MCPPauseQueued = false;
+			m_MCPPauseMenu = ui.FindMenu(MENU_INGAME);
+		}
+
+		if (m_MCPPauseMenu && ui.FindMenu(MENU_INGAME) != m_MCPPauseMenu)
+		{
+			m_MCPPauseMenu = null;
+		}
+	}
+
+	// §2.6 C14 (PX3 a, PX6 a): the close cancels the pause ui_pause queued,
+	// which vanilla would otherwise open under the next lease once loading
+	// or the respawn ends (missiongameplay.c:308-311; Continue() leaves the
+	// queue, :1334-1348), and closes the pause menu ui_pause opened with the
+	// mission's Continue(), as ContinueStartPauseMenu does, only while that
+	// same menu is on top: a submenu above it means someone is in it, and a
+	// pause menu the person opened after it is another instance. A pause MCP
+	// neither queued nor opened is neither touched nor counted.
+	protected void StopLeaseClosePause()
+	{
+		MissionGameplay mission;
+		UIManager ui;
+		UIScriptedMenu menu;
+		if (!m_MCPPauseQueued && !m_MCPPauseMenu)
+		{
+			return;
+		}
+
+		if (GetGame())
+		{
+			mission = MissionGameplay.Cast(GetGame().GetMission());
+		}
+
+		if (!mission)
+		{
+			return;
+		}
+
+		if (m_MCPPauseQueued)
+		{
+			mission.MCP_CancelQueuedPause();
+			m_MCPPauseQueued = false;
+		}
+
+		if (!m_MCPPauseMenu)
+		{
+			return;
+		}
+
+		ui = GetGame().GetUIManager();
+		if (!ui)
+		{
+			return;
+		}
+
+		menu = ui.GetMenu();
+		if (!menu || menu != m_MCPPauseMenu)
+		{
+			return;
+		}
+
+		mission.Continue();
+	}
+
+	// §2.6 stop steps, in Shutdown's order, without the bridge teardown.
+	protected bool DispatchLeaseCloseClient(MCPCommand command, MCPResult result)
+	{
+		if (m_Dialog && m_Dialog.IsOpen())
+		{
+			m_Dialog.FinishLeaseClosed();
+		}
+
+		if (m_UiPreviewRoot)
+		{
+			m_UiPreviewRoot.Unlink();
+			m_UiPreviewRoot = null;
+		}
+
+		MCPCarDrive.Clear();
+		MCPInputTriggerControl.ReleaseAll("shutdown");
+		MCPPlayerMoveControl.ReleaseAll("shutdown");
+		// §4 #263: stop the playing camera path before gameplay and the
+		// camera are restored, as restore_gameplay does. The census below
+		// then reads the path itself, not a job.
+		StopCameraPath();
+		RestoreGameplay();
+		ReleaseCamera();
+		MCPHoldControl.Shutdown("shutdown");
+		MCPVehicleTrace.Abort("shutdown");
+		MCPAnimTimeline.Abort("shutdown");
+		MCPPlayerTrace.Abort("shutdown");
+		StopLeaseCloseEmote();
+		if (m_JobRunner)
+		{
+			m_JobRunner.AbortAll(this);
+		}
+
+		// §2.6 C14: after AbortAll, so an open ui_pause job answers once,
+		// and before the census.
+		StopLeaseClosePause();
+		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(command.args);
+		if (LeaseCloseCensusSettled(census))
+		{
+			result.ok = true;
+			result.lease_close = census;
+			return true;
+		}
+
+		MCPJob job = new MCPJob();
+		job.id = command.id;
+		job.kind = "lease_close";
+		job.args = command.args;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		job.deadline_s = m_JobRunner.GetElapsedS() + 25.0;
+		m_JobRunner.AddJob(job);
+		return false;
 	}
 
 	void Shutdown()

@@ -103,9 +103,9 @@ def _observation(**overrides: object) -> dict:
 
 class HoldSchemaTest(unittest.TestCase):
     def test_bridge_and_python_expect_version_12(self) -> None:
-        self.assertEqual(EXPECTED_BRIDGE_VERSION, "12")
+        self.assertEqual(EXPECTED_BRIDGE_VERSION, "13")
         text = MESSAGES.read_text(encoding="utf-8")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', text)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', text)
 
     def test_budget_rejects_bool_nan_and_bad_margin(self) -> None:
         hold, timeout = validate_hold_budget(30, 45)
@@ -382,7 +382,7 @@ def _announce_hold(state: loopback.ServerState) -> None:
     query = poll_census_query("client")
     state.record_poll(
         "client",
-        "12~1.29",
+        f"{EXPECTED_BRIDGE_VERSION}~1.29",
         instance=INST_CLIENT,
         source_pid=PID_CLIENT,
         caps=query["caps"],
@@ -394,7 +394,7 @@ def _poll_hold(state: loopback.ServerState):
     query = poll_census_query("client")
     return state.record_poll(
         "client",
-        "12~1.29",
+        f"{EXPECTED_BRIDGE_VERSION}~1.29",
         instance=INST_CLIENT,
         source_pid=PID_CLIENT,
         caps=query["caps"],
@@ -508,7 +508,7 @@ class HoldCleanupTest(unittest.TestCase):
         self.assertIsInstance(cleanup, dict)
         return cleanup
 
-    def test_undelivered_abandon_does_not_fence_and_delivered_cancel_is_named(self) -> None:
+    def test_undelivered_abandon_does_not_fence_and_delivered_hold_is_fenced(self) -> None:
         _queued_id, queued_hold = self._arm()
         cleanup = self._release()
         self.assertNotIn("hold_cancel_enqueued", cleanup)
@@ -522,23 +522,29 @@ class HoldCleanupTest(unittest.TestCase):
         self.assertIn(delivered_id, ids)
         self.assertTrue(self.state._holds[delivered_hold]["delivered"])
         cleanup = self._release()
-        self.assertEqual(cleanup.get("hold_cancel_enqueued"), 1)
+        # §2.9/§2.14 (plan §5.4): the delivered cancel is gone. The hold is
+        # forgotten and fenced, and the lease-end close is what settles it.
+        self.assertNotIn("hold_cancel_enqueued", cleanup)
         queued = [
             item
             for item in self.state._bound_queues[INST_CLIENT]
             if item["cmd"] == "action_hold_cancel"
         ]
-        self.assertEqual(queued[-1]["args"]["hold_id"], delivered_hold)
+        self.assertEqual(queued, [])
+        closes = [
+            item
+            for item in self.state._bound_queues[INST_CLIENT]
+            if item["cmd"] == "lease_close_client"
+        ]
+        self.assertEqual(len(closes), 1)
+        self.assertIn("test-run", self.state._hold_blocked_runs)
 
-    def test_late_cancel_does_not_end_a_later_hold(self) -> None:
+    def test_late_hold_result_does_not_end_a_later_hold(self) -> None:
         first_id, first_hold = self._arm()
         _poll_hold(self.state)
         self._release()
-        cancel = [
-            item
-            for item in self.state._bound_queues[INST_CLIENT]
-            if item["cmd"] == "action_hold_cancel" and item["args"]["hold_id"] == first_hold
-        ][0]
+        # No cancel is published at lease end (§2.9); the hold's own result
+        # is what reconciles it, even arriving after the release.
         self.state.store_result(
             {
                 "id": first_id,
@@ -557,7 +563,7 @@ class HoldCleanupTest(unittest.TestCase):
         _second_id, second_hold = self._arm()
         self.state.store_result(
             {
-                "id": cancel["id"],
+                "id": 9999,
                 "ok": 1,
                 "matched": 0,
                 "hold_id": first_hold,

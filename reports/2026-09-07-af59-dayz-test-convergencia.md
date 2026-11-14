@@ -80,7 +80,7 @@ Lo de mas, medido contra el tronco SR2M/Heli (~589 lineas), son ~220 lineas:
 - Cableado en `Invoke-Build` antes y despues de AddonBuilder (`:596-598`, `:635-640`) y `VerifyOnly` en Main (`:780-785`).
 - `ServerWait = 120` y params `Verify`/`VerifyP3d`.
 
-No es un superconjunto util del launcher. Es el tronco **mas** un plugin de contrato p3d (Tarea 6 / Task 11) que habla con `C:\Users\guill\ForzaDayZ\`. El propio comentario dice que si las tools o el p3d faltan, WARN y skip — pensado para reusarse en un mod no-Forza. Si el comun sale de aqui, cada arma y cada rack arrastran PYTHONPATH de un venv `_temaB-work`, `PboViewer.exe` y `profiles\brz.json`.
+No es un superconjunto util del launcher. Es el tronco **mas** un plugin de contrato p3d (Tarea 6 / Task 11) que habla con `%USERPROFILE%\ForzaDayZ\`. El propio comentario dice que si las tools o el p3d faltan, WARN y skip — pensado para reusarse en un mod no-Forza. Si el comun sale de aqui, cada arma y cada rack arrastran PYTHONPATH de un venv `_temaB-work`, `PboViewer.exe` y `profiles\brz.json`.
 
 **Veredicto:** experimento de producto (coche Forza), no abandonado, no canon. El comun **no** nace de SUB_BRZ. El gancho `-Verify` / `-PreBuildScript` conserva el valor.
 
@@ -103,7 +103,7 @@ El comun sale del tronco SR2M/Heli/MERCEDES (casi identicos, 0.996-0.998) mas lo
 
 Un solo script:
 
-`C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz-test.ps1`
+`%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz-test.ps1`
 
 (o, si se quiere desacoplar del MCP, un hermano `_infra\dayz-test.ps1` en el mismo disco; la ruta absoluta se pinnea en el shim).
 
@@ -116,7 +116,7 @@ param(
     [Parameter(Mandatory = $true)] [string]$Mod,
     [Parameter(ValueFromRemainingArguments = $true)] [object[]]$Rest
 )
-$shared = 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz-test.ps1'
+$shared = '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz-test.ps1'
 & $shared @PSBoundParameters
 ```
 

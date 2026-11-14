@@ -239,6 +239,108 @@ class BoxUseStateTest(unittest.TestCase):
         self.assertEqual(row["use_state"], "idle")
         self.assertIsNone(row["human_input_age_s"])
 
+    def test_server_window_in_front_attributes_nothing_with_a_live_client(self) -> None:
+        self.add_run()
+        now = time.time()
+        self.assertEqual(self.human_input(now, pid=801), [])
+        row = self.row(now)
+        self.assertIsNone(row["human_input_age_s"])
+        key = (GENERATION, "run-x")
+        self.assertEqual(self.lifecycle._human_input_count.get(key, 0), 0)
+        self.assertEqual(self.lifecycle._uncertain_input_count.get(key, 0), 0)
+        self.assertNotIn(key, self.lifecycle._human_input_at)
+        self.assertNotIn(key, self.lifecycle._uncertain_input_at)
+
+    def test_server_window_in_front_attributes_nothing_with_a_dead_client(self) -> None:
+        self.add_run(live=False)
+        self.live.append(801)  # only the server is alive
+        now = time.time()
+        self.assertEqual(self.human_input(now, pid=801), [])
+        row = self.row(now)
+        self.assertIsNone(row["human_input_age_s"])
+        key = (GENERATION, "run-x")
+        self.assertEqual(self.lifecycle._human_input_count.get(key, 0), 0)
+        self.assertEqual(self.lifecycle._uncertain_input_count.get(key, 0), 0)
+        self.assertNotIn(key, self.lifecycle._human_input_at)
+        self.assertNotIn(key, self.lifecycle._uncertain_input_at)
+
+    def test_client_window_in_front_still_attributes_with_a_server_registered(self) -> None:
+        self.add_run()
+        now = time.time()
+        self.assertEqual(self.human_input(now - 1.0), ["run-x"])
+        self.good_signal(now)
+        row = self.row(now)
+        self.assertEqual(row["use_state"], "human")
+        self.assertAlmostEqual(row["human_input_age_s"], 1.0, places=2)
+        key = (GENERATION, "run-x")
+        self.assertEqual(self.lifecycle._human_input_count.get(key, 0), 1)
+        self.assertEqual(self.lifecycle._uncertain_input_count.get(key, 0), 0)
+
+    def test_focus_moving_from_the_server_console_to_the_client_counts(self) -> None:
+        self.add_run()
+        now = time.time()
+        self.good_signal(now - 0.25, foreground=801, tick=1000)
+        self.assertEqual(
+            self.lifecycle.record_input_sample(
+                InputSample(at=now, ok=True, last_input_tick=1100, idle_ms=0, foreground_pid=802)
+            ),
+            ["run-x"],
+        )
+        self.good_signal(now + 1.0)
+        row = self.row(now + 1.0)
+        self.assertEqual(row["use_state"], "human")
+        self.assertIsNotNone(row["human_input_age_s"])
+
+    def test_reused_identity_on_the_server_pid_attributes_nothing_and_keeps_the_client(self) -> None:
+        self.add_run()
+        reused = dict(self.guard.snapshots[801])
+        reused["creation_time_utc"] = "2026-07-15T09:09:09.0000000Z"
+        self.guard.snapshots[801] = reused
+        self.guard.snapshot_calls.clear()
+        now = time.time()
+        self.assertEqual(self.human_input(now, pid=801), [])
+        self.assertNotIn(801, self.guard.snapshot_calls)
+        self.assertFalse(
+            [key for key in self.lifecycle._excluded_use_records if key[2] == 801]
+        )
+        key = (GENERATION, "run-x")
+        self.assertEqual(self.lifecycle._human_input_count.get(key, 0), 0)
+        self.assertEqual(self.lifecycle._uncertain_input_count.get(key, 0), 0)
+        self.assertEqual(self.human_input(now + 1.0), ["run-x"])
+
+    def test_offline_window_in_front_attributes_input(self) -> None:
+        self.add_run(processes=[process(802, role="offline")])
+        now = time.time()
+        self.assertEqual(self.human_input(now, pid=802), ["run-x"])
+        self.good_signal(now + 1.0)
+        row = self.row(now + 1.0)
+        self.assertEqual(row["use_state"], "human")
+        self.assertIsNotNone(row["human_input_age_s"])
+
+    def test_other_role_window_in_front_attributes_nothing_and_is_not_excluded(self) -> None:
+        self.add_run(
+            processes=[
+                process(801, role="server"),
+                process(802, role="client"),
+                process(803, role="crash_reporter"),
+            ]
+        )
+        reused = dict(self.guard.snapshots[803])
+        reused["creation_time_utc"] = "2026-07-15T09:09:09.0000000Z"
+        self.guard.snapshots[803] = reused
+        self.guard.snapshot_calls.clear()
+        now = time.time()
+        self.assertEqual(self.human_input(now, pid=803), [])
+        self.assertNotIn(803, self.guard.snapshot_calls)
+        self.assertFalse(
+            [key for key in self.lifecycle._excluded_use_records if key[2] == 803]
+        )
+        row = self.row(now)
+        self.assertIsNone(row["human_input_age_s"])
+        key = (GENERATION, "run-x")
+        self.assertEqual(self.lifecycle._human_input_count.get(key, 0), 0)
+        self.assertEqual(self.lifecycle._uncertain_input_count.get(key, 0), 0)
+
     def test_reused_pid_attributes_nothing(self) -> None:
         self.release_to_idle()
         # Same pid, another creation time: not the registered client any more.

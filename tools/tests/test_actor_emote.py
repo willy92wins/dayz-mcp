@@ -15,6 +15,7 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
+from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp import loopback, result_prune, server
 from dayz_mcp.bridge_errors import _bridge_error
 from dayz_mcp.session_coordination import READ_ONLY_COMMANDS, command_requires_lease
@@ -64,7 +65,7 @@ def _client_state(caps: str | None) -> loopback.ServerState:
     bind_both_peers(state)
     if caps is not None:
         state.record_poll(
-            "client", "12~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=caps
+            "client", f"{EXPECTED_BRIDGE_VERSION}~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=caps
         )
     return state
 
@@ -93,7 +94,7 @@ class ActorEmoteToolTest(unittest.IsolatedAsyncioTestCase):
     def test_closed_schema_with_one_required_name(self) -> None:
         self.assertIsNotNone(self.tool)
         parameters = self.tool.parameters
-        self.assertEqual(set(parameters["properties"]), {"emote", "wait_s", "timeout_s"})
+        self.assertEqual(set(parameters["properties"]), {"emote", "wait_s", "object_id", "timeout_s"})
         self.assertEqual(parameters.get("required"), ["emote"])
         self.assertIs(parameters.get("additionalProperties"), False)
         self.assertIn(COMMAND, server._CLOSED_SCHEMA_TOOLS)
@@ -117,9 +118,11 @@ class ActorEmoteToolTest(unittest.IsolatedAsyncioTestCase):
             "is still watching its own, end included",
             "watches EmoteManager.m_bEmoteIsPlaying, which a request still pending does not set",
             "A looping emote (greeting, sita, salute...) answers started and plays until "
-            "emote='end'; a one-time one (nod, clap, shrug...) answers finished when it "
+            "emote='end'; on a member a static pose also ends by itself about wait_s "
+            "after it starts (Expansion's autoCancel); temporary gestures are not "
+            "cancelled; a one-time one (nod, clap, shrug...) answers finished when it "
             "ends within wait_s.",
-            "Only the local player, by this tool's scope: there is no object_id.",
+            "Without object_id, only the local player.",
             "or for end the emote still plays (the end may not have been sent:",
             "no_emote_playing for end while no emote plays",
             "rps_s, nod, shake, shrug, or end,",
@@ -177,7 +180,7 @@ class ActorEmoteToolTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_extra_keys_and_wrong_types_never_reach_the_bridge(self) -> None:
         for arguments, part in (
-            ({"emote": "greeting", "object_id": 4}, "unexpected arguments: object_id"),
+            ({"emote": "greeting", "uid": "4"}, "unexpected arguments: uid"),
             ({"emote": "greeting", "timeout": 4}, "unexpected arguments: timeout"),
             ({"emote": "greeting", "wait_s": True}, "wait_s"),
             ({"emote": 1}, "emote"),
@@ -270,7 +273,9 @@ class ActorEmoteToolTest(unittest.IsolatedAsyncioTestCase):
     def test_the_watch_scalars_are_owned_by_actor_emote(self) -> None:
         for field in ("emote_state", "started_after_s", "finished_after_s"):
             with self.subTest(field=field):
-                self.assertEqual(result_prune.OWNED_SCALAR_FIELDS[field], frozenset({COMMAND}))
+                self.assertEqual(
+                    result_prune.OWNED_SCALAR_FIELDS[field], frozenset({COMMAND, "ai_emote"})
+                )
                 kept = result_prune.prune_unfilled_fields(COMMAND, {"ok": 1, field: 0.0})
                 self.assertIn(field, kept)
                 dropped = result_prune.prune_unfilled_fields("player_move", {"ok": 1, field: 0.0})
@@ -303,7 +308,7 @@ class ActorEmoteAdmissionTest(unittest.TestCase):
         status, body = state.enqueue_command(COMMAND, dict(WIRE), peer="client")
         self.assertEqual(status, 200, body)
         status, poll = state.record_poll(
-            "client", "12~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=caps
+            "client", f"{EXPECTED_BRIDGE_VERSION}~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=caps
         )
         self.assertEqual(status, 200)
         self.assertEqual(poll["commands"], [{"id": body["id"], "cmd": COMMAND, "args": WIRE}])
@@ -313,7 +318,7 @@ class ActorEmoteAdmissionTest(unittest.TestCase):
         status, body = state.enqueue_command(COMMAND, dict(WIRE), peer="client")
         self.assertEqual(status, 200, body)
         status, poll = state.record_poll(
-            "client", "12~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=OLDER_CLIENT_CAPS
+            "client", f"{EXPECTED_BRIDGE_VERSION}~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=OLDER_CLIENT_CAPS
         )
         self.assertEqual(status, 200)
         self.assertEqual(poll["commands"], [])
@@ -549,6 +554,7 @@ _NEW = (
 _MEMBERS = (
     (re.compile(r"(?<![\w.])(m_Jobs|m_ElapsedS)\b"), r"R.\1"),
     (re.compile(r"(?<![\w.])m_DialogJob\b"), "B.m_DialogJob"),
+    (re.compile(r"(?<![\w.])m_MCPEmoteStarted\b"), "B.m_MCPEmoteStarted"),
 )
 _TICK_S = 0.1
 # The id the end helper asks both checks about and sends. Its value does not
@@ -728,7 +734,7 @@ class _ClientModel:
                 **{f"ID_EMOTE_{name.upper()}": index + 1 for index, name in enumerate(names)}
             ),
             "m_JobRunner": self.runner,
-            "B": SimpleNamespace(m_DialogJob=None),
+            "B": SimpleNamespace(m_DialogJob=None, m_MCPEmoteStarted=False),
             "m_Dialog": None,
             "IsStrictFinite": math.isfinite,
             "ACTOR_EMOTE_WAIT_MIN_S": loopback.ACTOR_EMOTE_WAIT_MIN_S,

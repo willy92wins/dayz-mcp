@@ -2,7 +2,7 @@
 
 **Implementar primero una infraestructura Python común para identidad completa y abandono dirigido.** Los lotes 86a3 y 9941 consumirán este contrato en su ronda final. No modificar Enforce, PBO, launcher ni módulos sellados.
 
-**Base y alcance.** Árbol leído: `C:\Users\guill\dzmcp_gauntlet\base_v11f`, exportación atribuida por el encargo a `46833d7`, sin `.git` verificable. No se ha comprobado el despliegue v11b. Las propuestas siguientes son **[DESIGN]**; los fragmentos existentes son **[EXACT]**. Esta especificación es de solo lectura.
+**Base y alcance.** Árbol leído: `%USERPROFILE%\dzmcp_gauntlet\base_v11f`, exportación atribuida por el encargo a `46833d7`, sin `.git` verificable. No se ha comprobado el despliegue v11b. Las propuestas siguientes son **[DESIGN]**; los fragmentos existentes son **[EXACT]**. Esta especificación es de solo lectura.
 
 ### 1. Anclajes verificados
 
@@ -48,7 +48,7 @@ daemon_credential.RefreshingDaemonCredential(
 )
 ```
 
-**[EXACT]** 86a3 obtiene tokens completos solo con estado local; broker conserva prefijos. `C:\Users\guill\dzmcp_gauntlet\r2c_86a3\ws\tools\dayz_mcp\action_cursor.py:99`:
+**[EXACT]** 86a3 obtiene tokens completos solo con estado local; broker conserva prefijos. `%USERPROFILE%\dzmcp_gauntlet\r2c_86a3\ws\tools\dayz_mcp\action_cursor.py:99`:
 
 ```python
 token = getattr(state, "bound_instance_token", None) if state is not None else None
@@ -56,7 +56,7 @@ if not callable(token) or not isinstance(run_id, str):
     return fence
 ```
 
-**[EXACT]** 9941 espera directamente por la ruta sin abandono. `C:\Users\guill\dzmcp_gauntlet\r2b_9941\ws\tools\dayz_mcp\server.py:2275`:
+**[EXACT]** 9941 espera directamente por la ruta sin abandono. `%USERPROFILE%\dzmcp_gauntlet\r2b_9941\ws\tools\dayz_mcp\server.py:2275`:
 
 ```python
 result = await self._await_result(

@@ -108,10 +108,13 @@ entries = sorted((p.relative_to(tools) for p, _ in entry_files
 if not entries:
     raise RuntimeError('No build/test script entry points found under tools/')
 
-# The map cannot inventory its own size. HANDOFF is deliberately marker-only.
+# The map cannot inventory its own size. HANDOFF and CHANGELOG are
+# deliberately marker-only: HANDOFF's live block and CHANGELOG's
+# append-only history grow on every close / PR, so a pinned size is
+# stale by construction.
 docs = [(p, s) for p, s in files(repo)
         if p.suffix.lower() == '.md'
-        and p.name.casefold() not in ('project-map.md', 'handoff.md')]
+        and p.name.casefold() not in ('project-map.md', 'handoff.md', 'changelog.md')]
 docs.sort(key=lambda item: order(item[0]))
 
 lines = [
@@ -166,6 +169,7 @@ lines.extend([
     '', '## Docs in this project', '',
     'Documentos `.md` de la ra\u00edz; el mapa se excluye del inventario para evitar autorreferencia.',
     '- `HANDOFF.md` - estado vivo; leer hasta `LIVE-STATE:END`.',
+    '- `CHANGELOG.md` - historial append-only; crece con cada cambio, sin tama\u00f1o fijado.',
 ])
 for path, info in docs:
     touched = datetime.datetime.fromtimestamp(

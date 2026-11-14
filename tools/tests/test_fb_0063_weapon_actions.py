@@ -403,16 +403,56 @@ class WeaponServerRequestContractTest(unittest.TestCase):
                 branch = body[branch_at : body.index("}", branch_at)]
                 self.assertIn(reader, branch)
                 self.assertIn("return true;", branch)
-        # The server reads what the client wrote, in the same order and types.
+        # The server reads what the client wrote, in the same order and types
+        # (H10 exact sequence, kills M7: dropping the floor check or a
+        # conn_gen read breaks the sequence, not just a presence pin).
         fire_read = _method_body(self.weapon, "protected void MCPReadFireRequest(")
         self.assertIn("Weapon_Base requested = null;", fire_read)
-        self.assertIn("if (!ctx.Read(requested))", fire_read)
+        fire_seq = ["ctx.Read(requestId)", "ctx.Read(connGen)", '"conn_gen_mismatch"',
+                    "ctx.Read(requested)", "requestId <= m_MCPWeaponLastId", '"stale_weapon_id"',
+                    "m_MCPWeaponLastId = requestId;"]
+        pos = -1
+        for step in fire_seq:
+            nxt = fire_read.index(step, pos + 1)
+            self.assertGreater(nxt, pos, step)
+            pos = nxt
+        fire_sent = _method_body(self.weapon, "static string SendFireRequest(")
+        sent_seq = ["request.Write(MCP_INPUT_UDT_WEAPON_FIRE);", "request.Write(s_CloseRequestId);",
+                    "request.Write(KnownConnGen());", "request.Write(held);", "request.Send();"]
+        pos = -1
+        for step in sent_seq:
+            nxt = fire_sent.index(step, pos + 1)
+            self.assertGreater(nxt, pos, step)
+            pos = nxt
         raise_read = _method_body(self.weapon, "protected void MCPReadRaiseRequest(")
+        raise_seq = ["ctx.Read(raiseId)", "ctx.Read(connGen)", '"conn_gen_mismatch"',
+                     "ctx.Read(raised)", "ctx.Read(ttlS)", "raiseId <= m_MCPWeaponLastId",
+                     '"stale_weapon_id"', "m_MCPWeaponLastId = raiseId;"]
+        pos = -1
+        for step in raise_seq:
+            nxt = raise_read.index(step, pos + 1)
+            self.assertGreater(nxt, pos, step)
+            pos = nxt
         raise_sent = _method_body(self.weapon, "static string SendRaiseRequest(")
-        self.assertLess(raise_read.index("ctx.Read(raised)"), raise_read.index("ctx.Read(ttlS)"))
-        self.assertLess(raise_sent.index("request.Write(raised);"), raise_sent.index("request.Write(ttlS);"))
+        raise_sent_seq = ["request.Write(MCP_INPUT_UDT_WEAPON_RAISE);", "request.Write(s_CloseRequestId);",
+                          "request.Write(KnownConnGen());", "request.Write(raised);",
+                          "request.Write(ttlS);", "request.Send();"]
+        pos = -1
+        for step in raise_sent_seq:
+            nxt = raise_sent.index(step, pos + 1)
+            self.assertGreater(nxt, pos, step)
+            pos = nxt
         self.assertIn("bool raised = false;", raise_read)
         self.assertIn("float ttlS = 0.0;", raise_read)
+        # conn_gen_unknown gates both sends before any input is stored.
+        for sent_body in (fire_sent, raise_sent):
+            self.assertLess(sent_body.index('return "conn_gen_unknown";'),
+                            sent_body.index("new ScriptInputUserData()"))
+        # DispatchPlayerMove: the literal conn_gen_unknown branch precedes Begin.
+        client_src = CLIENT.read_text(encoding="utf-8")
+        move_dispatch = _method_body(client_src, "protected bool DispatchPlayerMove(")
+        self.assertLess(move_dispatch.index('serverRequest == "conn_gen_unknown"'),
+                        move_dispatch.index("MCPPlayerMoveControl.Begin("))
 
     def test_server_applies_requests_in_command_handler_before_client_returns(self) -> None:
         self.assertEqual(self.weapon.count("override void CommandHandler("), 1)

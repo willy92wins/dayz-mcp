@@ -13,7 +13,7 @@ The new branch rejects `componentState <= 0`. The actual API documents:
 - `0`: valid default component.
 - `1`: valid named component.
 
-Evidence: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\scripts\3_game\entities\object.c:197-198`. Vanilla also handles return `0` explicitly at `scripts\5_mission\gui\actiontargetscursor.c:518`.
+Evidence: `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\scripts\3_game\entities\object.c:197-198`. Vanilla also handles return `0` explicitly at `scripts\5_mission\gui\actiontargetscursor.c:518`.
 
 **Executable failure scenario:** configure a world object `ComponentProbeObject` whose component `0` is valid but unnamed, so its lookup returns `0`. Register `ActionComponentProbe` with otherwise satisfied conditions. With the capability advertised, call:
 

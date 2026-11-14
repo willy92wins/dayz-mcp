@@ -2,9 +2,9 @@
 
 Rutas abreviadas en las citas:
 
-- `W` = `C:\Users\guill\dzmcp_gauntlet\probe_9941\ws`
-- `T` = `C:\Users\guill\dzmcp_gauntlet\triage3\tree`
-- `V` = `C:\Users\guill\OneDrive\Documentos\DayZ Projects\scripts`
+- `W` = `%USERPROFILE%\dzmcp_gauntlet\probe_9941\ws`
+- `T` = `%USERPROFILE%\dzmcp_gauntlet\triage3\tree`
+- `V` = `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\scripts`
 - `H` = `W\MCPHoldProbe\scripts\4_World\MCPHoldProbe.c`
 - `P` = `W\PROCEDURE.md`
 

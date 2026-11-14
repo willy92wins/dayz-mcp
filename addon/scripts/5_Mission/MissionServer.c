@@ -51,6 +51,25 @@ modded class MissionServer
 	{
 		super.InvokeOnConnect(player, identity);
 		MCPGodmode.OnBodyReady(player, identity);
+		// §2.5: first connection of this body is generation 1.
+		if (player)
+		{
+			player.MCPSetConnGen(1);
+			player.MCPSendConnGen(identity);
+		}
+	}
+
+	// missionserver.c:633-637. Vanilla reconnects the body first; the new
+	// connection gets the next generation, so a close of the old one cannot
+	// touch this connection's floors or copies (§2.5, §2.8).
+	override void OnClientReconnectEvent(PlayerIdentity identity, PlayerBase player)
+	{
+		super.OnClientReconnectEvent(identity, player);
+		if (player)
+		{
+			player.MCPSetConnGen(player.MCPConnGenValue() + 1);
+			player.MCPSendConnGen(identity);
+		}
 	}
 
 	// missionserver.c:598-618: the body that respawns, which vanilla kills here

@@ -15,7 +15,7 @@ from typing import Any
 
 KINDS = frozenset({"acknowledge", "confirm", "form"})
 TERMINAL_STATES = frozenset(
-    {"completed", "cancelled", "timed_out", "disconnected", "rejected"}
+    {"completed", "cancelled", "timed_out", "disconnected", "rejected", "lease_closed"}
 )
 TITLE_MIN_CHARS = 1
 TITLE_MAX_CHARS = 80

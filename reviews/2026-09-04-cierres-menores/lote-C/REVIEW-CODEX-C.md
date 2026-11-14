@@ -11,7 +11,7 @@ Rama observada: `work/inbox-20260830-modules` (`adc1c22`).
 Ejecutado desde `tools/`, con `PYTHONPATH=.` y el intérprete obligatorio:
 
 ```text
-C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe -m unittest tests.test_ui_error_diagnostics -v
+%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe -m unittest tests.test_ui_error_diagnostics -v
 Ran 4 tests in 0.188s
 OK
 FOCAL_EXIT=0

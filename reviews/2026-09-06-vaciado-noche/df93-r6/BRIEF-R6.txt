@@ -3,7 +3,7 @@ ENCARGO: ronda 6 del lote df93 (preflight de las herramientas de admin en el ser
 1. WORKSPACE Y LIMITES
 - Este workspace es una copia fiel del worktree de la rama work/df93-vpp-preflight (HEAD a7ddbac). No es un repositorio git: no intentes commits.
 - WRITE-SET, los UNICOS ficheros que puedes modificar: tools\dayz_mcp\native_launcher_transaction.py y tools\tests\test_vpp_preflight.py. Ademas creas STATE.md en la raiz. Nada mas: ni ficheros nuevos de codigo, ni otros tests, ni dayz_test_tool.py, ni secure_launcher.py (pinneado por dependency-lock.json), ni server.py. Los comentarios de otros ficheros los cambia el receptor.
-- Interprete: "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" (la ruta lleva espacios: siempre entre comillas). Los tests se ejecutan desde <workspace>\tools con PYTHONPATH=. En PowerShell: cd tools; $env:PYTHONPATH="."; & "<interprete>" -m unittest tests.test_vpp_preflight. En bash: cd tools && PYTHONPATH=. "<interprete>" -m unittest tests.test_vpp_preflight.
+- Interprete: "%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" (la ruta lleva espacios: siempre entre comillas). Los tests se ejecutan desde <workspace>\tools con PYTHONPATH=. En PowerShell: cd tools; $env:PYTHONPATH="."; & "<interprete>" -m unittest tests.test_vpp_preflight. En bash: cd tools && PYTHONPATH=. "<interprete>" -m unittest tests.test_vpp_preflight.
 - NO corras la suite completa (levanta daemons y se cuelga con las sesiones vivas de esta maquina). No lances juego, daemon ni launcher. No leas ni escribas fuera del workspace. Conserva los finales de linea LF de los dos ficheros.
 
 2. EL CAMBIO DE CONTRATO (semantica exacta; no la amplies ni la recortes)

@@ -24,6 +24,7 @@ from dayz_mcp import (
     process_lifecycle,
     request_path_authority,
     secure_launcher,
+    server_boot,
 )
 from dayz_mcp.launcher_registry import open_approved_launcher_async
 
@@ -1009,6 +1010,224 @@ def _client_profile_roots(
     ]
 
 
+_SERVER_BOOT_POLL_INTERVAL_S = 0.5
+_SERVER_BOOT_MAX_WAIT_S = 60.0
+
+
+def _server_boot_clock() -> float:
+    return time.monotonic()
+
+
+async def _server_boot_sleep(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+def _server_profile_root(
+    policy: dayz_test_request.RequestProjectPolicy,
+    mode: str,
+) -> str | None:
+    """The profile root this mode starts a server in, or None."""
+    if mode not in {"server", "all"}:
+        return None
+    record = _mode_record(mode)
+    if record is None:
+        return None
+    leaf = _planned_profile_leaf()
+    for step in record.steps:
+        if step.kind == "start" and step.role == "server" and step.root:
+            return ntpath.join(policy.dev_root, step.root, leaf)
+    return None
+
+
+def _probe_server_boot_rpt(
+    profiles_dir: Path,
+    dev_root: str,
+    floor_s: float,
+) -> tuple[bool, Path | None]:
+    """Return ``(retryable, rpt)`` for ``profiles_dir`` against ``floor_s``."""
+    files = _list_rpt_files(profiles_dir)
+    if files is None:
+        try:
+            missing_under_dev_root = (
+                not profiles_dir.exists() and Path(dev_root).is_dir()
+            )
+        except OSError:
+            return False, None
+        return missing_under_dev_root, None
+    cutoff = floor_s - 2.0
+    qualifying: list[tuple[float, Path]] = []
+    for item in files:
+        try:
+            stat = item.stat()
+        except OSError:
+            continue
+        if stat.st_ctime >= cutoff:
+            qualifying.append((stat.st_mtime, item))
+    if not qualifying:
+        return True, None
+    return True, max(qualifying, key=lambda pair: pair[0])[1]
+
+
+_RPT_LAUNCH_STAMP_RE = re.compile(
+    r"(?<![0-9])([0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2})(?![0-9])"
+)
+
+
+def _server_boot_script_log(rpt: Path) -> Path | None:
+    """Current-launch ``script*.log`` beside ``rpt`` from ``_script_log_for_server_rpt``."""
+    candidate = _script_log_for_server_rpt(rpt)
+    if candidate is None:
+        return None
+    stamp_match = _RPT_LAUNCH_STAMP_RE.search(rpt.stem)
+    if stamp_match is not None:
+        expected = f"script_{stamp_match.group(1)}.log".casefold()
+        if candidate.name.casefold() != expected:
+            return None
+        return candidate
+    if not candidate.name.casefold().startswith("script"):
+        return None
+    return candidate
+
+
+def _measure_server_boot_pbos(
+    raw_request: bytes,
+    verified_bundle: object,
+    policy: dayz_test_request.RequestProjectPolicy,
+    *,
+    deadline: float | None = None,
+) -> tuple[dict[str, int] | None, dict[str, int] | None]:
+    try:
+        parsed = dayz_test_request.parse_dayz_test_request(
+            raw_request,
+            policies=_semantic_policies(verified_bundle.sealed_policies),  # type: ignore[attr-defined]
+        )
+        runtime_policy = verified_bundle.validated_worker_runtime(  # type: ignore[attr-defined]
+            policy.mod, policy.dev_root
+        )
+    except Exception:
+        return None, None
+    if deadline is not None and _server_boot_clock() >= deadline:
+        return None, None
+    vanilla_files = server_boot.count_vanilla_files(runtime_policy.game_directory)
+    if deadline is not None and _server_boot_clock() >= deadline:
+        return vanilla_files, None
+    try:
+        effective_directories = dayz_test_worker._effective_directories(
+            parsed.payload, runtime_policy
+        )
+    except Exception:
+        mod_files = None
+    else:
+        mod_files = server_boot.count_mod_files(effective_directories)
+    return vanilla_files, mod_files
+
+
+async def _collect_server_boot(
+    *,
+    raw_request: bytes,
+    verified_bundle: object,
+    policy: dayz_test_request.RequestProjectPolicy,
+    public_mode: str,
+    preflight: bool,
+    terminal_ok: bool,
+    floor_s: float | None,
+    server_wait_s: int | None,
+) -> dict[str, object] | None:
+    if preflight or floor_s is None or public_mode not in {"server", "all"}:
+        return None
+    try:
+        request_doc = json.loads(raw_request)
+    except Exception:
+        return None
+    if not isinstance(request_doc, dict) or request_doc.get("kill") is True:
+        return None
+    try:
+        profile_root = _server_profile_root(policy, public_mode)
+        if profile_root is None:
+            return None
+        profiles_dir = Path(profile_root)
+        wait_raw = (
+            server_wait_s
+            if server_wait_s is not None
+            else request_doc.get("server_wait_s", 60)
+        )
+        budget_s = max(0.0, min(float(wait_raw), _SERVER_BOOT_MAX_WAIT_S))
+        deadline = _server_boot_clock() + budget_s
+
+        def _past_deadline() -> bool:
+            return _server_boot_clock() >= deadline
+
+        selected_rpt: Path | None = None
+        selected_script: Path | None = None
+        pbo_measured = False
+        vanilla_files: dict[str, int] | None = None
+        mod_files: dict[str, int] | None = None
+        last_script_report: server_boot.ScriptLogReport | None = None
+        last_countdown = False
+
+        while True:
+            if _past_deadline():
+                break
+            if selected_rpt is None:
+                retryable, selected_rpt = _probe_server_boot_rpt(
+                    profiles_dir,
+                    policy.dev_root,
+                    floor_s,
+                )
+                if not retryable:
+                    return None
+                if _past_deadline():
+                    break
+            if selected_rpt is not None:
+                rpt_text = server_boot.read_log_text(selected_rpt)
+                last_countdown = server_boot.has_termination_countdown(rpt_text)
+                if _past_deadline():
+                    break
+                if selected_script is None:
+                    selected_script = _server_boot_script_log(selected_rpt)
+                    if _past_deadline():
+                        break
+                if selected_script is None:
+                    last_script_report = None
+                else:
+                    script_text = server_boot.read_log_text(selected_script)
+                    last_script_report = server_boot.parse_script_log(script_text)
+                    if _past_deadline():
+                        break
+                    if not pbo_measured:
+                        vanilla_files, mod_files = _measure_server_boot_pbos(
+                            raw_request,
+                            verified_bundle,
+                            policy,
+                            deadline=deadline,
+                        )
+                        pbo_measured = True
+                        if _past_deadline():
+                            break
+
+            if not terminal_ok:
+                break
+            if last_countdown or (
+                last_script_report is not None and last_script_report.complete
+            ):
+                break
+            remaining = deadline - _server_boot_clock()
+            if remaining <= 0.0:
+                break
+            await _server_boot_sleep(min(_SERVER_BOOT_POLL_INTERVAL_S, remaining))
+
+        if last_script_report is None:
+            return None
+        return server_boot.compose_server_boot(
+            last_script_report,
+            termination_countdown=last_countdown,
+            vanilla_files=vanilla_files,
+            mod_files=mod_files,
+        )
+    except Exception:
+        return None
+
+
 def list_project_names() -> dict[str, object]:
     """Approved `dayz_test_run` project names. No host paths or file ids.
 
@@ -1719,6 +1938,7 @@ def _compact_result(
     storage_rotated: bool | None = None,
     storage_backup: str | None = None,
     storage_reset_notice: str | None = None,
+    server_boot: dict[str, object] | None = None,
     project_mod_replaced: bool = False,
 ) -> dict[str, object]:
     projection = readiness or _NULL_READINESS
@@ -1809,6 +2029,7 @@ def _compact_result(
         # that failed. A report: they authorize or refuse nothing.
         "session_idle_s": None,
         "display_timeout_s": None,
+        "server_boot": server_boot,
     }
     if terminal.attestation is not None:
         result["attestation"] = terminal.attestation
@@ -1967,12 +2188,14 @@ async def _execute_request(
     client_pids_before: tuple[int, ...] | None = None,
     vpp: object | None = None,
     client_dump_roots: list[str] | None = None,
+    server_wait_s: int | None = None,
 ) -> dict[str, object]:
     stdout = bytearray()
     stderr = bytearray()
     queued_reported = False
     client_dump_baseline: ClientDumpBaseline | None = None
     client_dump_token: str | None = None
+    server_boot_floor_s: float | None = None
 
     async def report(stage: str, message: str | None = None) -> None:
         if progress_cb is not None:
@@ -1986,10 +2209,12 @@ async def _execute_request(
         await report("queued", message)
 
     async def report_executing() -> None:
-        nonlocal queued_reported, client_dump_baseline, client_dump_token
+        nonlocal queued_reported, client_dump_baseline, client_dump_token, server_boot_floor_s
         if not queued_reported:
             queued_reported = True
             await report("queued", "En cola")
+        if server_boot_floor_s is None:
+            server_boot_floor_s = time.time()
         if client_dump_roots is not None and client_dump_baseline is None:
             # 296b: the dumps already in the CLIENT profile roots when this
             # launch leaves the queue; only a dump absent from here can name
@@ -2146,6 +2371,16 @@ async def _execute_request(
             observed_status, storage_run_id, storage_operation
         )
     )
+    server_boot_report = await _collect_server_boot(
+        raw_request=raw_request,
+        verified_bundle=verified_bundle,
+        policy=policy,
+        public_mode=public_mode,
+        preflight=preflight,
+        terminal_ok=terminal.ok,
+        floor_s=server_boot_floor_s,
+        server_wait_s=server_wait_s,
+    )
     result = _compact_result(
         terminal=terminal,
         project=policy.mod,
@@ -2180,6 +2415,7 @@ async def _execute_request(
         storage_rotated=storage_rotated,
         storage_backup=storage_backup,
         storage_reset_notice=storage_reset_notice,
+        server_boot=server_boot_report,
     )
     if not terminal.ok and terminal.error_code == WORKER_INTERNAL_FAILURE:
         # 4fdf: the stage is known here, the exception class is not (see above).
@@ -3143,6 +3379,7 @@ async def execute_dayz_test_run(
                 client_pids_before=client_pids_before,
                 vpp=vpp,
                 client_dump_roots=client_dump_roots,
+                server_wait_s=server_wait_s,
             )
             if display is not None and result.get("status") == "succeeded":
                 result["session_idle_s"] = display.session_idle_s

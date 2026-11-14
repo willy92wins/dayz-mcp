@@ -38,7 +38,7 @@ else:
     _kernel32 = None
 
 
-EXPECTED_BRIDGE_VERSION = "12"
+EXPECTED_BRIDGE_VERSION = "13"
 
 # Peer version_state values that must block command delivery / enqueue.
 BLOCKED_VERSION_STATES = {"legacy_blocked", "version_mismatch"}

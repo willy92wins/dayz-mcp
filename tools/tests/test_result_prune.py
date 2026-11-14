@@ -471,10 +471,12 @@ GENERIC_SCALAR_OWNERS = {
     "min_fps": ({"server_perf"}, 0),
     "insufficient_samples": ({"server_perf"}, 0),
     "length_m": ({"nav_path_query"}, 0.0),
-    # actor_emote's watch (36fa): kept at "" and 0.0 for it, dropped elsewhere.
-    "emote_state": ({"actor_emote"}, ""),
-    "started_after_s": ({"actor_emote"}, 0.0),
-    "finished_after_s": ({"actor_emote"}, 0.0),
+    # actor_emote's watch (36fa): kept at "" and 0.0 for it and its NPC half
+    # ai_emote, dropped elsewhere.
+    "emote_state": ({"actor_emote", "ai_emote"}, ""),
+    "started_after_s": ({"actor_emote", "ai_emote"}, 0.0),
+    "finished_after_s": ({"actor_emote", "ai_emote"}, 0.0),
+    "emote_pending": ({"ai_emote"}, False),
     # 204e: whether the local player is placing once action_use ran.
     "placing": (
         {

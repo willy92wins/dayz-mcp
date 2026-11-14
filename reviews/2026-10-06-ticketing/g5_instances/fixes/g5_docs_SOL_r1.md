@@ -5,7 +5,7 @@ VERDICT: CHANGES_REQUIRED
 ## FINDINGS
 
 **F1 — P2 — Environment-only selection is incorrectly offered.**  
-[tools/README-mcp.md:60](/C:/Users/guill/dzmcp_gauntlet/g5_docs/ws/tools/README-mcp.md:60) says the selector can be supplied through flags “or” environment variables.
+[tools/README-mcp.md:60](/%USERPROFILE%/dzmcp_gauntlet/g5_docs/ws/tools/README-mcp.md:60) says the selector can be supplied through flags “or” environment variables.
 
 - **Scenario:** Set `DAYZ_MCP_INSTANCE=alpha`, leave the other selector variables unset, then run `python install_mcp.py --register`.
 - **Actual:** Argument parsing exits **2**, reporting `instance_environment_conflict`; it does not select `alpha`. Reproduced through `install_mcp.parse_args`, without installation.
@@ -13,7 +13,7 @@ VERDICT: CHANGES_REQUIRED
 - **Fix:** Say that flags select the instance. Environment variables, when present, must match them and cannot replace them.
 
 **F2 — P2 — H16 promises an unsupported absence of installer effects.**  
-[product-spec.md:151](/C:/Users/guill/dzmcp_gauntlet/g5_docs/ws/product-spec.md:151) includes a relative shared root among inputs rejected without writing a sidecar, venv or registration.
+[product-spec.md:151](/%USERPROFILE%/dzmcp_gauntlet/g5_docs/ws/product-spec.md:151) includes a relative shared root among inputs rejected without writing a sidecar, venv or registration.
 
 - **Scenario:** On a fresh tools tree, set `DAYZ_MCP_SHARED_ROOT=relative` and run `python install_mcp.py --register --instance alpha --game-path "C:\Games\DayZ" --port 8766`, with otherwise valid prerequisites.
 - **Actual:** The installer accepts the selector and reaches venv creation rather than rejecting `relative_shared_root` before effects. A read-only probe intercepted the actual `("-m", "venv", …)` call.
@@ -21,7 +21,7 @@ VERDICT: CHANGES_REQUIRED
 - **Fix:** Separate the relative-root refusal from the selector-conflict guarantee. Keep this correction within documentation scope.
 
 **F3 — P3 — Writer-contention diagnostics are described too universally.**  
-[tools/README-mcp.md:64](/C:/Users/guill/dzmcp_gauntlet/g5_docs/ws/tools/README-mcp.md:64) promises `state_root_writer_busy` for a second writer.
+[tools/README-mcp.md:64](/%USERPROFILE%/dzmcp_gauntlet/g5_docs/ws/tools/README-mcp.md:64) promises `state_root_writer_busy` for a second writer.
 
 - **Scenario:** A daemon holds the `alpha` root lease; start another daemon for `alpha`, using another port and a valid keyfile.
 - **Actual:** The daemon logs `DAEMON: state root already has a writer` and exits **75**, without emitting `state_root_writer_busy`. Reproduced with acquisition failure mocked.

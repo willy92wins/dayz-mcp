@@ -16,7 +16,7 @@ No corrí `gate/run.sh` ni `gate/suite.sh`. Cada invocación de Shell (incluida 
 
 ```
 Rejected: Hook blocked with message: --: eval: line 1: syntax error near unexpected token `&'
---: eval: line 1: `$OutputEncoding = [System.Text.Encoding]::UTF8; Get-Content -LiteralPath '...' -Raw | & { $input | powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\guill\.claude\hooks\launch-ledger.ps1" -Mode Pre }'
+--: eval: line 1: `$OutputEncoding = [System.Text.Encoding]::UTF8; Get-Content -LiteralPath '...' -Raw | & { $input | powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\.claude\hooks\launch-ledger.ps1" -Mode Pre }'
 ```
 
 Lo mismo con `prime-agent-skills-gate.ps1` y `gpu-lease-gate.ps1`. El oráculo y la suite acotada no produjeron salida. No hay `ORACULO-VERDE` ni `SUITE-ACOTADA OK` que pegar.

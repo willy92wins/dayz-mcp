@@ -21,10 +21,10 @@ control positivo, `path:line`): `DECISION-F45D.md`. Contrato exacto del cambio: 
 6. `STATE-F45D-grok.md` — lo que el implementador dice haber hecho y verificado (NO lo tomes como verdad:
    `RUN-F45D.txt` tiene las ejecuciones hechas por el receptor, no por el implementador).
 7. El árbol de la rama (solo lectura) para abrir cualquier `path:line`:
-   `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\wt-f45d`
+   `%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\wt-f45d`
    (HEAD `4e264bb`; el diff aún NO está aplicado ahí). El workspace con el diff aplicado, también solo lectura:
    `...\scratchpad\lote-f45d\ws`. Intérprete para ejecutar tests en el workspace, desde `<ws>\tools` con
-   `PYTHONPATH=.`: `"C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe"`.
+   `PYTHONPATH=.`: `"%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe"`.
    No corras la suite completa (`discover`): levanta daemons. Módulos sueltos sí.
 
 ## Preguntas que el dictamen tiene que contestar, una a una, con `path:line`
@@ -73,4 +73,4 @@ control positivo, `path:line`): `DECISION-F45D.md`. Contrato exacto del cambio: 
 - Español; código e identificadores en inglés. Sin cortesías, sin resumen del diff: dictamen.
 
 Escribe el dictamen en:
-`C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-f45d\review\REVIEW-ANTHROPIC-F45D.md`
+`%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-f45d\review\REVIEW-ANTHROPIC-F45D.md`

@@ -48,7 +48,7 @@ C2 supersede: el release cerca el run (`_fenced_runs`) y persiste `RUNNING_IDLE`
 
 ### D — mutante de orden en `_commit_retirement`
 
-Copia temporal en `%TEMP%/lote-i-mutant/process_lifecycle.py` (`C:\Users\guill\AppData\Local\Temp\lote-i-mutant\`, equivalente Git-bash `/tmp`; el workspace no se tocó). Se invirtió el orden: `manifest.replace` (línea 1078) antes de `_retire_run_bindings` (línea 1081). El mismo criterio del visitante (`retire_line < replace_line`) falló:
+Copia temporal en `%TEMP%/lote-i-mutant/process_lifecycle.py` (`%USERPROFILE%\AppData\Local\Temp\lote-i-mutant\`, equivalente Git-bash `/tmp`; el workspace no se tocó). Se invirtió el orden: `manifest.replace` (línea 1078) antes de `_retire_run_bindings` (línea 1081). El mismo criterio del visitante (`retire_line < replace_line`) falló:
 
 ```
 MUTANT_FAIL: _commit_retirement must retire bindings before manifest.replace
