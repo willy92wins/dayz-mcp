@@ -36,7 +36,7 @@ Detener la lectura inicial en `LIVE-STATE:END`; buscar después solo las seccion
 No fijar números de línea, límites de lectura ni tamaños: el bloque cambia en cada cierre.
 El histórico separado, si existe, está en `HANDOFF-ARCHIVE.md`.
 
-## Enforce scripts (28 files, 857 KB)
+## Enforce scripts (29 files, 863 KB)
 
 Rutas relativas a la fuente del mod: `addon`.
 Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (incluidos junctions).
@@ -63,6 +63,7 @@ Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (inclui
 - `scripts/5_Mission/MCP_ActionCursor.c` - 7 KB
 - `scripts/5_Mission/MCP_BotControl.c` - 10 KB
 - `scripts/5_Mission/MCP_CameraPath.c` - 11 KB
+- `scripts/5_Mission/MCP_InfectedDrive.c` - 4 KB
 - `scripts/5_Mission/MCP_SurvivorDrive.c` - 8 KB
 - `scripts/5_Mission/MCPBridge.c` - 236 KB
 - `scripts/5_Mission/MCPCallbacks.c` - 2 KB
