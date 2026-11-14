@@ -516,6 +516,8 @@ CLIENT_CAPABILITY_BITS: tuple[str, ...] = (
     "weapon_fire",
     "weapon_raise",
     "weapon_sights",
+    "ui_menu_set",
+    "ui_map_set",
 )
 CAPABILITY_MASK_TABLES: dict[str, dict[int, tuple[str, ...]]] = {
     "server": {CAPABILITY_MASK_EPOCH: SERVER_CAPABILITY_BITS},

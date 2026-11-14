@@ -501,7 +501,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! bit i set means the census name at index i is dispatched. Precomputed:
 	//! no runtime code computes it, and the tests tie it bit for bit to
 	//! CLIENT_POLL_CAPS and to Dispatch().
-	protected const string CLIENT_POLL_CAPS_MASK = "1.3fffffffffff";
+	protected const string CLIENT_POLL_CAPS_MASK = "1.ffffffffffff";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -1650,6 +1650,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			postNow = DispatchUiPause(command, result);
 		}
+		else if (command.cmd == "dev_free_camera_set")
+		{
+			postNow = DispatchDevFreeCameraSet(command, result);
+		}
 		else if (command.cmd == "ui_menu_set")
 		{
 			postNow = DispatchUiMenuSet(command, result);
@@ -1657,10 +1661,6 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "ui_map_set")
 		{
 			postNow = DispatchUiMapSet(command, result);
-		}
-		else if (command.cmd == "dev_free_camera_set")
-		{
-			postNow = DispatchDevFreeCameraSet(command, result);
 		}
 		else if (command.cmd == "ui_dialog")
 		{

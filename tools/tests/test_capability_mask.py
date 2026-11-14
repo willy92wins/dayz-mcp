@@ -189,7 +189,7 @@ def _translated_poll_names(test: unittest.TestCase, filename: str, source: str, 
 class AppendRetireRegressionTest(unittest.TestCase):
     """Append/retire variants: set ties accept them; numbering stays in T1b/T4."""
 
-    def test_append_client_ui_menu_set_is_accepted(self) -> None:
+    def test_append_client_new_verb_is_accepted(self) -> None:
         source = (MISSION / "MCPClientBridge.c").read_text(encoding="utf-8")
         branch = (
             '\t\telse if (command.cmd == "ui_dialog")\n'
@@ -201,32 +201,32 @@ class AppendRetireRegressionTest(unittest.TestCase):
         variant = source.replace(
             branch,
             branch
-            + '\t\telse if (command.cmd == "ui_menu_set")\n'
+            + '\t\telse if (command.cmd == "ui_new_set")\n'
             + "\t\t{\n"
             + "\t\t\tpostNow = DispatchUiDialog(command, result);\n"
             + "\t\t}\n",
             1,
         )
-        self.assertEqual(variant.count("ui_focus,ui_pause"), 1)
-        variant = variant.replace("ui_focus,ui_pause", "ui_focus,ui_menu_set,ui_pause", 1)
-        self.assertEqual(variant.count('CLIENT_POLL_CAPS_MASK = "1.3fffffffffff"'), 1)
+        self.assertEqual(variant.count("ui_menu_set,ui_pause"), 1)
+        variant = variant.replace("ui_menu_set,ui_pause", "ui_menu_set,ui_new_set,ui_pause", 1)
+        self.assertEqual(variant.count('CLIENT_POLL_CAPS_MASK = "1.ffffffffffff"'), 1)
         variant = variant.replace(
-            'CLIENT_POLL_CAPS_MASK = "1.3fffffffffff"',
-            'CLIENT_POLL_CAPS_MASK = "1.7fffffffffff"',
+            'CLIENT_POLL_CAPS_MASK = "1.ffffffffffff"',
+            'CLIENT_POLL_CAPS_MASK = "1.1ffffffffffff"',
             1,
         )
         self.assertNotEqual(variant, source)
         original = CAPABILITY_MASK_TABLES["client"][1]
-        CAPABILITY_MASK_TABLES["client"][1] = CLIENT_CAPABILITY_BITS + ("ui_menu_set",)
+        CAPABILITY_MASK_TABLES["client"][1] = CLIENT_CAPABILITY_BITS + ("ui_new_set",)
         try:
             constant = _mask_constant(variant, "CLIENT_POLL_CAPS_MASK")
-            self.assertEqual(constant, "1.7fffffffffff")
+            self.assertEqual(constant, "1.1ffffffffffff")
             census = _const_census(variant, "CLIENT_POLL_CAPS")
             names, reason = parse_capability_mask("client", constant)
             self.assertEqual(reason, "ok")
             self.assertEqual(set(names), set(census))
             self.assertEqual(set(names), set(client_dispatch_census(variant)))
-            self.assertEqual(len(names), 47)
+            self.assertEqual(len(names), 49)
             self.assertEqual(encode_capability_mask("client", census), constant)
             self.assertEqual(
                 _translated_poll_names(self, "MCPClientBridge.c", variant, "client"),
@@ -302,9 +302,9 @@ class EquivalenceTest(unittest.TestCase):
         masked = _state()
         server_ach = EXPECTED_SERVER_ARG_CONTRACT_HASH
         _poll(legacy, "server", caps=SERVER_CAPS_MAIN, ach=server_ach, xai=xai)
-        _poll(legacy, "client", caps=",".join(CLIENT_EPOCH1))
+        _poll(legacy, "client", caps=",".join(sorted(CLIENT_CAPABILITY_BITS)))
         _poll(masked, "server", cm="1.ffffffffffff", ach=server_ach, xai=xai)
-        _poll(masked, "client", cm="1.3fffffffffff")
+        _poll(masked, "client", cm="1.ffffffffffff")
         return legacy, masked
 
     def test_cm_and_caps_are_equivalent(self) -> None:
@@ -352,7 +352,7 @@ class MixedPeersTest(unittest.TestCase):
     def test_server_caps_client_cm(self) -> None:
         state = _state()
         _poll(state, "server", caps=SERVER_CAPS_MAIN, ach=EXPECTED_SERVER_ARG_CONTRACT_HASH)
-        _poll(state, "client", cm="1.3fffffffffff")
+        _poll(state, "client", cm="1.ffffffffffff")
         compared, ready = _bridge_status(state)
         self.assertEqual(ready, {"ready": True, "reason": "ready"})
         for key in ("server_peer", "client_peer"):
@@ -362,7 +362,7 @@ class MixedPeersTest(unittest.TestCase):
     def test_server_cm_client_caps(self) -> None:
         state = _state()
         _poll(state, "server", cm="1.ffffffffffff", ach=EXPECTED_SERVER_ARG_CONTRACT_HASH)
-        _poll(state, "client", caps=",".join(CLIENT_EPOCH1))
+        _poll(state, "client", caps=",".join(sorted(CLIENT_CAPABILITY_BITS)))
         compared, ready = _bridge_status(state)
         self.assertEqual(ready, {"ready": True, "reason": "ready"})
         for key in ("server_peer", "client_peer"):
@@ -371,7 +371,8 @@ class MixedPeersTest(unittest.TestCase):
 
 
 class OldFormatCompatibilityTest(unittest.TestCase):
-    """T3: main's caps= wire forms give exactly today's census and verdicts."""
+    """T3: main's caps= wire forms still store their census; the client
+    verdict names the verbs added since (ui_menu_set, ui_map_set)."""
 
     def test_main_census_strings_still_announce(self) -> None:
         state = _state()
@@ -388,8 +389,14 @@ class OldFormatCompatibilityTest(unittest.TestCase):
             self.assertEqual(len(view["announced_commands"]), count)
         compared, ready = _bridge_status(state)
         self.assertEqual(ready, {"ready": True, "reason": "ready"})
-        for key in ("server_peer", "client_peer"):
-            self.assertEqual(compared[key]["capabilities"]["state"], "match")
+        self.assertEqual(compared["server_peer"]["capabilities"]["state"], "match")
+        self.assertEqual(compared["client_peer"]["capabilities"]["state"], "mismatch")
+        self.assertEqual(
+            compared["client_peer"]["capabilities"][
+                "registered_without_announced_command"
+            ],
+            ["ui_map_set", "ui_menu_set"],
+        )
         status, body = state.enqueue_command("gameplay_state", {}, peer="client")
         self.assertEqual(status, 200, body)
 
