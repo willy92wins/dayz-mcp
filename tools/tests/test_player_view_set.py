@@ -83,7 +83,10 @@ RUNNER_METHODS = (
     "protected void ProcessJobs(MCPJobRunnerOwner owner)",
 )
 # The job kinds HasExclusiveJob leaves out; the tool description names them.
-NON_EXCLUSIVE_KINDS = ("ui_dialog", "weapon_action", "input_trigger", "player_move", "actor_emote", "dev_free_camera_set")
+NON_EXCLUSIVE_KINDS = (
+    "ui_dialog", "weapon_action", "input_trigger", "player_move",
+    "actor_emote", "ui_menu", "ui_map", "dev_free_camera_set",
+)
 EXCLUSION_CLAUSE = (
     "busy while an exclusive client job runs, such as camera_set or player_look_at (a "
     + ", ".join(NON_EXCLUSIVE_KINDS[:-1])

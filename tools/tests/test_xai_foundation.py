@@ -34,6 +34,7 @@ from tests.enforce_subset_helpers import (
     EnforceArray,
     EnforceMap,
     EnforceString,
+    EnforceVector,
     method_body,
     translate,
 )
@@ -1180,6 +1181,9 @@ class _FakeMember:
     def GetEmoteManager(self) -> object:
         return self.emotes
 
+    def GetPosition(self) -> EnforceVector:
+        return EnforceVector((0.0, 0.0, 0.0))
+
     def eAI_Despawn(self) -> None:
         self.despawns += 1
 
@@ -1231,8 +1235,15 @@ def _adapter_namespace() -> dict:
     system_queue = _FakeSystemQueue()
     namespace: dict[str, object] = {
         "_S": _WireString,
+        "array": EnforceArray,
         "m_AIGroups": None,
         "m_RuntimeObjects": EnforceMap(),
+        "m_LeaseCloseDeletion": EnforceArray(),
+        "AI_DROPPED_RADIUS_M": 30.0,
+        "Log": lambda message: None,
+        "ItemBase": SimpleNamespace(Cast=lambda obj: None),
+        "eAIBase": SimpleNamespace(Cast=lambda obj: None),
+        "InventoryTraversalType": SimpleNamespace(LEVELORDER=0),
         "this": object(),
         "eAIGroup": SimpleNamespace(
             GetGroupByID=lambda group_id, create: registry["by_id"].get(group_id)
@@ -1245,7 +1256,11 @@ def _adapter_namespace() -> dict:
         "_system_queue": system_queue,
         "CALL_CATEGORY_SYSTEM": 0,
         "GetGame": lambda: SimpleNamespace(
-            GetCallQueue=lambda category: system_queue if category == 0 else None
+            GetCallQueue=lambda category: system_queue if category == 0 else None,
+            GetObjectsAtPosition3D=lambda pos, radius, objects, cargos: None,
+            GetPlayers=lambda players: None,
+            HasInventoryJunctureItem=lambda entity: False,
+            ObjectDelete=lambda obj: None,
         ),
     }
     for signature, members in (
@@ -1258,6 +1273,22 @@ def _adapter_namespace() -> dict:
         (
             "protected bool AIGroupOriginalPresent(MCPAIGroupRecord record)",
             (),
+        ),
+        (
+            "protected bool AIIsMemberEntity(MCPAIGroupRecord record, Man owner)",
+            (),
+        ),
+        (
+            "protected bool AILastHeldByGroup(MCPAIGroupRecord record, EntityAI entity)",
+            (),
+        ),
+        (
+            "protected bool AIDroppedFromGroup(MCPAIGroupRecord record, EntityAI entity)",
+            (),
+        ),
+        (
+            "protected void AISweepDroppedItems(MCPAIGroupRecord record)",
+            ("m_LeaseCloseDeletion",),
         ),
         (
             "protected bool AIGroupRequestRelease(MCPAIGroupRecord record)",
@@ -1273,7 +1304,7 @@ def _adapter_namespace() -> dict:
             signature,
             namespace,
             members=members,
-            class_types=("MCPAIGroupRecord", "MCPAIGroupMemberRecord", "eAIGroup", "MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "Object", "EmoteManager", "ScriptCallQueue"),
+            class_types=("MCPAIGroupRecord", "MCPAIGroupMemberRecord", "eAIGroup", "MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "Object", "EmoteManager", "ScriptCallQueue", "Man", "EntityAI", "ItemBase", "GameInventory", "CargoBase", "array"),
         )
     return namespace
 
@@ -1288,6 +1319,8 @@ def _record(namespace: dict, *, members: list, group=None, expansion_id: int = 7
         scene_id=_WireString.of(""),
         behaviour=_WireString.of("HOLD"),
         group_state=EnforceString.of("active"),
+        dropped_deleted=0,
+        dropped_kept=0,
         members=EnforceArray(members),
     )
 
@@ -1364,7 +1397,7 @@ class ExpansionReleaseDispatchTest(unittest.TestCase):
         source = ADAPTER.read_text(encoding="utf-8")
         namespace["MCPAIGroup"] = lambda: SimpleNamespace(
             release=_WireString.of(""), confirmed=False, released=-1,
-            remaining_ids=EnforceArray(),
+            remaining_ids=EnforceArray(), dropped_deleted=0, dropped_kept=0,
         )
         for signature in (
             "protected MCPAIGroupRecord FindAIGroupByToken(string spawnToken)",
@@ -1485,7 +1518,7 @@ class ExpansionBaseHooksTest(unittest.TestCase):
         poll_params = method_body(source, "protected string ExtensionPollParams()")
         self.assertIn('return "";', poll_params)
         caps = method_body(source, "protected string ServerCapabilities()")
-        self.assertIn("return SERVER_CAPABILITIES;", caps)
+        self.assertIn("return SERVER_CAPABILITIES_MASK;", caps)
         self.assertNotIn("ai_group", _base_commands())
         start_poll = method_body(source, "protected void StartPoll()")
         self.assertIn("ServerCapabilities()", start_poll)

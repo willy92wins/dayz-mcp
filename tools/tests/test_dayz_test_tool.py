@@ -1270,6 +1270,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "session_idle_s",
                 "display_timeout_s",
                 "server_boot",
+                "client_exit",
             },
         )
         self.assertIsNone(result["storage_recovery_reason"])
@@ -1428,6 +1429,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "session_idle_s",
                 "display_timeout_s",
                 "server_boot",
+                "client_exit",
             },
         )
         self.assertIsNone(result["storage_recovery_reason"])
@@ -1517,6 +1519,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "session_idle_s",
                 "display_timeout_s",
                 "server_boot",
+                "client_exit",
             },
         )
 
@@ -1599,6 +1602,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "session_idle_s",
                 "display_timeout_s",
                 "server_boot",
+                "client_exit",
             },
         )
 

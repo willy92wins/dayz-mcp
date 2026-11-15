@@ -158,6 +158,7 @@ CLIENT_COMMANDS = {
     "input_trigger",
     "player_move",
     "player_respawn",
+    "player_respawn_survivor",
     "player_trace",
     "vehicle_get_in_client",
     "engine_set",
@@ -170,6 +171,8 @@ CLIENT_COMMANDS = {
     "ui_click",
     "ui_reload_layout",
     "ui_focus",
+    "ui_map_set",
+    "ui_menu_set",
     "ui_pause",
     "dev_free_camera_set",
     "ui_dialog",
@@ -190,6 +193,11 @@ CLIENT_COMMANDS = {
     "player_view_set",
     "actor_emote",
 }
+
+# ui_menu_set (d4b4): the closed menu table, the one Python site for it
+# (UiMenuId in MCPClientBridge.c is the Enforce one). "map" is the only
+# entry; another menu arrives with its own ticket and vanilla reading.
+UI_MENU_NAMES = frozenset({"map"})
 
 CREDENTIAL_RECOVERY_TTL_S = 300.0
 CREDENTIAL_RECOVERY_COUNT_MAX = 2_147_483_647
@@ -914,6 +922,52 @@ def is_printable_input_name(value: object) -> bool:
     return all(32 <= ord(character) <= 126 for character in value)
 
 
+# player_respawn_survivor: the 31 vanilla survivor classes. Source: the public
+# unbinarized config dump ravmustang/DayZ_SA_ClassName_Dump, commit b5daa78856
+# (2026-05-26), CurrentConfigs/characters_data/config.cpp lines 8724-10066
+# (CfgPatches DZ_Characters): every class with scope=2 deriving from
+# SurvivorMale_Base/SurvivorFemale_Base. The runtime ListAvailableCharacters()
+# is not enough for this allowlist: it also lists survivor classes a mod adds,
+# and a mod's class must be refused before the bridge.
+VANILLA_SURVIVOR_TYPES: tuple[str, ...] = (
+    "SurvivorM_Mirek",
+    "SurvivorM_Boris",
+    "SurvivorM_Cyril",
+    "SurvivorM_Denis",
+    "SurvivorM_Elias",
+    "SurvivorM_Francis",
+    "SurvivorM_Guo",
+    "SurvivorM_Hassan",
+    "SurvivorM_Indar",
+    "SurvivorM_Jose",
+    "SurvivorM_Kaito",
+    "SurvivorM_Lewis",
+    "SurvivorM_Manua",
+    "SurvivorM_Niki",
+    "SurvivorM_Oliver",
+    "SurvivorM_Peter",
+    "SurvivorM_Quinn",
+    "SurvivorM_Rolf",
+    "SurvivorM_Seth",
+    "SurvivorM_Taiki",
+    "SurvivorF_Eva",
+    "SurvivorF_Frida",
+    "SurvivorF_Gabi",
+    "SurvivorF_Helga",
+    "SurvivorF_Irena",
+    "SurvivorF_Judy",
+    "SurvivorF_Keiko",
+    "SurvivorF_Linda",
+    "SurvivorF_Maria",
+    "SurvivorF_Naomi",
+    "SurvivorF_Baty",
+)
+
+
+def is_vanilla_survivor_type(value: object) -> bool:
+    return isinstance(value, str) and value in VANILLA_SURVIVOR_TYPES
+
+
 # input_trigger bounds. Mirror MCPInputTriggerControl (DIK_MAX, HOLD_MAX_S,
 # PRESS_MAX_TTL_S) in addon/scripts/5_Mission/MCPClientBridge.c; a test keeps
 # the copies equal. hold_s and the press TTL are refused outside (0, max].
@@ -1564,7 +1618,10 @@ _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "chat_read": "bridge_capability_missing",
     "gameplay_state": "bridge_capability_missing",
     "hud_set": "bridge_capability_missing",
+    "player_respawn_survivor": "bridge_capability_missing",
     "player_view_set": "bridge_capability_missing",
+    "ui_map_set": "bridge_capability_missing",
+    "ui_menu_set": "bridge_capability_missing",
     "ui_pause": "bridge_capability_missing",
     "dev_free_camera_set": "bridge_capability_missing",
 }
@@ -1616,8 +1673,38 @@ _AI_ORDER_VALIDATORS: dict[str, _FieldValidator] = {
 _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "gameplay_state": _command_schema(_schema_variant()),
     "ui_pause": _command_schema(_schema_variant()),
+    # ui_menu_set (d4b4): menu from the closed table, open a strict bool.
+    "ui_menu_set": _command_schema(
+        _schema_variant(
+            required=("menu", "open"),
+            validators={
+                "menu": _one_of(*sorted(UI_MENU_NAMES)),
+                "open": _is_strict_bool,
+            },
+        )
+    ),
+    # ui_map_set (d4b4): scale and center ([x, z] in world metres), each
+    # optional, at least one, and no other keys.
+    "ui_map_set": _command_schema(
+        _schema_variant(
+            required=("scale",), validators={"scale": _SAFE_POSITIVE_REAL}
+        ),
+        _schema_variant(
+            required=("center",), validators={"center": _is_real_list(2)}
+        ),
+        _schema_variant(
+            required=("scale", "center"),
+            validators={"scale": _SAFE_POSITIVE_REAL, "center": _is_real_list(2)},
+        ),
+    ),
     "restore_gameplay": _command_schema(_schema_variant()),
     "player_respawn": _command_schema(_schema_variant()),
+    "player_respawn_survivor": _command_schema(
+        _schema_variant(
+            required=("survivor_type",),
+            validators={"survivor_type": is_vanilla_survivor_type},
+        )
+    ),
     "key_press": _command_schema(
         _schema_variant(
             required=("dik",),
@@ -4740,6 +4827,34 @@ class ServerState:
                 f"{binding.creation_time_utc}"
             )
 
+    def process_polled(
+        self, run_id: str, pid: int, creation_time_utc: str
+    ) -> bool | None:
+        """Whether the bound process for this identity has polled, or None."""
+        if (
+            not isinstance(run_id, str)
+            or not run_id
+            or not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid <= 0
+        ):
+            return None
+        wanted = normalize_creation_time_utc(creation_time_utc)
+        if wanted is None:
+            return None
+        with self._lock:
+            for binding in self._bindings.values():
+                if _binding_run_id(binding) != run_id:
+                    continue
+                if getattr(binding, "pid", None) != pid:
+                    continue
+                if normalize_creation_time_utc(
+                    getattr(binding, "creation_time_utc", None)
+                ) != wanted:
+                    continue
+                return binding.last_poll_at is not None
+            return None
+
     def run_has_bound_binding(self, run_id: str) -> bool:
         """True iff a present binding for this run is BOUND. STARTING does not dispatch."""
 
@@ -7279,6 +7394,7 @@ class ServerState:
         load: dict[str, int | float] | None = None,
         wait_s: float = 0.0,
         xai: str | None = None,
+        cm: str | None = None,
     ) -> tuple[int, dict]:
         if peer not in VALID_PEERS:
             return 400, {"error": "bad_peer"}
@@ -7389,6 +7505,7 @@ class ServerState:
                     self._peer_last_class[peer] = bind_label
                     if bind_label == BINDING_BOUND:
                         accredited = True
+                        binding.last_poll_at = now
                         self._bound_last_poll_at[peer] = now
                         run_id = _binding_run_id(binding)
                         if self._poll_should_hold_commands(run_id):
@@ -7428,7 +7545,7 @@ class ServerState:
             # After the whole binding chain: the census belongs to THIS poll,
             # so it needs this poll's accreditation, not the previous one's.
             self._record_poll_caps_locked(
-                peer, caps, accredited, ach=ach, instance=token, now=decision_at, xai=xai
+                peer, caps, accredited, ach=ach, instance=token, now=decision_at, xai=xai, cm=cm
             )
             if load is not None and self._load_reading_applies_locked(
                 peer, token, accredited
@@ -8840,6 +8957,7 @@ class ServerState:
         instance: str | None = None,
         now: float | None = None,
         xai: str | None = None,
+        cm: str | None = None,
     ) -> None:
         """Keep only the last accredited announcement, tagged with its generation.
 
@@ -8851,21 +8969,35 @@ class ServerState:
         """
 
         if accredited:
-            names, reason = parse_poll_caps(raw)
             ach_value = ach if isinstance(ach, str) and ach else None
             # H3 (#321): the adapter announces verbs as an xai bitmask, not
             # as caps names. Expand it here so the stored census, admission
             # and the comparator all keep seeing names.
-            from dayz_mcp.bridge_readiness import parse_xai
+            from dayz_mcp.bridge_readiness import parse_capability_mask, parse_xai
 
             xai_value, xai_verbs = parse_xai(xai)
-            if names is not None and xai_verbs:
-                if set(names) & set(xai_verbs):
-                    names, reason = None, "duplicate"
-                elif len(names) + len(xai_verbs) > POLL_CAPS_MAX_NAMES:
-                    names, reason = None, "too_many"
+            if isinstance(cm, str) and cm:
+                # capsbits: the census travels as cm=<epoch>.<hex>. No PBO
+                # sends both forms; fail closed when one does.
+                if isinstance(raw, str) and raw:
+                    names, reason = None, "ambiguous"
                 else:
-                    names = (*names, *xai_verbs)
+                    names, reason = parse_capability_mask(peer, cm)
+                    if names is not None and xai_verbs:
+                        if set(names) & set(xai_verbs):
+                            names, reason = None, "duplicate"
+                        else:
+                            # Bounded by its table, not POLL_CAPS_MAX_NAMES.
+                            names = (*names, *xai_verbs)
+            else:
+                names, reason = parse_poll_caps(raw)
+                if names is not None and xai_verbs:
+                    if set(names) & set(xai_verbs):
+                        names, reason = None, "duplicate"
+                    elif len(names) + len(xai_verbs) > POLL_CAPS_MAX_NAMES:
+                        names, reason = None, "too_many"
+                    else:
+                        names = (*names, *xai_verbs)
             announced_at = now if isinstance(now, (int, float)) else self._now()
             announced_instance = instance if isinstance(instance, str) else None
         else:
@@ -10482,6 +10614,7 @@ class Handler(BaseHTTPRequestHandler):
         inst_raw = qs.get("inst", [""])[0]
         instance = inst_raw if inst_raw else None
         caps_raw = qs.get("caps", [""])[0]
+        cm_raw = qs.get("cm", [""])[0]
         ach_raw = qs.get("ach", [""])[0]
         xai_raw = qs.get("xai", [""])[0]
         load = _load_from_poll_query(qs)
@@ -10497,6 +10630,7 @@ class Handler(BaseHTTPRequestHandler):
             caps=caps_raw,
             ach=ach_raw,
             xai=xai_raw,
+            cm=cm_raw,
             load=load,
             wait_s=wait_s,
         )
@@ -10511,9 +10645,11 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(delay_ms / 1000.0)
 
         inst8 = instance_prefix(instance) or "-"
+        census = "cm" if cm_raw else "caps" if caps_raw else "none"
         self._log(
             f"HIT GET /poll peer={peer} inst8={inst8} bind={bind} "
-            f"commands={len(commands)} delay_ms={delay_ms}"
+            f"commands={len(commands)} delay_ms={delay_ms} "
+            f"census={census} plen={len(getattr(self, 'path', '') or '')}"
         )
         self._json(200, {"commands": commands})
 
@@ -10870,7 +11006,11 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
     # second process LISTEN on an already-bound port, which defeats the exclusive
     # instance lock (two loopbacks would silently split bridge polls). Exclusive
     # bind makes the second bind fail with EADDRINUSE.
-    allow_reuse_address = False
+    # Linux differs: SO_REUSEADDR never admits a second listener there (that is
+    # SO_REUSEPORT), it only lets a restarted daemon bind while the game's last
+    # polls sit in TIME_WAIT. Without it the restart fails with EADDRINUSE for up
+    # to a minute, so it is on outside Windows.
+    allow_reuse_address = os.name != "nt"
 
     def __init__(self, *args, **kwargs):
         self._http_workers = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
@@ -10992,8 +11132,9 @@ def _bind_exclusive(port: int, log_sink: LogSink, reclaim_orphans: bool) -> "Exc
         ):
             raise
         # A confirmed-dead-parent dayz_mcp orphan was terminated and the port came
-        # free; retry the exclusive bind exactly once. The exclusive lock stays intact — the bind is
-        # still ExclusiveThreadingHTTPServer with allow_reuse_address False.
+        # free; retry the exclusive bind exactly once. The exclusive lock stays intact: the bind is
+        # still ExclusiveThreadingHTTPServer (exclusive bind on Windows, where
+        # allow_reuse_address is False; it is True only off Windows).
         return ExclusiveThreadingHTTPServer(("127.0.0.1", port), Handler)
 
 

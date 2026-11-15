@@ -32,6 +32,13 @@ os.environ.setdefault(
     "LOCALAPPDATA", str(Path(tempfile.gettempdir()) / "dayz-mcp-localapp")
 )
 
+if os.name != "nt":
+    # The Linux implementations, as python -m dayz_mcp installs them first. Without
+    # them the imports below stop at ctypes.WinDLL.
+    from dayz_mcp import linux_compat  # noqa: E402
+
+    linux_compat.install()
+
 from dayz_mcp import native_launcher_transaction as _launcher_transaction  # noqa: E402
 from dayz_mcp import server as _server  # noqa: E402
 

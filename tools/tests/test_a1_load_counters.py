@@ -12,6 +12,7 @@ import unittest
 from types import SimpleNamespace
 
 from dayz_mcp import core, loopback, server as server_module
+from dayz_mcp.bridge_readiness import encode_capability_mask
 from dayz_mcp.instance_fence import BINDING_BOUND
 from tests.enforce_subset_helpers import EnforceString
 from tests.poll_harness_helpers import _MISSION, _bridge_harness, _dispatch_branches
@@ -251,8 +252,8 @@ class LoadCountersTest(unittest.TestCase):
     ) -> bytes:
         ver_raw = (core.EXPECTED_BRIDGE_VERSION + "~" + (game_version or "unknown")).encode("utf-8")
         ver_enc = _rfc3986_encode(ver_raw)
-        # The server sends its census as is (test_poll_url_engine_limit).
-        caps_enc = caps_raw if name == "MCPBridge.c" else _rfc3986_encode(caps_raw)
+        # Both bridges send the capability mask as is (test_poll_url_engine_limit).
+        caps_enc = caps_raw
         load_enc = (
             f"&ia={ia}&pc={pc}&lpims={lpims}&cc={cc}&cb={cb}&bms={bms}&lcp={lcp}"
         ).encode("ascii")
@@ -266,7 +267,7 @@ class LoadCountersTest(unittest.TestCase):
                 + key.encode("utf-8")
                 + b"&ver="
                 + ver_enc
-                + b"&caps="
+                + b"&cm="
                 + caps_enc
                 + b"&ach="
                 + ach_enc
@@ -280,7 +281,7 @@ class LoadCountersTest(unittest.TestCase):
             + b"&ver="
             + ver_enc
             + inst_enc
-            + b"&caps="
+            + b"&cm="
             + caps_enc
             + load_enc
             + _WAIT_MS
@@ -291,11 +292,13 @@ class LoadCountersTest(unittest.TestCase):
     ) -> None:
         ns = _bridge_harness(name, source=source)
         wire_str = ns["_S"]
-        # Built by the constructor, before any poll. The server's census needs
-        # no encoding, so only this read sees an init moved into StartPoll.
-        expected_caps_wire = (
-            expected_caps_raw if name == "MCPBridge.c" else _rfc3986_encode(expected_caps_raw)
-        )
+        # Built by the constructor, before any poll. The mask needs no
+        # encoding, so only this read sees an init moved into StartPoll.
+        # expected_caps_raw still names the census; the wire carries its mask.
+        peer = "server" if name == "MCPBridge.c" else "client"
+        expected_caps_wire = encode_capability_mask(
+            peer, expected_caps_raw.decode("ascii").split(",")
+        ).encode("ascii")
         self.assertEqual(ns["m_PollCapabilities"].data, expected_caps_wire)
         ns["game"].version = "1.30.164200"
         ns["m_Key"] = wire_str.of("k1")
@@ -306,7 +309,7 @@ class LoadCountersTest(unittest.TestCase):
             key="k1",
             game_version="1.30.164200",
             inst="inst/1",
-            caps_raw=expected_caps_raw,
+            caps_raw=expected_caps_wire,
             ia=0,
             pc=1,
             lpims=0,
@@ -328,7 +331,7 @@ class LoadCountersTest(unittest.TestCase):
             key="k2",
             game_version="1.30.164200",
             inst="",
-            caps_raw=expected_caps_raw,
+            caps_raw=expected_caps_wire,
             ia=0,
             pc=2,
             lpims=250,
@@ -342,7 +345,7 @@ class LoadCountersTest(unittest.TestCase):
         expected_ctor_calls = (
             [server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH.encode("ascii")]
             if name == "MCPBridge.c"
-            else [expected_caps_raw]
+            else []
         )
         self.assertEqual(ns["ctor_encode_calls"], expected_ctor_calls)
 
@@ -351,10 +354,14 @@ class LoadCountersTest(unittest.TestCase):
         for name in ("MCPBridge.c", "MCPClientBridge.c"):
             source = (_MISSION / name).read_text(encoding="utf-8")
             expected_caps_raw = ",".join(_dispatch_branches(source)).encode("ascii")
+            peer = "server" if name == "MCPBridge.c" else "client"
+            expected_mask = encode_capability_mask(
+                peer, expected_caps_raw.decode("ascii").split(",")
+            ).encode("ascii")
             expected_ctor_calls = (
                 [server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH.encode("ascii")]
                 if name == "MCPBridge.c"
-                else [expected_caps_raw]
+                else []
             )
             for game_version in ("", "1.30.164200"):
                 for key in ("key_initial", "key_reloaded"):
@@ -402,7 +409,7 @@ class LoadCountersTest(unittest.TestCase):
                                         key=key,
                                         game_version=game_version,
                                         inst=inst,
-                                        caps_raw=expected_caps_raw,
+                                        caps_raw=expected_mask,
                                         ia=ia,
                                         pc=poll_index,
                                         lpims=lpims,
@@ -421,12 +428,12 @@ class LoadCountersTest(unittest.TestCase):
         server_caps_raw = ",".join(_dispatch_branches(server_source)).encode("ascii")
         client_caps_raw = ",".join(_dispatch_branches(client_source)).encode("ascii")
 
-        server_caps_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
+        server_caps_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES_MASK;\n"
         server_ach_init = "\t\tm_PollArgContractHash = EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);\n"
-        client_caps_init = "\t\tm_PollCapabilities = EncodeQueryValue(CLIENT_POLL_CAPS);\n"
-        server_caps_wire = '\t\trequest = request + "&caps=" + ServerCapabilities();\n'
+        client_caps_init = "\t\tm_PollCapabilities = CLIENT_POLL_CAPS_MASK;\n"
+        server_caps_wire = '\t\trequest = request + "&cm=" + ServerCapabilities();\n'
         server_ach_wire = '\t\trequest = request + "&ach=" + m_PollArgContractHash;\n'
-        client_caps_wire = '\t\trequest = request + "&caps=" + m_PollCapabilities;\n'
+        client_caps_wire = '\t\trequest = request + "&cm=" + m_PollCapabilities;\n'
         try_init_head = "\tprotected void TryInit()\n\t{\n"
 
         for needle in (server_caps_init, server_ach_init, server_caps_wire, server_ach_wire, try_init_head):
@@ -663,9 +670,9 @@ class LoadCountersTest(unittest.TestCase):
         client_source = (_MISSION / "MCPClientBridge.c").read_text(encoding="utf-8")
         server_caps_raw = ",".join(_dispatch_branches(server_source)).encode("ascii")
         client_caps_raw = ",".join(_dispatch_branches(client_source)).encode("ascii")
-        server_caps_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
+        server_caps_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES_MASK;\n"
         server_ach_init = "\t\tm_PollArgContractHash = EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);\n"
-        client_caps_init = "\t\tm_PollCapabilities = EncodeQueryValue(CLIENT_POLL_CAPS);\n"
+        client_caps_init = "\t\tm_PollCapabilities = CLIENT_POLL_CAPS_MASK;\n"
         positives = (
             (
                 "MCPBridge.c",

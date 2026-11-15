@@ -51,6 +51,7 @@ RECORD_ENTER_TRIGGER = "void MCPRecordEnterTrigger(ScriptedEntity trigger)"
 RECORD_LEAVE_TRIGGER = "void MCPRecordLeaveTrigger(ScriptedEntity trigger)"
 FILL = "protected void FillPlayerTriggers(PlayerBase body, MCPPlayerState state)"
 
+# Both censuses as they are on the main this branch last merged (60587ac): this change adds no name to either.
 EXPECTED_SERVER_CAPS = (
     "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,"
     "infected_drive,inventory_attach,inventory_give,inventory_move,lease_close,loadout_apply,"
@@ -66,8 +67,8 @@ EXPECTED_CLIENT_CAPS = (
     "action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,"
     "camera_set,camera_set_focus,chat_read,dev_free_camera_set,engine_set,gameplay_state,hud_set,"
     "input_describe,input_trigger,key_press,lease_close_client,player_look_at,player_look_at_release,"
-    "player_move,player_respawn,player_trace,player_view_set,restore_gameplay,ui_click,ui_dialog,"
-    "ui_focus,ui_pause,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,"
+    "player_move,player_respawn,player_respawn_survivor,player_trace,player_view_set,restore_gameplay,ui_click,ui_dialog,"
+    "ui_focus,ui_map_set,ui_menu_set,ui_pause,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,"
     "vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights"
 )
 

@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import os
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
@@ -189,6 +190,8 @@ class DefaultProvidersTest(unittest.TestCase):
             ),
         ):
             return sp.observe_app_steam_view()
+
+    @unittest.skipIf(os.name != "nt", "Windows Steam registry provider defaults: off Windows the default provider is steam_linux's")
 
     def test_wmi_reads_the_running_steam_and_winreg_the_copy(self) -> None:
         for copy_pid, app_view_pid in ((_GONE_STEAM, _GONE_STEAM), (None, None)):

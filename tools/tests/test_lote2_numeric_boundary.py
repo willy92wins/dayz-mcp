@@ -44,6 +44,8 @@ def census(app):
 def sample(schema):
     if "default" in schema:
         return schema["default"]
+    if "const" in schema:
+        return schema["const"]
     if "enum" in schema:
         return schema["enum"][0]
     if "anyOf" in schema:
@@ -140,9 +142,11 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 3 from 0205 (chat_read marker/max_lines/timeout_s).
         # + 1 from 726c (ui_pause timeout_s).
         # + 6 from 702f OverrideDOF (camera_set and camera_set_focus focus_length/focus_length_near/focus_depth_offset).
+        # + 4 from d4b4 (ui_menu_set timeout_s; ui_map_set scale/center/timeout_s;
+        # menu is a string and open a bool, not in this census).
         # + 1 from beb3 (dev_free_camera_set timeout_s; active is a bool).
         # + 2 from fa2b (query_player_state trigger_cursor/trigger_run, both StrictInt).
-        self.assertEqual(len(rows), 257)
+        self.assertEqual(len(rows), 261)
         self.assertIn(("actor_emote", "object_id", "int"), rows)
         self.assertIn(("ai_group_order", "group_id", "int"), rows)
         self.assertIn(("ai_group_order", "timeout_s", "float"), rows)
@@ -153,6 +157,10 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("chat_read", "max_lines", "int"), rows)
         self.assertIn(("chat_read", "timeout_s", "float"), rows)
         self.assertIn(("ui_pause", "timeout_s", "float"), rows)
+        self.assertIn(("ui_menu_set", "timeout_s", "float"), rows)
+        self.assertIn(("ui_map_set", "scale", "float"), rows)
+        self.assertIn(("ui_map_set", "center", "vector"), rows)
+        self.assertIn(("ui_map_set", "timeout_s", "float"), rows)
         self.assertIn(("query_player_state", "trigger_cursor", "int"), rows)
         self.assertIn(("query_player_state", "trigger_run", "int"), rows)
         self.assertIn(("player_find", "timeout_s", "float"), rows)

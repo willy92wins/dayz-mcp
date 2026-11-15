@@ -1,4 +1,4 @@
-"""Client capability announcement (`caps=` on every poll) vs the Enforce dispatcher.
+"""Client capability announcement (`cm=` bitmask on every poll) vs the Enforce dispatcher.
 
 The census the client bridge announces must be exactly the set of `command.cmd`
 branches its Dispatch() handles before the terminal `unknown_command` else.
@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs
 
+from dayz_mcp.bridge_readiness import parse_capability_mask
 from tests._addon_paths import addon_root
 from tests.bridge_client_capabilities_helpers import (
     CAPS_DECL_RE,
@@ -43,8 +44,8 @@ START_POLL_SIGNATURE = "protected void StartPoll()"
 REQUIRED_CLIENT_CAPS = ("key_press", "player_respawn", "ui_dialog")
 
 CACHE_DECL = "protected string m_PollCapabilities;"
-CACHE_INIT = "m_PollCapabilities = EncodeQueryValue(CLIENT_POLL_CAPS);"
-ANNOUNCE_LINE = 'request = request + "&caps=" + m_PollCapabilities;'
+CACHE_INIT = "m_PollCapabilities = CLIENT_POLL_CAPS_MASK;"
+ANNOUNCE_LINE = 'request = request + "&cm=" + m_PollCapabilities;'
 _STRING_LITERAL_RE = re.compile(r'"(?:\\.|[^"\\\n])*"')
 _CONST_STRING_DECL_RE = re.compile(r"\bconst\s+string\s+([A-Za-z_]\w*)\s*=\s*([^;]+);")
 _CONST_INT_DECL_RE = re.compile(r"\bconst\s+int\s+([A-Za-z_]\w*)\s*=\s*(-?\d+)\s*;")
@@ -338,9 +339,12 @@ def _execute_translated_client_poll(source: str, cleaned: str) -> list[str]:
     if not request.startswith("poll?"):
         raise AssertionError(f"unexpected client poll path: {request!r}")
     parsed = parse_qs(request[len("poll?") :], strict_parsing=True, keep_blank_values=True)
-    if "caps" not in parsed or len(parsed["caps"]) != 1:
-        raise AssertionError(f"missing single caps parameter in {request!r}")
-    return parsed["caps"][0].split(",") if parsed["caps"][0] else []
+    if "cm" not in parsed or len(parsed["cm"]) != 1:
+        raise AssertionError(f"missing single cm parameter in {request!r}")
+    names, reason = parse_capability_mask("client", parsed["cm"][0])
+    if reason != "ok" or names is None:
+        raise AssertionError(f"undecodable cm parameter in {request!r}: {reason}")
+    return list(names)
 
 
 def verify_poll_wire(source: str) -> None:
@@ -392,7 +396,7 @@ def verify_poll_wire(source: str) -> None:
         raise AssertionError("caps travel alongside ver (after it)")
 
     wire_caps = _execute_translated_client_poll(source, cleaned)
-    if wire_caps != announced_caps(source):
+    if set(wire_caps) != set(announced_caps(source)):
         raise AssertionError("translated MCPClientBridge() + StartPoll() caps differ from CLIENT_POLL_CAPS")
 
 
@@ -942,7 +946,7 @@ class BridgeClientCapabilitiesTest(unittest.TestCase):
             "announce_dropped_from_poll": source.replace("\t\t" + ANNOUNCE_LINE + "\n", "", 1),
             "cache_decl_dropped": source.replace("\t" + CACHE_DECL + "\n", "", 1),
             "cache_init_dropped_from_constructor": source.replace("\t\t" + CACHE_INIT + "\n", "", 1),
-            "cache_init_not_encoded": source.replace(CACHE_INIT, "m_PollCapabilities = CLIENT_POLL_CAPS;", 1),
+            "cache_init_from_census_names": source.replace(CACHE_INIT, "m_PollCapabilities = CLIENT_POLL_CAPS;", 1),
             "cache_to_upper_after_init": source.replace(
                 CACHE_INIT, CACHE_INIT + "\n\t\tm_PollCapabilities.ToUpper();", 1
             ),

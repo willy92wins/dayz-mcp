@@ -511,6 +511,75 @@ def _object_set_health_detail(result: dict[str, Any]) -> str:
     return f"observed=health01_after={health01_after} health_level_after={health_level_after}"
 
 
+# ui_menu_set fills ui_menu before ui_menu_busy, ui_menu_not_opened and
+# ui_menu_not_closed (MCPClientBridge.c DispatchUiMenuSet/PostUiMenuJob),
+# and ui_map_set fills ui_map before ui_map_not_set and ui_map_widget_missing
+# (DispatchUiMapSet/PostUiMapJob). Only the values the bridge read cross, each
+# dropped when it is not of the shape below; no pair left keeps the bare code.
+_UI_MENU_ERROR_CODES = frozenset(
+    {"ui_menu_busy", "ui_menu_not_opened", "ui_menu_not_closed"}
+)
+_UI_MENU_MAP_TOKEN_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
+
+
+def _ui_menu_set_detail(result: dict[str, Any]) -> str:
+    if str(result.get("error") or "") not in _UI_MENU_ERROR_CODES:
+        return ""
+    report = result.get("ui_menu")
+    if not isinstance(report, dict):
+        return ""
+    pairs: list[str] = []
+    for key in ("open_before", "open_after"):
+        value = report.get(key)
+        if isinstance(value, int) and value in (0, 1):
+            pairs.append(f"{key}={int(value)}")
+    class_name = report.get("class_name")
+    if isinstance(class_name, str) and _UI_MENU_MAP_TOKEN_RE.fullmatch(class_name):
+        pairs.append(f"class_name={class_name}")
+    for key in ("menu_id_before", "menu_id_after"):
+        value = report.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            pairs.append(f"{key}={value}")
+    if not pairs:
+        return ""
+    return "observed=" + " ".join(pairs)
+
+
+def _ui_map_set_detail(result: dict[str, Any]) -> str:
+    code = str(result.get("error") or "")
+    if code not in {"ui_map_not_set", "ui_map_widget_missing"}:
+        return ""
+    report = result.get("ui_map")
+    if not isinstance(report, dict):
+        return ""
+    if code == "ui_map_widget_missing":
+        class_name = report.get("class_name")
+        if isinstance(class_name, str) and _UI_MENU_MAP_TOKEN_RE.fullmatch(class_name):
+            return f"observed=class_name={class_name}"
+        return ""
+    pairs: list[str] = []
+    for key in ("scale_before", "scale_after"):
+        value = report.get(key)
+        if _is_finite_number(value):
+            pairs.append(f"{key}={repr(float(value))}")
+    for key in ("center_before", "center_after"):
+        value = report.get(key)
+        if (
+            isinstance(value, list)
+            and len(value) == 2
+            and all(_is_finite_number(item) for item in value)
+        ):
+            pairs.append(
+                f"{key}=[{repr(float(value[0]))},{repr(float(value[1]))}]"
+            )
+    class_name = report.get("class_name")
+    if isinstance(class_name, str) and _UI_MENU_MAP_TOKEN_RE.fullmatch(class_name):
+        pairs.append(f"class_name={class_name}")
+    if not pairs:
+        return ""
+    return "observed=" + " ".join(pairs)
+
+
 def _player_view_set_detail(result: dict[str, Any]) -> str:
     if str(result.get("error") or "") != "view_not_applied":
         return ""
@@ -837,6 +906,17 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     and allowed from its ai_group report. No created (a spawn fact whose
     always-false order default would confuse) and no args_read.
 
+    ui_menu_set and ui_map_set are the thirteenth: ui_menu_busy,
+    ui_menu_not_opened and ui_menu_not_closed carry observed= with
+    open_before, open_after, class_name (when the map is open),
+    menu_id_before and menu_id_after from ui_menu; ui_map_not_set carries
+    observed= with scale_before, scale_after, center_before, center_after
+    and class_name from ui_map, and ui_map_widget_missing carries only
+    observed=class_name=. Every other code of either verb carries no
+    observed= detail (the global hints of _bridge_error, such as
+    run_not_owned's next_step, still apply), even when the payload
+    carries a filled ui_menu or ui_map.
+
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
     clicked=false, and a world_spawn timeout has to stay "timeout". The click
@@ -870,6 +950,10 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _input_trigger_detail(result)
     if cmd == "player_move":
         return _player_move_detail(result)
+    if cmd == "ui_menu_set":
+        return _ui_menu_set_detail(result)
+    if cmd == "ui_map_set":
+        return _ui_map_set_detail(result)
     if cmd == "player_view_set":
         return _player_view_set_detail(result)
     if cmd == "scene_clear" and str(result.get("error") or "") == "scene_shared":
@@ -934,6 +1018,12 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # ai_group_spawn, whose refusals carry field, allowed, args_read and
     # created from the ai_group report (living/limit on ai_limit_reached),
     # ai_group_order, whose bad_args carries only field and allowed,
+    # ui_menu_set, whose ui_menu_busy, ui_menu_not_opened and
+    # ui_menu_not_closed carry observed= from ui_menu,
+    # ui_map_set, whose ui_map_not_set and ui_map_widget_missing carry
+    # observed= from ui_map (every other code of either verb carries no
+    # observed= detail; the global hints of this function, such as
+    # run_not_owned's next_step, still apply),
     # and world_spawn/vehicle_eject_failed, which carries the retained object_id.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)

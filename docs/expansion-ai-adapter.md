@@ -116,7 +116,7 @@ lease-close gate never applies and residues stay readable on a census
 that announces no close support
 (a real bridge v12 peer is stopped earlier by the version gate). The
 adapter announces the verb as bit3 of its `xai` bitmask (see "How the
-adapter announces itself"); it adds no name to `caps=`.
+adapter announces itself"); it adds no name to the base census.
 
 The dispatch answers at once, with no job and no setter call. It never
 reads through `eAITarget.GetThreat` or `GetPosition(false)`, which would
@@ -160,7 +160,10 @@ answers ok with `alive: 0`.
 The state-only fields of the shared `MCPAIGroup` reply (`group_present`,
 `alive`, `members_total`, `current_waypoint`, `scene_id`) are only
 filled by `ai_group_state`; a spawn/order/release reply leaves them at
-their defaults.
+their defaults. The release-only fields `dropped_deleted` and
+`dropped_kept` are only filled by `ai_group_release` (from the counts
+the release sweep stored on the group record); every other reply
+leaves them at 0.
 
 Offline coverage: `tools/tests/test_xai_group_state.py` (O4, E7, the O13
 part that reads residues when the census announces no close support, and
@@ -249,16 +252,19 @@ already sounding with the same id). In-game validation is pending.
 
 ## How the adapter announces itself (deviation from plan 2.2)
 
-The adapter adds no verb names to `caps=`. With the names, the saturated
+The adapter adds no verb names to the base census. With the names, the saturated
 server poll measured 1037 characters, past the 1024 limit of #321 (1067
 with order/state, 1079 with v13's `lease_close`). Instead its poll carries
 `&xai=<16 hex>.<bitmask>`: the adapter contract hash plus one bit per verb,
 in the append-only order fixed in `bridge_readiness.py`
 (`EXPANSION_AI_VERB_BITS`: release, spawn, order, state, emote). The broker
 expands the mask to names before storing the census, so admission and the
-capability comparator keep seeing names, and the saturated poll with the
-full adapter (widest mask) and v13 measures 1020, four characters under
-the limit. This deviates from plan 2.2 ("the
+capability comparator keep seeing names. The base census itself now also
+travels as a bitmask: `ServerCapabilities()` returns the compact
+`cm=<epoch>.<hex>` announcement (`SERVER_CAPABILITIES_MASK`, bit order in
+`bridge_readiness.SERVER_CAPABILITY_BITS`, append-only) instead of the
+name list, so the saturated server poll with the full adapter (widest
+`xai` mask) measures 317 characters, far under the limit. This deviates from plan 2.2 ("the
 adapter adds its names to the census") and is provisional, pending
 Guillermo's confirmation.
 
@@ -273,14 +279,54 @@ enqueue and again at delivery. On bridge v13 both peers announce
 close: its groups are stopped by `LeaseCloseExtensionStop` and reported
 as `ai_group:<spawn_token>` `residue` entries by
 `LeaseCloseExtensionCensus` until they disappear.
-The close removes the members and the group, nothing else. A member that
-dies drops the item in its hands, usually the loadout's weapon (vanilla
+The close removes the members and the group. Once per group, on its
+`active` -> `releasing` change, the release (the lease close or the
+internal `ai_group_release`) first sweeps the items its members
+dropped: it deletes the items lying in the world within 30 m of a
+member entity whose last holder — Expansion's
+`m_Expansion_PreviousOwner` on `ItemBase`, moved on every inventory
+change by `ItemBase.OnItemLocationChanged`
+(`scripts/4_world/entities/itembase.c:1162-1244`), so it survives the
+clones Expansion makes of loadout items — is a member of the group.
+That covers a weapon dropped on death (vanilla
 `DayZPlayerImplement.DeathDropHandEntity`, called from `OnSimulationEnd`,
-`scripts/4_world/entities/dayzplayerimplement.c:17` and `:635`); from
-then on it is a world item of its own, with the corpse lifetime (`:646`).
-The adapter cannot tell it apart from any other item, so neither
-`ai_group_release` nor the close deletes it or counts it as residue: it
-stays on the ground after a clean close.
+`scripts/4_world/entities/dayzplayerimplement.c:17` and `:635`) or
+cloned to the ground when the member went unconscious. Its magazine
+and attachments go with it: they left the member together with it, so
+they carry the same last holder. The same holds for an item Expansion's
+own drop state takes out of a member's inventory, for example a ruined
+item with no cargo. An item that holds a cargo, in itself or in one of
+its attachments (pouches on a vest), is never deleted and counts as
+kept: a container lying in the world got there through a player, or
+hangs on a ruined item Expansion dropped because that item itself had
+no cargo. The sweep also leaves an item a player is taking (an
+inventory juncture, on it or inside it) or that holds something not
+from the group, and it leaves and counts the group's items players
+hold, once per top item (no ancestor between it and the player is
+from the group). An item whose own `m_Expansion_IsOwnerPlayer` flag
+is set is never deleted: Expansion's sticky flag on `ItemBase` is set
+when the item enters a real player's inventory and is never cleared
+on that entity, so such an item is not a candidate, and inside a
+candidate it counts as not from the group, so the root is kept. The
+player flag is per entity. An entity created inside the group's items
+from a player's item does not carry it: an attachment or cargo item
+Expansion clones along with its parent (a member taking that parent
+to its hands, swapping it as gear, or dropping it when going
+unconscious), or a stack split off inside a member's inventory. Such
+an entity reads as the group's and can be deleted with the group item
+it sits in. Reaching it needs a player to put his item into or onto
+one of the group's items while the member is unconscious (or dead,
+for a split) and Expansion to clone or split it there afterwards.
+What remains: an item a player moves straight from a corpse to the
+ground without it ever entering his inventory keeps the flag clear
+and counts as the group's (it is a loadout item). The counts go
+on the release reply (`dropped_deleted`, `dropped_kept`) and to one
+server log line per released group, `ai_group sweep group_id=<id>
+dropped_deleted=<n> dropped_kept=<n>`; the close census keeps waiting
+for those deletions through its existing `deletion_pending` entry.
+Items whose member entity was deleted before the release, or lying
+farther than 30 m from every member entity at the release, are not
+found and stay.
 When a bound peer's
 census announces no close, the spawn, the order and the emote are refused
 with `expansion_unavailable` / `lease_close_not_supported` before anything
