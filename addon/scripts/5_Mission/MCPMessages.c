@@ -365,6 +365,8 @@ class MCPArgs
 	// tool always sends it and the daemon refuses a command without it; an
 	// absent key reads false.
 	bool active;
+	// player_respawn_survivor only: the vanilla survivor type to pin.
+	string survivor_type;
 
 	void MCPArgs()
 	{
