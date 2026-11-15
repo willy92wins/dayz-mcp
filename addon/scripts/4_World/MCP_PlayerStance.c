@@ -16,7 +16,10 @@ const int MCP_INPUT_UDT_PLAYER_STANCE = 78541080;
 const int MCP_RPC_PLAYER_STANCE = 78541081;
 const int MCP_STANCE_IUD_CANCEL = -1;
 const int MCP_STANCE_IUD_CANCEL_APPLIED = -2;
+const int MCP_STANCE_RPC_CANCEL = -1;
+const int MCP_STANCE_RPC_APPLIED = -2;
 const float MCP_STANCE_TIMEOUT_S = 5.0;
+const float MCP_STANCE_CANCEL_TIMEOUT_S = 1.5;
 const float MCP_STANCE_UNLOCK_S = 1.5;
 const float MCP_STANCE_VERIFY_S = 1.5;
 
@@ -24,6 +27,7 @@ modded class PlayerBase
 {
 	protected bool m_MCPStancePending;
 	protected bool m_MCPStanceWaitingOwner;
+	protected bool m_MCPStanceWaitingApplyAck;
 	protected bool m_MCPStanceIudRetry;
 	protected bool m_MCPStanceUnlock;
 	protected bool m_MCPStanceCancelOutstanding;
@@ -39,10 +43,13 @@ modded class PlayerBase
 	protected int m_MCPStanceOwnerClosedFloor;
 	protected int m_MCPStanceOwnerAckedFloor;
 	protected int m_MCPStanceOwnerAppliedId;
+	protected int m_MCPStanceServerAppliedFloor;
+	protected int m_MCPStanceAppliedConnGen;
 	protected int m_MCPStanceAcceptedId;
 	protected int m_MCPStanceCancelRequestId;
 	protected int m_MCPStanceCancelTargetId;
 	protected float m_MCPStanceElapsedS;
+	protected float m_MCPStanceCancelElapsedS;
 	protected float m_MCPStanceUnlockElapsedS;
 	protected float m_MCPStanceVerifyElapsedS;
 	protected float m_MCPStanceVerifyDueS;
@@ -52,7 +59,16 @@ modded class PlayerBase
 
 	protected bool MCPStanceBusyNow()
 	{
-		if (m_MCPStancePending || m_MCPStanceWaitingOwner || m_MCPStanceIudRetry || m_MCPStanceCancelOutstanding || m_MCPStanceUnlock || m_MCPStanceSendWanted || m_MCPStanceCancelWanted)
+		bool unlockActive;
+		unlockActive = false;
+		if (m_MCPStanceUnlock)
+		{
+			if (IsAlive() || GetCommand_Move())
+			{
+				unlockActive = true;
+			}
+		}
+		if (m_MCPStancePending || m_MCPStanceWaitingOwner || m_MCPStanceWaitingApplyAck || m_MCPStanceIudRetry || m_MCPStanceCancelOutstanding || unlockActive || m_MCPStanceSendWanted || m_MCPStanceCancelWanted)
 		{
 			return true;
 		}
@@ -113,6 +129,7 @@ modded class PlayerBase
 		m_MCPStanceElapsedS = 0;
 		m_MCPStanceFromIud = false;
 		m_MCPStanceReleaseAfterApply = false;
+		m_MCPStanceWaitingApplyAck = false;
 		m_MCPStanceVerifyArmed = false;
 		if (!GetGame() || !GetGame().IsMultiplayer())
 		{
@@ -250,6 +267,20 @@ modded class PlayerBase
 		return true;
 	}
 
+	protected void MCPStanceSendApplyAckRpc(PlayerIdentity identity, int requestId, bool releaseNow)
+	{
+		ScriptRPC rpc;
+		if (!identity || requestId <= 0)
+		{
+			return;
+		}
+		rpc = new ScriptRPC();
+		rpc.Write(requestId);
+		rpc.Write(MCP_STANCE_RPC_APPLIED);
+		rpc.Write(releaseNow);
+		rpc.Send(this, MCP_RPC_PLAYER_STANCE, true, identity);
+	}
+
 	protected bool MCPStanceSendOwnerIud()
 	{
 		ScriptInputUserData message;
@@ -273,6 +304,7 @@ modded class PlayerBase
 		message.Write(connGen);
 		message.Write(m_MCPStanceId);
 		message.Send();
+		m_MCPStanceAppliedConnGen = connGen;
 		return true;
 	}
 
@@ -294,7 +326,34 @@ modded class PlayerBase
 		{
 			return;
 		}
-		if (stanceId < 0)
+		if (stanceId == MCP_STANCE_RPC_APPLIED)
+		{
+			if (requestId <= 0)
+			{
+				return;
+			}
+			if (requestId > m_MCPStanceServerAppliedFloor)
+			{
+				m_MCPStanceServerAppliedFloor = requestId;
+			}
+			if (m_MCPStanceWaitingApplyAck && requestId >= m_MCPStanceOwnerAppliedId)
+			{
+				m_MCPStanceWaitingApplyAck = false;
+				if (m_MCPStanceUnlock)
+				{
+					if (recoverRequested || m_MCPStanceOwnerAppliedId <= m_MCPStanceClosedFloor)
+					{
+						m_MCPStanceUnlockElapsedS = MCP_STANCE_UNLOCK_S;
+					}
+					else
+					{
+						m_MCPStanceUnlockElapsedS = 0;
+					}
+				}
+			}
+			return;
+		}
+		if (stanceId == MCP_STANCE_RPC_CANCEL)
 		{
 			if (requestId <= 0 || requestId <= m_MCPStanceClosedFloor)
 			{
@@ -319,6 +378,10 @@ modded class PlayerBase
 			MCPStanceCancel("owner_rpc_cancel");
 			return;
 		}
+		if (stanceId < 0)
+		{
+			return;
+		}
 		if (requestId <= m_MCPStanceClosedFloor || requestId <= m_MCPStanceRequestId)
 		{
 			Print("[DayZ_MCP] MCPStance request=" + requestId.ToString() + " reason=closed");
@@ -327,6 +390,18 @@ modded class PlayerBase
 		if (stanceId != DayZPlayerConstants.STANCEIDX_ERECT && stanceId != DayZPlayerConstants.STANCEIDX_CROUCH && stanceId != DayZPlayerConstants.STANCEIDX_PRONE)
 		{
 			return;
+		}
+		if (m_MCPStanceWaitingApplyAck && m_MCPStanceOwnerAppliedId < requestId)
+		{
+			m_MCPStanceWaitingApplyAck = false;
+			if (m_MCPStanceOwnerAppliedId > m_MCPStanceServerAppliedFloor)
+			{
+				m_MCPStanceServerAppliedFloor = m_MCPStanceOwnerAppliedId;
+			}
+			if (m_MCPStanceUnlock)
+			{
+				m_MCPStanceUnlockElapsedS = MCP_STANCE_UNLOCK_S;
+			}
 		}
 		if (m_MCPStanceCancelTargetId > 0 && m_MCPStanceCancelTargetId < requestId)
 		{
@@ -358,6 +433,8 @@ modded class PlayerBase
 		int connGen;
 		int stanceId;
 		bool appliedByOwner;
+		bool releaseDup;
+		PlayerIdentity identity;
 		if (userDataType != MCP_INPUT_UDT_PLAYER_STANCE)
 		{
 			return super.OnInputUserDataProcess(userDataType, ctx);
@@ -390,6 +467,7 @@ modded class PlayerBase
 			{
 				m_MCPStanceCancelOutstanding = false;
 				m_MCPStanceCancelRequestId = 0;
+				m_MCPStanceCancelElapsedS = 0;
 			}
 			appliedByOwner = false;
 			if (stanceId == MCP_STANCE_IUD_CANCEL_APPLIED)
@@ -442,18 +520,36 @@ modded class PlayerBase
 			Print("[DayZ_MCP] MCPStance request=" + requestId.ToString() + " reason=bad_args");
 			return true;
 		}
+		identity = GetIdentity();
 		if (requestId <= m_MCPStanceOwnerClosedFloor)
 		{
+			if (identity && requestId > 0)
+			{
+				MCPStanceSendApplyAckRpc(identity, requestId, true);
+			}
 			Print("[DayZ_MCP] MCPStance request=" + requestId.ToString() + " reason=closed");
 			return true;
 		}
 		if (requestId != m_MCPStanceRequestId || stanceId != m_MCPStanceId)
 		{
+			if (identity && requestId > 0)
+			{
+				MCPStanceSendApplyAckRpc(identity, requestId, true);
+			}
 			Print("[DayZ_MCP] MCPStance request=" + requestId.ToString() + " reason=request_mismatch");
 			return true;
 		}
 		if (requestId == m_MCPStanceAcceptedId)
 		{
+			if (!m_MCPStancePending && identity && requestId > 0)
+			{
+				releaseDup = false;
+				if (requestId <= m_MCPStanceClosedFloor)
+				{
+					releaseDup = true;
+				}
+				MCPStanceSendApplyAckRpc(identity, requestId, releaseDup);
+			}
 			Print("[DayZ_MCP] MCPStance request=" + requestId.ToString() + " reason=duplicate");
 			return true;
 		}
@@ -466,6 +562,10 @@ modded class PlayerBase
 			}
 			else
 			{
+				if (identity && requestId > 0)
+				{
+					MCPStanceSendApplyAckRpc(identity, requestId, true);
+				}
 				Print("[DayZ_MCP] MCPStance request=" + requestId.ToString() + " reason=not_waiting");
 				return true;
 			}
@@ -486,16 +586,64 @@ modded class PlayerBase
 	protected void MCPStanceOnCommandHandler(float pDt)
 	{
 		HumanCommandMove moveCmd;
+		PlayerIdentity identity;
 		string refusal;
 		bool ownerReadyToApply;
+		bool wasFromIud;
+		bool releaseAfterApply;
+		int ackRequestId;
 		ownerReadyToApply = false;
+		if (m_MCPStanceWaitingApplyAck)
+		{
+			if (m_MCPStanceAppliedConnGen == 0 || MCPConnGenValue() != m_MCPStanceAppliedConnGen)
+			{
+				m_MCPStanceWaitingApplyAck = false;
+			}
+		}
+		if (!IsAlive())
+		{
+			m_MCPStanceWaitingApplyAck = false;
+			m_MCPStanceVerifyArmed = false;
+			if (GetGame() && GetGame().IsServer() && m_MCPStanceWaitingOwner)
+			{
+				MCPStanceCancel("player_dead");
+			}
+		}
 		if (m_MCPStanceWaitingOwner || m_MCPStancePending || m_MCPStanceSendWanted)
 		{
 			m_MCPStanceElapsedS += pDt;
 		}
-		if (m_MCPStanceUnlock)
+		if (m_MCPStanceUnlock && !m_MCPStanceWaitingApplyAck)
 		{
 			m_MCPStanceUnlockElapsedS += pDt;
+		}
+		if (m_MCPStanceCancelOutstanding)
+		{
+			if (GetGame() && GetGame().IsMultiplayer() && GetGame().IsServer() && !GetIdentity())
+			{
+				m_MCPStanceCancelOutstanding = false;
+				m_MCPStanceCancelRequestId = 0;
+				m_MCPStanceCancelElapsedS = 0;
+			}
+			else
+			{
+				m_MCPStanceCancelElapsedS += pDt;
+				if (m_MCPStanceCancelElapsedS > MCP_STANCE_CANCEL_TIMEOUT_S)
+				{
+					if (m_MCPStanceAcceptedId < m_MCPStanceCancelRequestId && m_MCPStanceCancelRequestId > m_MCPStanceOwnerClosedFloor)
+					{
+						m_MCPStanceOwnerClosedFloor = m_MCPStanceCancelRequestId;
+					}
+					if (m_MCPStanceCancelRequestId > m_MCPStanceOwnerAckedFloor)
+					{
+						m_MCPStanceOwnerAckedFloor = m_MCPStanceCancelRequestId;
+					}
+					Print("[DayZ_MCP] MCPStance request=" + m_MCPStanceCancelRequestId.ToString() + " reason=no_cancel_ack");
+					m_MCPStanceCancelOutstanding = false;
+					m_MCPStanceCancelRequestId = 0;
+					m_MCPStanceCancelElapsedS = 0;
+				}
+			}
 		}
 		if (m_MCPStanceVerifyArmed)
 		{
@@ -574,6 +722,10 @@ modded class PlayerBase
 				}
 			}
 		}
+		if (m_MCPStanceWaitingOwner && GetGame() && GetGame().IsMultiplayer() && GetGame().IsServer() && !GetIdentity())
+		{
+			MCPStanceCancel("owner_gone");
+		}
 		if (m_MCPStanceWaitingOwner && m_MCPStanceElapsedS > MCP_STANCE_TIMEOUT_S)
 		{
 			MCPStanceCancel("no_owner_ack");
@@ -628,9 +780,23 @@ modded class PlayerBase
 					return;
 				}
 				Print(MCPStanceLogLine(refusal) + " reason=" + refusal);
+				wasFromIud = m_MCPStanceFromIud;
+				ackRequestId = m_MCPStanceAcceptedId;
+				if (ackRequestId <= 0)
+				{
+					ackRequestId = m_MCPStanceRequestId;
+				}
 				m_MCPStancePending = false;
 				m_MCPStanceFromIud = false;
 				m_MCPStanceReleaseAfterApply = false;
+				if (wasFromIud && GetGame() && GetGame().IsMultiplayer() && GetGame().IsServer())
+				{
+					identity = GetIdentity();
+					if (identity)
+					{
+						MCPStanceSendApplyAckRpc(identity, ackRequestId, true);
+					}
+				}
 				if (GetGame() && GetGame().IsMultiplayer() && GetGame().IsClient() && !GetGame().IsDedicatedServer())
 				{
 					m_MCPStanceCancelTargetId = m_MCPStanceRequestId;
@@ -650,11 +816,28 @@ modded class PlayerBase
 				return;
 			}
 		}
+		releaseAfterApply = m_MCPStanceReleaseAfterApply;
 		StopHandEvent();
 		moveCmd.ForceStance(m_MCPStanceId);
 		if (GetGame() && GetGame().IsMultiplayer() && GetGame().IsClient() && !GetGame().IsDedicatedServer())
 		{
 			m_MCPStanceOwnerAppliedId = m_MCPStanceRequestId;
+			if (m_MCPStanceServerAppliedFloor < m_MCPStanceOwnerAppliedId)
+			{
+				m_MCPStanceWaitingApplyAck = true;
+			}
+			else
+			{
+				m_MCPStanceWaitingApplyAck = false;
+			}
+		}
+		if (GetGame() && GetGame().IsMultiplayer() && GetGame().IsServer())
+		{
+			identity = GetIdentity();
+			if (identity)
+			{
+				MCPStanceSendApplyAckRpc(identity, m_MCPStanceRequestId, releaseAfterApply);
+			}
 		}
 		m_MCPStancePending = false;
 		m_MCPStanceFromIud = false;
@@ -747,7 +930,33 @@ modded class PlayerBase
 	protected void MCPStanceTryUnlock()
 	{
 		HumanCommandMove moveCmd;
+		bool bodyDeadOrAbandoned;
 		if (!m_MCPStanceUnlock)
+		{
+			return;
+		}
+		bodyDeadOrAbandoned = !IsAlive();
+		if (GetGame() && GetGame().IsMultiplayer() && GetGame().IsServer() && !GetIdentity())
+		{
+			bodyDeadOrAbandoned = true;
+		}
+		if (bodyDeadOrAbandoned)
+		{
+			moveCmd = GetCommand_Move();
+			if (!moveCmd)
+			{
+				m_MCPStanceUnlock = false;
+				m_MCPStanceWaitingApplyAck = false;
+				m_MCPStanceVerifyArmed = false;
+				return;
+			}
+			moveCmd.ForceStance(-1);
+			m_MCPStanceUnlock = false;
+			m_MCPStanceWaitingApplyAck = false;
+			m_MCPStanceVerifyArmed = false;
+			return;
+		}
+		if (m_MCPStanceWaitingApplyAck)
 		{
 			return;
 		}
@@ -783,7 +992,16 @@ modded class PlayerBase
 
 	bool MCPStanceActiveNow()
 	{
-		if (m_MCPStancePending || m_MCPStanceWaitingOwner || m_MCPStanceIudRetry || m_MCPStanceUnlock || m_MCPStanceCancelOutstanding || m_MCPStanceSendWanted || m_MCPStanceCancelWanted)
+		bool unlockActive;
+		unlockActive = false;
+		if (m_MCPStanceUnlock)
+		{
+			if (IsAlive() || GetCommand_Move())
+			{
+				unlockActive = true;
+			}
+		}
+		if (m_MCPStancePending || m_MCPStanceWaitingOwner || m_MCPStanceWaitingApplyAck || m_MCPStanceIudRetry || unlockActive || m_MCPStanceCancelOutstanding || m_MCPStanceSendWanted || m_MCPStanceCancelWanted)
 		{
 			return true;
 		}
@@ -797,12 +1015,24 @@ modded class PlayerBase
 		bool hadUnlock;
 		bool hadRequest;
 		bool keepPending;
+		bool wasFromIud;
 		bool cancelAlreadyInFlight;
-		wasActive = MCPStanceActiveNow();
+		int ackRequestId;
+		wasActive = MCPStanceActiveNow() || m_MCPStanceUnlock || m_MCPStanceWaitingApplyAck;
 		hadUnlock = m_MCPStanceUnlock;
 		hadRequest = wasActive || m_MCPStanceRequestId > 0 || m_MCPStanceClosedFloor > 0;
 		if (GetGame() && GetGame().IsClient() && GetGame().IsMultiplayer() && !GetGame().IsDedicatedServer())
 		{
+			if (!IsAlive())
+			{
+				m_MCPStanceWaitingApplyAck = false;
+				m_MCPStanceVerifyArmed = false;
+				if (!GetCommand_Move())
+				{
+					m_MCPStanceUnlock = false;
+					hadUnlock = false;
+				}
+			}
 			if (reason != "owner_rpc_cancel")
 			{
 				if (!wasActive)
@@ -824,6 +1054,10 @@ modded class PlayerBase
 			}
 			if (m_MCPStanceCancelTargetId <= 0 || m_MCPStanceCancelTargetId <= m_MCPStanceClosedFloor)
 			{
+				if (hadUnlock && !m_MCPStanceWaitingApplyAck)
+				{
+					m_MCPStanceUnlockElapsedS = MCP_STANCE_UNLOCK_S;
+				}
 				return;
 			}
 			m_MCPStanceCancelWanted = true;
@@ -837,6 +1071,12 @@ modded class PlayerBase
 		if (m_MCPStanceRequestId > m_MCPStanceClosedFloor)
 		{
 			m_MCPStanceClosedFloor = m_MCPStanceRequestId;
+		}
+		wasFromIud = m_MCPStanceFromIud;
+		ackRequestId = m_MCPStanceAcceptedId;
+		if (ackRequestId <= 0)
+		{
+			ackRequestId = m_MCPStanceRequestId;
 		}
 		keepPending = false;
 		if (GetGame() && GetGame().IsMultiplayer() && m_MCPStanceFromIud && GetIdentity())
@@ -853,12 +1093,27 @@ modded class PlayerBase
 			m_MCPStanceFromIud = false;
 			m_MCPStanceReleaseAfterApply = false;
 			m_MCPStanceVerifyArmed = false;
+			if (wasFromIud && GetGame() && GetGame().IsServer() && GetGame().IsMultiplayer())
+			{
+				identity = GetIdentity();
+				if (identity)
+				{
+					MCPStanceSendApplyAckRpc(identity, ackRequestId, true);
+				}
+			}
 		}
 		m_MCPStanceWaitingOwner = false;
 		m_MCPStanceIudRetry = false;
 		if (hadUnlock)
 		{
-			m_MCPStanceUnlockElapsedS = MCP_STANCE_UNLOCK_S;
+			if (!IsAlive() && !GetCommand_Move())
+			{
+				m_MCPStanceUnlock = false;
+			}
+			else
+			{
+				m_MCPStanceUnlockElapsedS = MCP_STANCE_UNLOCK_S;
+			}
 		}
 		cancelAlreadyInFlight = m_MCPStanceCancelOutstanding && m_MCPStanceClosedFloor > 0 && m_MCPStanceCancelRequestId >= m_MCPStanceClosedFloor;
 		if (wasActive && !cancelAlreadyInFlight)
@@ -873,6 +1128,7 @@ modded class PlayerBase
 				MCPStanceSendCancelRpc(identity);
 				m_MCPStanceCancelOutstanding = true;
 				m_MCPStanceCancelRequestId = m_MCPStanceClosedFloor;
+				m_MCPStanceCancelElapsedS = 0;
 			}
 		}
 	}
@@ -890,6 +1146,11 @@ modded class PlayerBase
 		connGen = MCPConnGenValue();
 		if (connGen == 0 || !ScriptInputUserData.CanStoreInputUserData())
 		{
+			if (!IsAlive())
+			{
+				m_MCPStanceIudRetry = false;
+				return true;
+			}
 			m_MCPStanceIudRetry = true;
 			return false;
 		}
@@ -913,7 +1174,7 @@ modded class PlayerBase
 		ScriptRPC rpc;
 		rpc = new ScriptRPC();
 		rpc.Write(m_MCPStanceClosedFloor);
-		rpc.Write(-1);
+		rpc.Write(MCP_STANCE_RPC_CANCEL);
 		rpc.Write(false);
 		rpc.Send(this, MCP_RPC_PLAYER_STANCE, true, identity);
 	}
@@ -933,7 +1194,9 @@ modded class PlayerBase
 		super.OnReconnect();
 		m_MCPStanceCancelOutstanding = false;
 		m_MCPStanceCancelRequestId = 0;
+		m_MCPStanceCancelElapsedS = 0;
 		m_MCPStanceWaitingOwner = false;
+		m_MCPStanceWaitingApplyAck = false;
 		m_MCPStancePending = false;
 		m_MCPStanceFromIud = false;
 		m_MCPStanceReleaseAfterApply = false;
@@ -943,6 +1206,17 @@ modded class PlayerBase
 		m_MCPStanceIudRetry = false;
 		m_MCPStanceVerifyArmed = false;
 		m_MCPStanceElapsedS = 0;
+		if (m_MCPStanceUnlock)
+		{
+			if (!IsAlive() && !GetCommand_Move())
+			{
+				m_MCPStanceUnlock = false;
+			}
+			else
+			{
+				m_MCPStanceUnlockElapsedS = MCP_STANCE_UNLOCK_S;
+			}
+		}
 	}
 
 	string MCPStanceNameFromId(int stanceId)

@@ -5870,12 +5870,29 @@ class ServerState:
         if self.version_validator is not None:
             with self._lock:
                 poll_version = self._poll_versions.get(peer)
+                client_polled = (
+                    cmd == "player_set_stance"
+                    and self._last_poll_at.get("client") is not None
+                    and any(
+                        binding.state == BINDING_BOUND
+                        and self._peer_covers(binding, "client")
+                        for binding in self._bindings.values()
+                    )
+                )
+                client_version = self._poll_versions.get("client") if client_polled else None
             state = self.version_validator(poll_version)
             if state in BLOCKED_VERSION_STATES:
                 blocked = self._version_block_fields(peer)
                 payload: dict[str, object] = {"error": "version_blocked", "state": state}
                 payload.update(blocked)
                 return 409, payload
+            if client_polled:
+                client_state = self.version_validator(client_version)
+                if client_state in BLOCKED_VERSION_STATES:
+                    blocked = self._version_block_fields("client")
+                    payload = {"error": "version_blocked", "state": client_state}
+                    payload.update(blocked)
+                    return 409, payload
 
         if cmd == "exec_enforce":
             return self._enqueue_exec_enforce(

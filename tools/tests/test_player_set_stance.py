@@ -22,7 +22,7 @@ from tests.enforce_subset_helpers import (
     method_body as _enforce_method_body,
     python_source,
 )
-from tests.fence_helpers import INST_SERVER, PID_SERVER, bound_queue
+from tests.fence_helpers import INST_CLIENT, INST_SERVER, PID_CLIENT, PID_SERVER, bound_queue
 from tests.player_move_helpers import _LogString, _without_comments
 
 
@@ -107,6 +107,7 @@ _STANCE_SIGNATURES = (
     "protected string MCPStanceSoftRefusal(int stanceId)",
     "protected string MCPStanceApplyRefusal()",
     "protected bool MCPStanceSendOwnerRpc(PlayerIdentity identity)",
+    "protected void MCPStanceSendApplyAckRpc(PlayerIdentity identity, int requestId, bool releaseNow)",
     "protected bool MCPStanceSendOwnerIud()",
     "override void OnRPC(PlayerIdentity sender, int rpc_type, ParamsReadContext ctx)",
     "override bool OnInputUserDataProcess(int userDataType, ParamsReadContext ctx)",
@@ -216,6 +217,7 @@ class _StancePeer:
         self.changing_stance = False
         self.has_identity = True
         self.stance_idx = _STANCE_CONSTS.STANCEIDX_ERECT
+        self.forced_stance = -1
         self.force_calls: list[int] = []
         self.hand_stops = 0
         self.uncon_junctures: list[bool] = []
@@ -228,6 +230,7 @@ class _StancePeer:
 
             def ForceStance(self, stance_id: int) -> None:
                 peer.force_calls.append(stance_id)
+                peer.forced_stance = stance_id
                 if stance_id >= 0:
                     peer.stance_idx = stance_id
 
@@ -386,6 +389,13 @@ class _StancePair:
         self.server.command_handler(dt)
         self.deliver_rpcs()
 
+    def player_input_stance(self, stance_id: int) -> None:
+        if self.owner.forced_stance >= 0:
+            return
+        self.owner.stance_idx = stance_id
+        if self.server.forced_stance < 0:
+            self.server.stance_idx = stance_id
+
 
 class PlayerSetStanceSchemaTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -460,6 +470,20 @@ class PlayerSetStanceAdmissionTest(unittest.TestCase):
 
     def test_old_version_refuses_without_a_queue_id(self) -> None:
         state = _bound_state(version_validator=lambda _version: "version_mismatch")
+        _announce(state, _full_commands(), EXPECTED_SERVER_ARG_CONTRACT_HASH)
+        status, body = self._enqueue(state)
+        self.assertEqual(body["error"], "version_blocked")
+        self.assertEqual(status, 409)
+
+    def test_old_bound_client_version_refuses_without_a_queue_id(self) -> None:
+        state = _bound_state(
+            version_validator=lambda version: "ok" if version == "12~1.30" else "version_mismatch"
+        )
+        state.install_bound_peer(
+            instance=INST_CLIENT, role="client", pid=PID_CLIENT, run_id="stance-run"
+        )
+        state.record_poll("server", "12~1.30", instance=INST_SERVER, source_pid=PID_SERVER)
+        state.record_poll("client", "11~1.30", instance=INST_CLIENT, source_pid=PID_CLIENT)
         _announce(state, _full_commands(), EXPECTED_SERVER_ARG_CONTRACT_HASH)
         status, body = self._enqueue(state)
         self.assertEqual(body["error"], "version_blocked")
@@ -704,17 +728,22 @@ class PlayerSetStanceM1RegressionTest(unittest.TestCase):
         self.assertTrue(any("reason=applied_after_close" in line for line in pair.server.logs))
         pair.server.command_handler(0.1)
         self.assertEqual(pair.server.force_calls, [])
-        # Owner processes cancel RPC and sends cancel ACK; server still keeps pending apply.
+        # Owner processes cancel RPC and sends cancel ACK; both sides retain lock until server applies.
         pair.deliver_rpcs()
         pair.owner.command_handler(0.1)
         pair.deliver_iuds()
-        self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+        self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+        self.assertTrue(pair.owner.active_now())
         self.assertTrue(pair.server.ns["m_MCPStancePending"])
         pair.server.inventory_processing = False
         pair.server.command_handler(0.1)
         self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+        pair.deliver_rpcs()
+        pair.owner.command_handler(0.1)
         pair.server.command_handler(0.1)
+        self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
         self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+        self.assertFalse(pair.owner.active_now())
         self.assertFalse(pair.server.active_now())
 
     def test_case_c_owner_decides_timeouts_on_sim_time(self) -> None:
@@ -861,20 +890,24 @@ class PlayerSetStanceM1RegressionTest(unittest.TestCase):
                         pair.owner.command_handler(0.1)
                         pair.deliver_iuds()
 
-                    self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
-                    self.assertFalse(pair.owner.active_now())
+                    self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+                    self.assertTrue(pair.owner.active_now())
                     self.assertFalse(pair.server.ns["m_MCPStanceCancelOutstanding"])
                     self.assertTrue(pair.server.ns["m_MCPStancePending"])
                     self.assertTrue(pair.server.ns["m_MCPStanceFromIud"])
                     self.assertTrue(pair.server.active_now())
 
-                    # Impediment clears: server completes ForceStance(prone), then unlocks.
+                    # Impediment clears: server completes ForceStance(prone), sends apply-ack, then both unlock.
                     pair.server.has_move = True
                     pair.server.inventory_processing = False
                     pair.server.command_handler(0.1)
                     self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+                    pair.deliver_rpcs()
+                    pair.owner.command_handler(0.1)
                     pair.server.command_handler(0.1)
+                    self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
                     self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+                    self.assertFalse(pair.owner.active_now())
                     self.assertFalse(pair.server.active_now())
                     self.assertFalse(pair.server.busy_now())
 
@@ -913,8 +946,8 @@ class PlayerSetStanceM1RegressionTest(unittest.TestCase):
                         pair.owner.command_handler(1.6)
                         pair.server.command_handler(5.5)
 
-                    self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
-                    self.assertFalse(pair.owner.active_now())
+                    self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+                    self.assertTrue(pair.owner.active_now())
                     self.assertEqual(pair.server.force_calls, [])
                     self.assertTrue(pair.server.ns["m_MCPStancePending"])
                     self.assertTrue(pair.server.ns["m_MCPStanceFromIud"])
@@ -923,8 +956,13 @@ class PlayerSetStanceM1RegressionTest(unittest.TestCase):
                     setattr(pair.server, attr, False)
                     pair.server.command_handler(0.1)
                     self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
-                    pair.server.command_handler(0.1 if with_close else 1.6)
+                    pair.deliver_rpcs()
+                    settle_dt = 0.1 if with_close else 1.6
+                    pair.owner.command_handler(settle_dt)
+                    pair.server.command_handler(settle_dt)
+                    self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
                     self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+                    self.assertFalse(pair.owner.active_now())
                     self.assertFalse(pair.server.active_now())
                     self.assertFalse(pair.server.busy_now())
 
@@ -1111,6 +1149,189 @@ class PlayerSetStanceM1RegressionTest(unittest.TestCase):
                 pair.server.force_calls,
                 [_STANCE_CONSTS.STANCEIDX_PRONE, -1, _STANCE_CONSTS.STANCEIDX_CROUCH, -1],
             )
+
+    def test_r3_p1_owner_holds_lock_until_server_apply_ack_blocking_premature_input(self) -> None:
+        # Sol r3 P1: owner applies prone while server waits on busy inventory.
+        # Past the 1.5 s unlock window, the owner must still retain ForceStance
+        # until the server applies and sends MCP_STANCE_RPC_APPLIED; player
+        # stance input before server unblock cannot desync owner=erect vs
+        # server=prone.
+        care = CARE.read_text(encoding="utf-8")
+        pair = _StancePair(self.stance, care)
+        self.assertEqual(pair.begin("prone", False), "")
+        pair.server.inventory_processing = True
+
+        pair.step(0.1)
+        self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+        self.assertEqual(pair.server.force_calls, [])
+        self.assertTrue(pair.owner.ns["m_MCPStanceWaitingApplyAck"])
+        self.assertTrue(pair.server.ns["m_MCPStancePending"])
+
+        # Advance well past the 1.5 s unlock window while server remains blocked.
+        pair.step(2.0)
+        pair.step(2.0)
+        self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+        self.assertEqual(pair.owner.forced_stance, _STANCE_CONSTS.STANCEIDX_PRONE)
+        self.assertTrue(pair.owner.active_now())
+
+        # Player attempts to stand up before server unblocks: lock blocks it.
+        pair.player_input_stance(_STANCE_CONSTS.STANCEIDX_ERECT)
+        self.assertEqual(pair.owner.stance_idx, _STANCE_CONSTS.STANCEIDX_PRONE)
+
+        # Unblock server: server applies prone and sends explicit apply-ack RPC.
+        pair.server.inventory_processing = False
+        pair.step(0.1)
+        self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+        self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+        self.assertFalse(pair.owner.ns["m_MCPStanceWaitingApplyAck"])
+        self.assertEqual(pair.owner.stance_idx, _STANCE_CONSTS.STANCEIDX_PRONE)
+        self.assertEqual(pair.server.stance_idx, _STANCE_CONSTS.STANCEIDX_PRONE)
+
+        # During the synchronized 1.5 s settle window, both remain locked on prone.
+        pair.player_input_stance(_STANCE_CONSTS.STANCEIDX_ERECT)
+        self.assertEqual(pair.owner.stance_idx, _STANCE_CONSTS.STANCEIDX_PRONE)
+        self.assertEqual(pair.server.stance_idx, _STANCE_CONSTS.STANCEIDX_PRONE)
+
+        # Settle window completes: both release ForceStance(-1) in sync.
+        pair.step(1.6)
+        self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+        self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+        self.assertEqual(pair.owner.forced_stance, -1)
+        self.assertEqual(pair.server.forced_stance, -1)
+        self.assertFalse(pair.owner.active_now())
+        self.assertFalse(pair.server.active_now())
+        self.assertFalse(pair.server.busy_now())
+
+        # Subsequent player stance input moves both sides to erect together.
+        pair.player_input_stance(_STANCE_CONSTS.STANCEIDX_ERECT)
+        self.assertEqual(pair.owner.stance_idx, _STANCE_CONSTS.STANCEIDX_ERECT)
+        self.assertEqual(pair.server.stance_idx, _STANCE_CONSTS.STANCEIDX_ERECT)
+
+    def test_r3_p2_1_death_after_apply_clears_unlock_while_living_no_move_keeps_retry(self) -> None:
+        # Sol r3 P2 #1: dying after apply (Pending=false, Unlock=true) removes
+        # HumanCommandMove and must clear the unlock/close state instead of
+        # leaving permanent census residue; living players temporarily without
+        # HumanCommandMove must keep retrying until Move returns.
+        care = CARE.read_text(encoding="utf-8")
+
+        with self.subTest(case="death_after_apply_with_close_and_ack"):
+            pair = _StancePair(self.stance, care)
+            self.assertEqual(pair.begin("prone", False), "")
+            pair.step(0.1)
+            self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+            self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+            self.assertTrue(pair.owner.ns["m_MCPStanceUnlock"])
+            self.assertTrue(pair.server.ns["m_MCPStanceUnlock"])
+
+            # Both die without Move before the 1.5 s unlock runs.
+            pair.owner.alive = False
+            pair.owner.has_move = False
+            pair.server.alive = False
+            pair.server.has_move = False
+
+            self.assertTrue(pair.server.close_server(pair.conn_gen))
+            pair.owner.cancel("lease_close")
+            pair.step(0.1)
+            self.assertFalse(pair.server.ns["m_MCPStanceCancelOutstanding"])
+            self.assertFalse(pair.owner.ns["m_MCPStanceUnlock"])
+            self.assertFalse(pair.server.ns["m_MCPStanceUnlock"])
+            self.assertFalse(pair.owner.active_now())
+            self.assertFalse(pair.server.active_now())
+            self.assertFalse(pair.owner.busy_now())
+            self.assertFalse(pair.server.busy_now())
+
+            for _ in range(50):
+                pair.step(1.0)
+            self.assertFalse(pair.owner.active_now())
+            self.assertFalse(pair.server.active_now())
+
+        with self.subTest(case="death_after_apply_without_close"):
+            pair = _StancePair(self.stance, care)
+            self.assertEqual(pair.begin("prone", False), "")
+            pair.step(0.1)
+            pair.owner.alive = False
+            pair.owner.has_move = False
+            pair.server.alive = False
+            pair.server.has_move = False
+            # Even before the next CommandHandler tick, census/busy drop dead-no-move unlock.
+            self.assertFalse(pair.owner.active_now())
+            self.assertFalse(pair.server.active_now())
+            self.assertFalse(pair.owner.busy_now())
+            self.assertFalse(pair.server.busy_now())
+            pair.step(0.1)
+            self.assertFalse(pair.owner.ns["m_MCPStanceUnlock"])
+            self.assertFalse(pair.server.ns["m_MCPStanceUnlock"])
+
+        with self.subTest(case="living_player_temporarily_without_move_retries_unlock"):
+            pair = _StancePair(self.stance, care)
+            self.assertEqual(pair.begin("prone", False), "")
+            pair.step(0.1)
+            pair.owner.has_move = False
+            pair.server.has_move = False
+            for _ in range(10):
+                pair.step(0.5)
+                self.assertTrue(pair.owner.ns["m_MCPStanceUnlock"])
+                self.assertTrue(pair.server.ns["m_MCPStanceUnlock"])
+                self.assertTrue(pair.owner.active_now())
+                self.assertTrue(pair.server.active_now())
+            pair.owner.has_move = True
+            pair.server.has_move = True
+            pair.step(0.1)
+            self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+            self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+            self.assertFalse(pair.owner.ns["m_MCPStanceUnlock"])
+            self.assertFalse(pair.server.ns["m_MCPStanceUnlock"])
+            self.assertFalse(pair.owner.active_now())
+            self.assertFalse(pair.server.active_now())
+
+    def test_r3_p2_2_old_pbo_owner_degrades_gracefully_after_no_owner_ack_without_reconnect(self) -> None:
+        # Sol r3 P2 #2: an old-PBO owner processes neither start nor cancel RPCs.
+        # After no_owner_ack, CancelOutstanding must bound-expire (no_cancel_ack)
+        # so the server settles cleanly and subsequent requests do not stay stuck
+        # returning busy until reconnect.
+        care = CARE.read_text(encoding="utf-8")
+
+        with self.subTest(case="no_owner_ack_settles_without_reconnect"):
+            pair = _StancePair(self.stance, care)
+            self.assertEqual(pair.begin("prone", False), "")
+            self.assertTrue(pair.server.busy_now())
+            # Simulate an old-PBO owner: never call deliver_rpcs or owner.command_handler.
+            for _ in range(130):
+                pair.server.command_handler(0.5)
+            self.assertTrue(any("reason=no_owner_ack" in line for line in pair.server.logs))
+            self.assertTrue(any("reason=no_cancel_ack" in line for line in pair.server.logs))
+            self.assertFalse(pair.server.ns["m_MCPStanceCancelOutstanding"])
+            self.assertFalse(pair.server.active_now())
+            self.assertFalse(pair.server.busy_now())
+
+            # After 65 s with no reconnect, the next request is not stuck on busy.
+            pair.rpcs.clear()
+            self.assertEqual(pair.begin("crouch", False), "")
+            # If the owner now processes RPCs (e.g. transient stall cleared), it applies cleanly.
+            pair.step(0.1)
+            self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_CROUCH])
+            self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_CROUCH])
+            pair.step(1.6)
+            self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_CROUCH, -1])
+            self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_CROUCH, -1])
+            self.assertFalse(pair.server.busy_now())
+
+        with self.subTest(case="lease_close_with_old_pbo_owner_settles_and_fences_late_iud"):
+            pair = _StancePair(self.stance, care)
+            self.assertEqual(pair.begin("prone", False), "")
+            pair.rpcs.clear()
+            self.assertTrue(pair.server.close_server(pair.conn_gen))
+            self.assertTrue(pair.server.ns["m_MCPStanceCancelOutstanding"])
+            pair.rpcs.clear()
+            for _ in range(4):
+                pair.server.command_handler(0.5)
+            self.assertFalse(pair.server.ns["m_MCPStanceCancelOutstanding"])
+            self.assertFalse(pair.server.active_now())
+            self.assertFalse(pair.server.busy_now())
+            # A subsequent lease_close does not re-arm CancelOutstanding for the already-expired id.
+            self.assertTrue(pair.server.close_server(pair.conn_gen))
+            self.assertFalse(pair.server.ns["m_MCPStanceCancelOutstanding"])
+            self.assertFalse(pair.server.active_now())
 
     def test_enforce_script_no_ternary_and_locals_at_top(self) -> None:
         stripped = _without_comments(self.stance)
