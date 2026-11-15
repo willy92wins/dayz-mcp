@@ -225,12 +225,16 @@ class ContainerArgvTest(unittest.TestCase):
                 f"-profiles={root / 'profiles'}", f"-mission={mission}", "-filePatching",
                 "-port=2302",
             ]
+            # The tree's server links are not this test's subject (the argv is), and
+            # a symlink needs a privilege a Windows host may not grant (WinError 1314).
             with mock.patch.object(ps, "_runtime_image_id", return_value="image"), \
                     mock.patch.object(ps, "_state_root", return_value=root / "runs"), \
                     mock.patch.object(ps, "_remove_stale_trees"), \
+                    mock.patch.object(ps, "_replace_link") as replace_link, \
                     mock.patch.object(ps, "_podman", fake_podman), \
                     self.assertRaises(ps.PodmanServerError):
                 ps.launch_lifecycle_process(argv, str(server))
+            replace_link.assert_any_call(server.resolve() / ps.SERVER_BINARY, mock.ANY)
             run = next(command for command in calls if command[0] == "run")
             start = run.index(f"./{ps.SERVER_BINARY}")
             self.assertEqual(list(run[start:]), ps.container_argv(argv))
