@@ -706,6 +706,29 @@ class AIGroupSpawnLateAnswerTest(unittest.TestCase):
         self.assertEqual(self._releases(state), [])
         self.assertIsNone(state.take_result(command_id))
 
+    def test_the_late_abandon_finishes_the_lease_operation_once(self) -> None:
+        # Mutant killed: the abandon outcome not flushed (the release is
+        # queued, but the spawn stays a committed operation of the lease).
+        state, now, command_id = self._delivered_spawn()
+        coordination = state.coordination
+        assert coordination is not None
+        lease = coordination._active
+        self.assertIn(command_id, lease.committed_commands)
+        with patch.object(
+            coordination,
+            "finish_operation_exact",
+            wraps=coordination.finish_operation_exact,
+        ) as finish:
+            now[0] += 0.126
+            self._answer(state, command_id)
+            self._answer(state, command_id, retry=True)
+            state.abandon_command(command_id, "tool_timeout")
+            state.status_snapshot()
+        finished = [c for c in finish.call_args_list if c.args[2] == command_id]
+        self.assertEqual(len(finished), 1, finish.call_args_list)
+        self.assertIs(finished[0].kwargs.get("command_succeeded"), False)
+        self.assertNotIn(command_id, lease.committed_commands)
+
     def test_a_late_answer_from_another_or_no_instance_changes_nothing(self) -> None:
         # Mutant killed: the abandon run before the instance fence (an answer
         # posted by another instance, or by none, consumed the spawn, queued
