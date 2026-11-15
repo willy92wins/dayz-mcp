@@ -480,8 +480,8 @@ class AIGroupSpawnDetailDocsTest(unittest.TestCase):
                 self.assertIn(name, text)
 
 
-def _bound_state() -> loopback.ServerState:
-    state = loopback.ServerState(key="k")
+def _bound_state(clock=None) -> loopback.ServerState:
+    state = loopback.ServerState(key="k", time_fn=clock)
     state.daemon_generation = "gen-xai-spawn"
     state.install_bound_peer(instance=INST_SERVER, role="server", pid=PID_SERVER, run_id="xai-run")
     # Real §2.12 path: attaching the coordinator replays the BOUND peer
@@ -493,7 +493,7 @@ def _bound_state() -> loopback.ServerState:
     return state
 
 
-def _enqueue_spawn(state: loopback.ServerState):
+def _enqueue_spawn(state: loopback.ServerState, operation_timeout_s: float = 30.0):
     # Enqueue under a real lease from the attached coordinator, as the
     # tool layer does; the coordinator was attached in _bound_state.
     from tests.lease_helpers import _identity
@@ -516,7 +516,7 @@ def _enqueue_spawn(state: loopback.ServerState):
     return state.enqueue_command(
         SPAWN, dict(SPAWN_WIRE), peer="server",
         identity_payload=payload, lease_token=lease["lease_token"],
-        operation_timeout_s=30.0,
+        operation_timeout_s=operation_timeout_s,
     )
 
 
@@ -630,6 +630,89 @@ class AIGroupSpawnAbandonTest(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertEqual(body, {"error": "expansion_unavailable", "detail": "lease_close_not_supported"})
         self.assertEqual(bound_queue(state, "server"), [])
+
+
+class AIGroupSpawnLateAnswerTest(unittest.TestCase):
+    """A delivered spawn answered at or after its deadline queues its release.
+
+    D12 (run 89f77793, 2026-11-15): the caller's /enqueue answer was lost
+    (daemon_response_ambiguous), so it never learned the id and never sent
+    /abandon. The spawn was delivered inside its 0.05 s deadline and the
+    server answered about 126 ms later, before any poll, await or /status
+    reaped it; the answer was discarded and the group was never released.
+    """
+
+    TIMEOUT_S = 0.05
+
+    def _delivered_spawn(self) -> tuple[loopback.ServerState, list[float], int]:
+        now = [1000.0]
+        state = _bound_state(clock=lambda: now[0])
+        _announce(state)
+        status, spawn = _enqueue_spawn(state, operation_timeout_s=self.TIMEOUT_S)
+        self.assertEqual(status, 200, spawn)
+        self.assertEqual([c["id"] for c in _delivered(state)], [spawn["id"]])
+        return state, now, spawn["id"]
+
+    def _answer(self, state: loopback.ServerState, command_id: int, *, retry: bool = False) -> dict:
+        status, stored = state.store_result(
+            {"id": command_id, "ok": 1}, instance=INST_SERVER, retry=retry
+        )
+        self.assertEqual(status, 200, stored)
+        return stored
+
+    def _releases(self, state: loopback.ServerState) -> list[tuple[str, dict]]:
+        return [(c["cmd"], c["args"]) for c in _delivered(state)]
+
+    def test_d12_answer_after_the_deadline_queues_the_release_by_token(self) -> None:
+        # Mutant killed: store_result without the late abandon (the release
+        # plan leaves with the discarded answer and nothing is queued).
+        state, now, command_id = self._delivered_spawn()
+        now[0] += 0.126
+        self.assertTrue(self._answer(state, command_id).get("discarded"))
+        self.assertEqual(self._releases(state), [(RELEASE, {"spawn_token": TOKEN})])
+        self.assertEqual(self._releases(state), [])
+        self.assertIsNone(state.take_result(command_id))
+
+    def test_the_release_is_queued_once_across_retry_abandon_and_reap(self) -> None:
+        # Mutant killed: a second release from the bridge's retried answer,
+        # the caller's late /abandon or a reap after the answer.
+        state, now, command_id = self._delivered_spawn()
+        now[0] += 0.126
+        self._answer(state, command_id)
+        self._answer(state, command_id, retry=True)
+        self.assertEqual(state.abandon_command(command_id, "tool_timeout"), {"status": "noop"})
+        state.status_snapshot()
+        releases = self._releases(state) + self._releases(state)
+        self.assertEqual(releases, [(RELEASE, {"spawn_token": TOKEN})])
+
+    def test_a_reap_before_the_answer_leaves_one_release(self) -> None:
+        # The 0.3 s shape of D12: a reap after the deadline queues the release
+        # and the answer that follows adds nothing.
+        state, now, command_id = self._delivered_spawn()
+        now[0] += 0.06
+        state.status_snapshot()
+        now[0] += 0.066
+        self.assertTrue(self._answer(state, command_id).get("discarded"))
+        self.assertEqual(self._releases(state), [(RELEASE, {"spawn_token": TOKEN})])
+        self.assertEqual(self._releases(state), [])
+
+    def test_an_answer_exactly_at_the_deadline_is_late(self) -> None:
+        # Mutant killed: > for >= (store_result already discards an answer
+        # whose clock equals the deadline).
+        state, now, command_id = self._delivered_spawn()
+        now[0] += self.TIMEOUT_S
+        self.assertTrue(self._answer(state, command_id).get("discarded"))
+        self.assertEqual(self._releases(state), [(RELEASE, {"spawn_token": TOKEN})])
+
+    def test_an_answer_before_the_deadline_is_kept_and_queues_nothing(self) -> None:
+        # Mutant killed: releasing on every answer, on time or not.
+        state, now, command_id = self._delivered_spawn()
+        now[0] += 0.01
+        self.assertNotIn("discarded", self._answer(state, command_id))
+        self.assertEqual(self._releases(state), [])
+        stored = state.take_result(command_id)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.get("ok"), 1)
 
 
 # --- E1-E5: translated Enforce dispatch -----------------------------------

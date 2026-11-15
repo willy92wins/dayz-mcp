@@ -317,6 +317,12 @@ RELEASE_REGISTRY: tuple[tuple[str, str, Callable[[int, dict], dict]], ...] = (
 # Cleanup of one admitted command. The budget belongs to the runtimes; this
 # process only answers the one transition those runtimes call.
 _ABANDON_REASONS = frozenset({"cancelled", "tool_timeout"})
+# A delivered spawn answered at or after its operation deadline: the caller's
+# own budget has ended, so the answer gets the abandon the reaper would have
+# applied at that deadline (its ai_group_release). Only ai_group_spawn: a late
+# camera_path_play answer is left to the lease close, and the other release
+# sources keep their paths.
+_LATE_ANSWER_ABANDON_SOURCES = frozenset({"ai_group_spawn"})
 _FENCE_PEER_NAMES = frozenset({"server", "client"})
 _BROKER_FENCE_ERRORS = frozenset(
     {
@@ -7253,6 +7259,28 @@ class ServerState:
                 abandoned += 1
         return abandoned
 
+    def _abandon_late_answered_spawn(self, command_id: int, t_result: float) -> None:
+        """The reaper's abandon, for one delivered spawn at its answer's clock.
+
+        reap_expired_commands runs on a poll, an await or /status. A caller that
+        never learned the id (daemon_response_ambiguous) sends no /abandon, so an
+        answer that lands before any reap would be filed as a discarded late
+        result with its release plan dropped. abandon_command publishes that
+        release once; store_result then discards the answer as unknown.
+        """
+        with self._lock:
+            deadline = self._operation_deadlines.get(command_id)
+            row = self._broker_rows.get(command_id)
+            due = (
+                deadline is not None
+                and t_result >= deadline
+                and isinstance(row, dict)
+                and row.get("cmd") in _LATE_ANSWER_ABANDON_SOURCES
+                and row.get("state") == "delivered"
+            )
+        if due:
+            self.abandon_command(command_id, "tool_timeout")
+
     def whitelisted_commands(self) -> set[str]:
         commands = set(WHITELISTED_COMMANDS)
         if self.enable_exec_enforce:
@@ -8035,6 +8063,7 @@ class ServerState:
             return 400, {"error": "bad_id"}
 
         t_result = self._now()
+        self._abandon_late_answered_spawn(command_id, t_result)
         stored = dict(body)
         meta: dict[str, float] = {"t_result": t_result}
 
