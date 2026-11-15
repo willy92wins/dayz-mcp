@@ -44,6 +44,8 @@ class _WireString(EnforceString):
     def __add__(self, other: object) -> "_WireString":
         if isinstance(other, EnforceString):
             return _WireString(self.data + other.data)
+        if isinstance(other, int) and not isinstance(other, bool):
+            return _WireString(self.data + str(other).encode("ascii"))
         return NotImplemented
 
 
