@@ -8900,6 +8900,32 @@ class MCPBridge : Managed
 		PostResult(result);
 	}
 
+	protected bool IsPlayerInCloseFloors(PlayerBase player, MCPArgs closeArgs)
+	{
+		int low;
+		int high;
+		int idx;
+		MCPLeaseCloseFloor carried;
+		if (!player || !closeArgs || !closeArgs.close_floors)
+		{
+			return false;
+		}
+		low = 0;
+		high = 0;
+		player.GetNetworkID(low, high);
+		idx = 0;
+		while (idx < closeArgs.close_floors.Count())
+		{
+			carried = closeArgs.close_floors.Get(idx);
+			if (carried && low == carried.net_low && high == carried.net_high)
+			{
+				return true;
+			}
+			idx = idx + 1;
+		}
+		return false;
+	}
+
 	// §2.7 stop steps. Jobs post through their timeout path; server_perf is
 	// kept (it only reads). RPC and infected debt are never recalled.
 	protected bool DispatchLeaseClose(MCPCommand command, MCPResult result)
@@ -8973,7 +8999,10 @@ class MCPBridge : Managed
 			PlayerBase stanceClosePlayer = PlayerBase.Cast(m_Players.Get(stanceCloseIndex));
 			if (stanceClosePlayer)
 			{
-				stanceClosePlayer.MCPStanceCloseServer(stanceClosePlayer.MCPConnGenValue());
+				if (!IsPlayerInCloseFloors(stanceClosePlayer, command.args))
+				{
+					stanceClosePlayer.MCPStanceCloseServer(stanceClosePlayer.MCPConnGenValue());
+				}
 			}
 			stanceCloseIndex = stanceCloseIndex + 1;
 		}

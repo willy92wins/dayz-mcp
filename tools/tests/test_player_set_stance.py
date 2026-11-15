@@ -16,7 +16,12 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import loopback, result_prune, server
 from dayz_mcp.bridge_readiness import EXPECTED_SERVER_ARG_CONTRACT_HASH
 from tests._addon_paths import addon_root
-from tests.enforce_subset_helpers import method_body as _enforce_method_body, python_source
+from tests.enforce_subset_helpers import (
+    EnforceArray,
+    _bounded,
+    method_body as _enforce_method_body,
+    python_source,
+)
 from tests.fence_helpers import INST_SERVER, PID_SERVER, bound_queue
 from tests.player_move_helpers import _LogString, _without_comments
 
@@ -873,17 +878,256 @@ class PlayerSetStanceM1RegressionTest(unittest.TestCase):
                     self.assertFalse(pair.server.active_now())
                     self.assertFalse(pair.server.busy_now())
 
+    def test_r2_p1_1_server_keeps_owner_applied_start_across_server_refusals(self) -> None:
+        # Sol r2 P1 #1: once the server accepts a start IUD (the owner already
+        # applied ForceStance), server-side hard/terminal refusals while that
+        # owner still exists and is alive must NOT drop Pending/FromIud; once
+        # the impediment clears, the server applies ForceStance in lockstep.
+        care = CARE.read_text(encoding="utf-8")
+        for attr in ("in_water", "in_vehicle", "swimming", "climbing", "climbing_ladder", "heavy_item"):
+            for with_close in (False, True):
+                with self.subTest(server_refusal=attr, with_close=with_close):
+                    pair = _StancePair(self.stance, care)
+                    self.assertEqual(pair.begin("prone", False), "")
+                    pair.deliver_rpcs()
+                    pair.owner.command_handler(0.1)
+                    self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+                    pair.deliver_iuds()
+                    self.assertTrue(pair.server.ns["m_MCPStancePending"])
+                    self.assertTrue(pair.server.ns["m_MCPStanceFromIud"])
+
+                    setattr(pair.server, attr, True)
+                    pair.server.command_handler(0.1)
+                    self.assertEqual(pair.server.force_calls, [])
+                    self.assertTrue(pair.server.ns["m_MCPStancePending"])
+                    self.assertTrue(pair.server.ns["m_MCPStanceFromIud"])
+
+                    if with_close:
+                        self.assertTrue(pair.server.close_server(pair.conn_gen))
+                        pair.owner.cancel("lease_close")
+                        pair.deliver_rpcs()
+                        pair.owner.command_handler(0.1)
+                        pair.deliver_iuds()
+                    else:
+                        # Advance owner past unlock and server past timeout while owner still exists.
+                        pair.owner.command_handler(1.6)
+                        pair.server.command_handler(5.5)
+
+                    self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+                    self.assertFalse(pair.owner.active_now())
+                    self.assertEqual(pair.server.force_calls, [])
+                    self.assertTrue(pair.server.ns["m_MCPStancePending"])
+                    self.assertTrue(pair.server.ns["m_MCPStanceFromIud"])
+                    self.assertTrue(pair.server.active_now())
+
+                    setattr(pair.server, attr, False)
+                    pair.server.command_handler(0.1)
+                    self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+                    pair.server.command_handler(0.1 if with_close else 1.6)
+                    self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+                    self.assertFalse(pair.server.active_now())
+                    self.assertFalse(pair.server.busy_now())
+
+        with self.subTest(terminal="player_dead_clears_corpse"):
+            pair = _StancePair(self.stance, care)
+            self.assertEqual(pair.begin("prone", False), "")
+            pair.deliver_rpcs()
+            pair.owner.command_handler(0.1)
+            pair.deliver_iuds()
+            pair.server.alive = False
+            pair.server.command_handler(0.1)
+            self.assertEqual(pair.server.force_calls, [])
+            self.assertFalse(pair.server.active_now())
+            self.assertFalse(pair.server.busy_now())
+            self.assertTrue(any("reason=player_dead" in line for line in pair.server.logs))
+
+        with self.subTest(terminal="owner_gone_clears_server"):
+            pair = _StancePair(self.stance, care)
+            self.assertEqual(pair.begin("prone", False), "")
+            pair.deliver_rpcs()
+            pair.owner.command_handler(0.1)
+            pair.deliver_iuds()
+            pair.server.in_water = True
+            pair.server.has_identity = False
+            pair.server.command_handler(0.1)
+            self.assertEqual(pair.server.force_calls, [])
+            self.assertFalse(pair.server.active_now())
+            self.assertFalse(pair.server.busy_now())
+
+    def test_r2_p1_2_stale_or_duplicate_cancel_never_cancels_next_request_and_close_deduplicates(self) -> None:
+        # Sol r2 P1 #2: duplicate/stale cancel RPCs must be idempotent and bound
+        # to their request id without cancelling subsequent starts; server close
+        # paths (both MCPStanceCancel and MCPBridge.DispatchLeaseClose) must not
+        # emit duplicate cancel sends for the same player/request.
+        care = CARE.read_text(encoding="utf-8")
+
+        with self.subTest(case="server_cancel_deduplicates_repeated_close"):
+            pair = _StancePair(self.stance, care)
+            self.assertEqual(pair.begin("prone", False), "")
+            self.assertEqual(len(pair.rpcs), 1)
+            pair.rpcs.clear()
+            self.assertTrue(pair.server.close_server(pair.conn_gen))
+            self.assertTrue(pair.server.close_server(pair.conn_gen))
+            self.assertEqual(len(pair.rpcs), 1)
+
+        with self.subTest(case="bridge_dispatch_lease_close_deduplicates_floors"):
+            bridge_src = BRIDGE.read_text(encoding="utf-8")
+            helper_sig = "protected bool IsPlayerInCloseFloors(PlayerBase player, MCPArgs closeArgs)"
+            helper_body = _enforce_method_body(bridge_src, helper_sig)
+            close_body = _enforce_method_body(
+                bridge_src, "protected bool DispatchLeaseClose(MCPCommand command, MCPResult result)"
+            )
+            self.assertIn("IsPlayerInCloseFloors(stanceClosePlayer, command.args)", close_body)
+
+            ns: dict[str, object] = {
+                "_S": _LogString,
+                "_bounded": _bounded,
+                "_string_copy": lambda v: _LogString(v.data) if isinstance(v, _LogString) else v,
+            }
+            _, py_code = python_source(
+                helper_sig + "\n{" + helper_body + "}\n",
+                helper_sig,
+                class_types=frozenset({"PlayerBase", "MCPArgs", "MCPLeaseCloseFloor"}),
+                members=set(),
+            )
+            py_code = re.sub(
+                r"player\.GetNetworkID\((\w+),\s*(\w+)\)",
+                r"\1, \2 = player.GetNetworkID()",
+                py_code,
+            )
+            exec(compile(py_code, "<enforce:IsPlayerInCloseFloors>", "exec"), ns)
+            in_floors = ns["IsPlayerInCloseFloors"]  # type: ignore[assignment]
+
+            p1_closes: list[int] = []
+            p2_closes: list[int] = []
+            p1 = SimpleNamespace(
+                GetNetworkID=lambda: (10, 20),
+                MCPConnGenValue=lambda: 7,
+                MCPStanceCloseServer=lambda cg: p1_closes.append(cg),
+            )
+            p2 = SimpleNamespace(
+                GetNetworkID=lambda: (30, 40),
+                MCPConnGenValue=lambda: 8,
+                MCPStanceCloseServer=lambda cg: p2_closes.append(cg),
+            )
+            floors = EnforceArray([SimpleNamespace(net_low=10, net_high=20, conn_gen=7)])
+            close_args = SimpleNamespace(close_floors=floors)
+            self.assertTrue(in_floors(p1, close_args))  # type: ignore[operator]
+            self.assertFalse(in_floors(p2, close_args))  # type: ignore[operator]
+            self.assertFalse(in_floors(p1, SimpleNamespace(close_floors=None)))  # type: ignore[operator]
+            self.assertFalse(in_floors(p1, None))  # type: ignore[operator]
+            # Simulate both loops in DispatchLeaseClose: p1 closed once via floor, p2 once via fallback.
+            for carried in floors:
+                for pl in (p1, p2):
+                    if pl.GetNetworkID() == (carried.net_low, carried.net_high):
+                        pl.MCPStanceCloseServer(carried.conn_gen)
+            for pl in (p1, p2):
+                if not in_floors(pl, close_args):  # type: ignore[operator]
+                    pl.MCPStanceCloseServer(pl.MCPConnGenValue())
+            self.assertEqual(p1_closes, [7])
+            self.assertEqual(p2_closes, [8])
+
+        for dup_before_start2 in (True, False):
+            with self.subTest(case="duplicate_cancel1_with_start2", dup_before_start2=dup_before_start2):
+                pair = _StancePair(self.stance, care)
+                self.assertEqual(pair.begin("prone", False), "")
+                pair.deliver_rpcs()
+                self.assertTrue(pair.server.close_server(pair.conn_gen))
+                self.assertEqual(len(pair.rpcs), 1)
+                dup_cancel_1 = (pair.rpcs[0][0], list(pair.rpcs[0][1]))
+                # Deliver first cancel_1 and process its ACK on the server.
+                pair.deliver_rpcs()
+                pair.owner.command_handler(0.1)
+                pair.deliver_iuds()
+                self.assertFalse(pair.server.busy_now())
+                # Admit crouch_2 and deliver duplicate cancel_1 alongside start_2.
+                self.assertEqual(pair.begin("crouch", False), "")
+                self.assertEqual(len(pair.rpcs), 1)
+                start_2 = pair.rpcs.pop(0)
+                if dup_before_start2:
+                    pair.rpcs.extend([dup_cancel_1, start_2])
+                else:
+                    pair.rpcs.extend([start_2, dup_cancel_1])
+                pair.step(0.1)
+                self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_CROUCH])
+                self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_CROUCH])
+                pair.step(1.6)
+                self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_CROUCH, -1])
+                self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_CROUCH, -1])
+                self.assertFalse(pair.owner.active_now())
+                self.assertFalse(pair.server.active_now())
+                self.assertFalse(pair.server.busy_now())
+
+        with self.subTest(case="pending_owner_cancel_for_req1_superseded_by_start2"):
+            pair = _StancePair(self.stance, care)
+            self.assertEqual(pair.begin("prone", False), "")
+            pair.step(0.1)
+            # Server finishes unlock while owner is still locked; client lease_close arms CancelWanted for req 1.
+            pair.server.command_handler(1.6)
+            self.assertFalse(pair.server.busy_now())
+            pair.owner.cancel("lease_close")
+            self.assertTrue(pair.owner.ns["m_MCPStanceCancelWanted"])
+            # Server admits crouch_2 and start_2 reaches owner before owner's CommandHandler runs.
+            self.assertEqual(pair.begin("crouch", False), "")
+            pair.deliver_rpcs()
+            self.assertFalse(pair.owner.ns["m_MCPStanceCancelWanted"])
+            pair.step(0.1)
+            self.assertEqual(
+                pair.owner.force_calls,
+                [_STANCE_CONSTS.STANCEIDX_PRONE, -1, _STANCE_CONSTS.STANCEIDX_CROUCH],
+            )
+            self.assertEqual(
+                pair.server.force_calls,
+                [_STANCE_CONSTS.STANCEIDX_PRONE, -1, _STANCE_CONSTS.STANCEIDX_CROUCH],
+            )
+            pair.step(1.6)
+            self.assertEqual(
+                pair.owner.force_calls,
+                [_STANCE_CONSTS.STANCEIDX_PRONE, -1, _STANCE_CONSTS.STANCEIDX_CROUCH, -1],
+            )
+            self.assertEqual(
+                pair.server.force_calls,
+                [_STANCE_CONSTS.STANCEIDX_PRONE, -1, _STANCE_CONSTS.STANCEIDX_CROUCH, -1],
+            )
+
+        with self.subTest(case="stale_cancel1_after_uncancelled_req1_and_start2"):
+            pair = _StancePair(self.stance, care)
+            self.assertEqual(pair.begin("prone", False), "")
+            pair.step(0.1)
+            pair.step(1.6)
+            self.assertEqual(pair.owner.ns["m_MCPStanceClosedFloor"], 0)
+            self.assertEqual(pair.begin("crouch", False), "")
+            pair.deliver_rpcs()
+            rpc_id = int(pair.server.ns["MCP_RPC_PLAYER_STANCE"])  # type: ignore[arg-type]
+            pair.rpcs.append((rpc_id, [1, -1, False]))
+            pair.deliver_rpcs()
+            pair.step(0.1)
+            pair.step(1.6)
+            self.assertEqual(
+                pair.owner.force_calls,
+                [_STANCE_CONSTS.STANCEIDX_PRONE, -1, _STANCE_CONSTS.STANCEIDX_CROUCH, -1],
+            )
+            self.assertEqual(
+                pair.server.force_calls,
+                [_STANCE_CONSTS.STANCEIDX_PRONE, -1, _STANCE_CONSTS.STANCEIDX_CROUCH, -1],
+            )
+
     def test_enforce_script_no_ternary_and_locals_at_top(self) -> None:
         stripped = _without_comments(self.stance)
         no_strings = re.sub(r'"(?:\\.|[^"\\])*"', '""', stripped)
         self.assertNotIn("?", no_strings)
         local_decl = re.compile(
             r"^\s*(?:string|int|float|bool|PlayerIdentity|EntityAI|HumanCommandMove|"
-            r"ScriptRPC|ScriptInputUserData)\s+(\w+)\s*(?:=[^;]*)?;\s*$"
+            r"ScriptRPC|ScriptInputUserData|MCPLeaseCloseFloor)\s+(\w+)\s*(?:=[^;]*)?;\s*$"
         )
-        for sig in _STANCE_SIGNATURES:
+        bridge_src = BRIDGE.read_text(encoding="utf-8")
+        checked: list[tuple[str, str]] = [(self.stance, sig) for sig in _STANCE_SIGNATURES] + [
+            (bridge_src, "protected bool IsPlayerInCloseFloors(PlayerBase player, MCPArgs closeArgs)")
+        ]
+        for src_text, sig in checked:
             with self.subTest(signature=sig):
-                body = _enforce_method_body(self.stance, sig)
+                body = _enforce_method_body(src_text, sig)
+                self.assertNotIn("?", re.sub(r'"(?:\\.|[^"\\])*"', '""', _without_comments(body)))
                 seen_stmt = False
                 names: set[str] = set()
                 for raw in _without_comments(body).splitlines():
