@@ -24,6 +24,7 @@ modded class PlayerBase
 	protected int m_MCPStanceRequestId;
 	protected int m_MCPStanceLastId;
 	protected int m_MCPStanceClosedFloor;
+	protected int m_MCPStanceCancelRequestId;
 	protected float m_MCPStanceDeadlineS;
 	protected float m_MCPStanceUnlockDueS;
 	protected bool m_MCPStanceRecoverRequested;
@@ -70,6 +71,10 @@ modded class PlayerBase
 			{
 				return "no_move_command";
 			}
+		}
+		if (m_MCPStanceCancelOutstanding)
+		{
+			return "busy";
 		}
 		m_MCPStanceLastId = m_MCPStanceLastId + 1;
 		m_MCPStanceRequestId = m_MCPStanceLastId;
@@ -302,9 +307,11 @@ modded class PlayerBase
 			{
 				m_MCPStanceClosedFloor = requestId;
 			}
-			m_MCPStanceCancelOutstanding = false;
-			m_MCPStanceWaitingOwner = false;
-			m_MCPStancePending = false;
+			if (m_MCPStanceCancelOutstanding && (m_MCPStanceCancelRequestId == 0 || requestId == m_MCPStanceCancelRequestId))
+			{
+				m_MCPStanceCancelOutstanding = false;
+				m_MCPStanceCancelRequestId = 0;
+			}
 			Print("[DayZ_MCP] MCPStance request=" + requestId.ToString() + " reason=cancel_ack");
 			return true;
 		}
@@ -330,8 +337,7 @@ modded class PlayerBase
 		}
 		if (GetGame() && GetGame().GetTickTime() > m_MCPStanceDeadlineS)
 		{
-			Print("[DayZ_MCP] MCPStance request=" + requestId.ToString() + " reason=expired");
-			m_MCPStanceWaitingOwner = false;
+			MCPStanceCancel("expired");
 			return true;
 		}
 		m_MCPStancePending = true;
@@ -499,6 +505,10 @@ modded class PlayerBase
 		{
 			Print(MCPStanceLogLine("cancelled") + " reason=" + reason);
 		}
+		if (!wasActive)
+		{
+			return;
+		}
 		if (GetGame() && GetGame().IsServer() && GetGame().IsMultiplayer())
 		{
 			identity = GetIdentity();
@@ -506,6 +516,7 @@ modded class PlayerBase
 			{
 				MCPStanceSendCancelRpc(identity);
 				m_MCPStanceCancelOutstanding = true;
+				m_MCPStanceCancelRequestId = m_MCPStanceClosedFloor;
 			}
 		}
 		if (GetGame() && GetGame().IsClient() && !GetGame().IsDedicatedServer())
