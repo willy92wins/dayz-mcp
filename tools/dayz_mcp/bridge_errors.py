@@ -845,6 +845,19 @@ def _ai_group_order_detail(result: dict[str, Any]) -> str:
     return "; ".join(parts)
 
 
+_PLAYER_RESPAWN_COMMANDS = frozenset({"player_respawn", "player_respawn_survivor"})
+# The client bridge refuses a respawn of its living, conscious, free local
+# player before anything changes (DispatchPlayerRespawn, MCPClientBridge.c):
+# vanilla's MissionServer.OnClientRespawnEvent kills only an unconscious or
+# restrained player and leaves any other living one alone. player_kill is not
+# in PUBLIC_NEXT_TOOLS, so the way out is named in the text, not next_step=.
+PLAYER_ALIVE_CONSCIOUS_TEXT = (
+    "the local player is alive, conscious and not restrained; vanilla respawns only a "
+    "dead, unconscious or restrained player, so nothing was requested (player_kill "
+    "first for a new body)"
+)
+
+
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     """Diagnostics the bridge filled BEFORE deciding the error, as message text.
 
@@ -917,6 +930,12 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     run_not_owned's next_step, still apply), even when the payload
     carries a filled ui_menu or ui_map.
 
+    player_respawn and player_respawn_survivor are the fourteenth:
+    player_alive_conscious carries the fixed PLAYER_ALIVE_CONSCIOUS_TEXT.
+    The code already names every fact the bridge read (alive, conscious,
+    not restrained), so no observed= detail is added; their other codes
+    stay bare.
+
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
     clicked=false, and a world_spawn timeout has to stay "timeout". The click
@@ -960,6 +979,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _scene_shared_detail(result)
     if cmd == "object_set_health":
         return _object_set_health_detail(result)
+    if cmd in _PLAYER_RESPAWN_COMMANDS and str(result.get("error") or "") == "player_alive_conscious":
+        return PLAYER_ALIVE_CONSCIOUS_TEXT
     if cmd == "actor_emote":
         return _actor_emote_detail(result)
     if cmd == "ai_emote":
@@ -1024,6 +1045,8 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # observed= from ui_map (every other code of either verb carries no
     # observed= detail; the global hints of this function, such as
     # run_not_owned's next_step, still apply),
+    # player_respawn and player_respawn_survivor, whose player_alive_conscious
+    # carries the fixed PLAYER_ALIVE_CONSCIOUS_TEXT,
     # and world_spawn/vehicle_eject_failed, which carries the retained object_id.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
