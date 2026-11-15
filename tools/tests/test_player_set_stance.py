@@ -648,14 +648,15 @@ class PlayerSetStanceSourceTest(unittest.TestCase):
             EXPECTED_SERVER_ARG_CONTRACT_HASH,
             self.bridge,
         )
-        self.assertGreater(
-            result_prune.PRUNABLE_FIELDS.index("player_set_stance"),
-            result_prune.PRUNABLE_FIELDS.index("player_godmode"),
+        # main pins heal, godmode, player_move adjacent in MCPResult and the
+        # whole tail from player_move; the prune order mirrors MCPResult. So the
+        # stance ref sits between bot and player_heal, before player_move.
+        stance_at = result_prune.PRUNABLE_FIELDS.index("player_set_stance")
+        self.assertEqual(
+            result_prune.PRUNABLE_FIELDS[stance_at - 1 : stance_at + 3],
+            ("bot", "player_set_stance", "player_heal", "player_godmode"),
         )
-        self.assertLess(
-            result_prune.PRUNABLE_FIELDS.index("player_set_stance"),
-            result_prune.PRUNABLE_FIELDS.index("player_move"),
-        )
+        self.assertLess(stance_at, result_prune.PRUNABLE_FIELDS.index("player_move"))
 
 
 class PlayerSetStanceM1RegressionTest(unittest.TestCase):

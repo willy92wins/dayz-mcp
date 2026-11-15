@@ -1672,12 +1672,12 @@ class MCPResult
 	ref MCPPlayerKill player_kill;
 	// bot_start / bot_stop reply. Unassigned on their refusals and on other commands.
 	ref MCPBotReport bot;
+	// player_set_stance reply. Unassigned on its refusals and on other commands.
+	ref MCPPlayerSetStance player_set_stance;
 	// player_heal reply. Unassigned on its refusals and on other commands.
 	ref MCPPlayerHeal player_heal;
 	// player_godmode reply. Unassigned on its refusals and on other commands.
 	ref MCPPlayerGodmode player_godmode;
-	// player_set_stance reply. Unassigned on its refusals and on other commands.
-	ref MCPPlayerSetStance player_set_stance;
 	// player_move reply, also on its refusals once the phase is known.
 	// Unassigned on other commands.
 	ref MCPPlayerMove player_move;
