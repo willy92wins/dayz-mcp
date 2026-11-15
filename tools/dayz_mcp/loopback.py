@@ -7259,27 +7259,27 @@ class ServerState:
                 abandoned += 1
         return abandoned
 
-    def _abandon_late_answered_spawn(self, command_id: int, t_result: float) -> None:
-        """The reaper's abandon, for one delivered spawn at its answer's clock.
+    def _late_answered_spawn_due_locked(
+        self, command_id: int, t_result: float
+    ) -> bool:
+        """A delivered spawn answered at or after its operation deadline.
 
-        reap_expired_commands runs on a poll, an await or /status. A caller that
-        never learned the id (daemon_response_ambiguous) sends no /abandon, so an
-        answer that lands before any reap would be filed as a discarded late
-        result with its release plan dropped. abandon_command publishes that
-        release once; store_result then discards the answer as unknown.
+        Caller holds self._lock. reap_expired_commands runs on a poll, an await
+        or /status. A caller that never learned the id (daemon_response_ambiguous)
+        sends no /abandon, so an answer that lands before any reap would be
+        filed as a discarded late result with its release plan dropped.
+        store_result gives such an answer, once its origin passed the fence, the
+        abandon the reaper would have applied at that deadline.
         """
-        with self._lock:
-            deadline = self._operation_deadlines.get(command_id)
-            row = self._broker_rows.get(command_id)
-            due = (
-                deadline is not None
-                and t_result >= deadline
-                and isinstance(row, dict)
-                and row.get("cmd") in _LATE_ANSWER_ABANDON_SOURCES
-                and row.get("state") == "delivered"
-            )
-        if due:
-            self.abandon_command(command_id, "tool_timeout")
+        deadline = self._operation_deadlines.get(command_id)
+        row = self._broker_rows.get(command_id)
+        return (
+            deadline is not None
+            and t_result >= deadline
+            and isinstance(row, dict)
+            and row.get("cmd") in _LATE_ANSWER_ABANDON_SOURCES
+            and row.get("state") == "delivered"
+        )
 
     def whitelisted_commands(self) -> set[str]:
         commands = set(WHITELISTED_COMMANDS)
@@ -8063,7 +8063,13 @@ class ServerState:
             return 400, {"error": "bad_id"}
 
         t_result = self._now()
-        self._abandon_late_answered_spawn(command_id, t_result)
+        with self._lock:
+            late_due = self._late_answered_spawn_due_locked(command_id, t_result)
+        # Read before the broker lock, as abandon_command does, and only for a
+        # spawn that may be abandoned below.
+        late_quarantine = self._retail_quarantine_reason() if late_due else None
+        late_outcome: dict | None = None
+        late_expected: str | None = None
         stored = dict(body)
         meta: dict[str, float] = {"t_result": t_result}
 
@@ -8142,6 +8148,16 @@ class ServerState:
                     "ok_value": None,
                     "duplicate": True,
                 }
+            # Past the fence and the retry check: the reaper's abandon for a
+            # late-answered spawn. Its row leaves here, so the answer below is
+            # discarded as unknown and its release is published at most once.
+            if late_due and self._late_answered_spawn_due_locked(
+                command_id, t_result
+            ):
+                late_expected = fence[0] if fence is not None else None
+                late_outcome = self._abandon_row_locked(
+                    command_id, "tool_timeout", late_quarantine
+                )
             close_row = self._lease_closes.get(command_id)
             if close_row is not None:
                 close_handled = True
@@ -8201,6 +8217,18 @@ class ServerState:
             close_outcomes = self._drain_close_outcomes_locked()
 
         self._flush_close_outcomes(close_outcomes)
+        if late_outcome is not None:
+            self._flush_abandon_outcome(late_outcome)
+            # The abandon has no caller to report to: a release that could not
+            # be queued (cleanup_degraded and its cause) is audited here, and
+            # the lease close stays the group's backstop.
+            self._audit_fence(
+                "late_answer_abandon",
+                command_id,
+                late_expected,
+                instance,
+                extra=dict(late_outcome["body"]),
+            )
 
         if owner_operation is not None and self.coordination is not None:
             ok_value = stored.get("ok")

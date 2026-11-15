@@ -7,10 +7,14 @@ carries the criterion -> test -> mutant table.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import sys
+import threading
 import unittest
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -32,7 +36,7 @@ from tests.enforce_subset_helpers import (
     translate,
 )
 from tests.client_helpers import _fixture_client_runtime
-from tests.fence_helpers import INST_SERVER, PID_SERVER, bound_queue
+from tests.fence_helpers import INST_CLIENT, INST_SERVER, PID_SERVER, bound_queue
 from tests.xai_helpers import GOOD_XAI, _WireString, _base_commands, wire_caps, xai_wire
 
 SPAWN = "ai_group_spawn"
@@ -661,17 +665,136 @@ class AIGroupSpawnLateAnswerTest(unittest.TestCase):
         return stored
 
     def _releases(self, state: loopback.ServerState) -> list[tuple[str, dict]]:
+        # A poll reaps expired commands before it delivers anything.
         return [(c["cmd"], c["args"]) for c in _delivered(state)]
+
+    def _queued(self, state: loopback.ServerState) -> list[tuple[str, dict]]:
+        # The server queue as it stands, without the reap a poll runs first.
+        return [(c["cmd"], c["args"]) for c in bound_queue(state, "server")]
+
+    def _audit(self, state: loopback.ServerState) -> list[dict]:
+        events: list[dict] = []
+        state.audit_writer = SimpleNamespace(write=events.append)
+        return events
+
+    def _enqueue_leased(self, state: loopback.ServerState, cmd: str, args: dict):
+        client = state._spawn_client  # type: ignore[attr-defined]
+        lease = state._spawn_lease  # type: ignore[attr-defined]
+        payload = {
+            "platform": client.platform, "pid": client.pid, "ppid": client.ppid,
+            "started_at_utc": client.started_at_utc,
+            "session_id": client.session_id, "task_label": client.task_label,
+        }
+        return state.enqueue_command(
+            cmd, args, peer="server", identity_payload=payload,
+            lease_token=lease["lease_token"], operation_timeout_s=30.0,
+        )
 
     def test_d12_answer_after_the_deadline_queues_the_release_by_token(self) -> None:
         # Mutant killed: store_result without the late abandon (the release
         # plan leaves with the discarded answer and nothing is queued).
         state, now, command_id = self._delivered_spawn()
+        events = self._audit(state)
         now[0] += 0.126
         self.assertTrue(self._answer(state, command_id).get("discarded"))
+        self.assertEqual(self._queued(state), [(RELEASE, {"spawn_token": TOKEN})])
+        self.assertEqual(
+            [(e["event"], e["status"]) for e in events],
+            [("late_answer_abandon", "release_queued")],
+        )
         self.assertEqual(self._releases(state), [(RELEASE, {"spawn_token": TOKEN})])
         self.assertEqual(self._releases(state), [])
         self.assertIsNone(state.take_result(command_id))
+
+    def test_a_late_answer_from_another_or_no_instance_changes_nothing(self) -> None:
+        # Mutant killed: the abandon run before the instance fence (an answer
+        # posted by another instance, or by none, consumed the spawn, queued
+        # its release and skipped the late_result_fenced audit).
+        for presented in (INST_CLIENT, None):
+            with self.subTest(instance=presented):
+                state, now, command_id = self._delivered_spawn()
+                events = self._audit(state)
+                now[0] += 0.126
+                status, stored = state.store_result(
+                    {"id": command_id, "ok": 1}, instance=presented
+                )
+                self.assertEqual((status, stored.get("discarded")), (200, True), stored)
+                self.assertEqual([e["event"] for e in events], ["late_result_fenced"])
+                self.assertEqual(self._queued(state), [])
+                # The spawn is still the broker's: the next reap releases it.
+                self.assertEqual(self._releases(state), [(RELEASE, {"spawn_token": TOKEN})])
+
+    def test_http_late_answers_pass_the_instance_fence_first(self) -> None:
+        # The same fence through POST /result: inst of another peer, then no
+        # inst, then the spawn's own instance.
+        state, now, command_id = self._delivered_spawn()
+        events = self._audit(state)
+        httpd = loopback.create_http_server(0, state, log_sink=lambda _line: None)
+        thread = threading.Thread(
+            target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+        thread.start()
+        self.addCleanup(thread.join, 2.0)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        host, port = httpd.server_address
+        now[0] += 0.126
+
+        def post_result(**query: str) -> dict:
+            query["key"] = "k"
+            request = urllib.request.Request(
+                f"http://{host}:{port}/result?" + urllib.parse.urlencode(query),
+                data=json.dumps({"id": command_id, "ok": 1}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=2.0) as response:
+                self.assertEqual(response.status, 200)
+                return json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(post_result(inst=INST_CLIENT), {"ok": True, "discarded": True})
+        self.assertEqual(post_result(), {"ok": True, "discarded": True})
+        self.assertEqual(self._queued(state), [])
+        self.assertEqual(post_result(inst=INST_SERVER), {"ok": True, "discarded": True})
+        self.assertEqual(self._queued(state), [(RELEASE, {"spawn_token": TOKEN})])
+        self.assertEqual(
+            [e["event"] for e in events],
+            ["late_result_fenced", "late_result_fenced", "late_answer_abandon"],
+        )
+
+    def test_a_release_that_cannot_be_queued_is_audited_with_its_cause(self) -> None:
+        # At most one release: with the server queue full none is queued, and
+        # the broker audits cleanup_degraded with the cause instead of
+        # dropping the plan silently; the lease close stays the backstop.
+        state, now, command_id = self._delivered_spawn()
+        events = self._audit(state)
+        for _ in range(loopback.MAX_QUEUE):
+            status, body = self._enqueue_leased(state, "world_time_get", {})
+            self.assertEqual(status, 200, body)
+        now[0] += 0.126
+        self.assertTrue(self._answer(state, command_id).get("discarded"))
+        self.assertEqual(
+            [(e["event"], e["status"], e["cause"]) for e in events],
+            [("late_answer_abandon", "cleanup_degraded", "queue_full")],
+        )
+        self.assertNotIn(RELEASE, [cmd for cmd, _args in self._queued(state)])
+
+    def test_a_late_failed_answer_also_queues_the_release_once(self) -> None:
+        # Mutant killed: abandoning only on ok=1. A spawn that created part of
+        # its group and then failed answers ok=0 with created set.
+        state, now, command_id = self._delivered_spawn()
+        now[0] += 0.126
+        failed = {
+            "id": command_id,
+            "ok": 0,
+            "error": "spawn_failed",
+            "ai_group": {"created": True},
+        }
+        for retry in (False, True):
+            status, stored = state.store_result(dict(failed), instance=INST_SERVER, retry=retry)
+            self.assertEqual(status, 200, stored)
+        releases = self._releases(state) + self._releases(state)
+        self.assertEqual(releases, [(RELEASE, {"spawn_token": TOKEN})])
 
     def test_the_release_is_queued_once_across_retry_abandon_and_reap(self) -> None:
         # Mutant killed: a second release from the bridge's retried answer,
@@ -707,8 +830,10 @@ class AIGroupSpawnLateAnswerTest(unittest.TestCase):
     def test_an_answer_before_the_deadline_is_kept_and_queues_nothing(self) -> None:
         # Mutant killed: releasing on every answer, on time or not.
         state, now, command_id = self._delivered_spawn()
+        events = self._audit(state)
         now[0] += 0.01
         self.assertNotIn("discarded", self._answer(state, command_id))
+        self.assertEqual(events, [])
         self.assertEqual(self._releases(state), [])
         stored = state.take_result(command_id)
         self.assertIsNotNone(stored)

@@ -40,10 +40,13 @@ server. It ships in `addon_expansion_ai/` and packs as
   server with a lease (see "Playing an emote on a member" below).
 - `ai_group_release` is internal: the broker queues it by `spawn_token`
   when a delivered spawn is abandoned (timeout or cancel), and when a
-  delivered spawn's answer arrives at or after its deadline before any reap
-  (for example after `daemon_response_ambiguous`, when the caller never
-  learned the id). It is not a public tool and never runs from lease-end
-  cleanup.
+  delivered spawn's answer arrives, from the instance it was sent to, at or
+  after its deadline before any reap (for example after
+  `daemon_response_ambiguous`, when the caller never learned the id; the
+  broker audits that case as `late_answer_abandon`). It is queued at most
+  once and not retried: when it cannot be queued (a full queue, for
+  example), the lease close is what still asks the group to release. It is
+  not a public tool and never runs from lease-end cleanup.
 - The adapter keeps its own group registry on the server (groups are never
   deleted from it; a group is `active` or `releasing`). Members also enter
   the base `m_RuntimeObjects` and, with a `scene_id`, the scene registry,
