@@ -312,6 +312,11 @@ modded class PlayerBase
 				m_MCPStanceCancelOutstanding = false;
 				m_MCPStanceCancelRequestId = 0;
 			}
+			if (m_MCPStanceRequestId > 0 && m_MCPStanceRequestId <= m_MCPStanceClosedFloor)
+			{
+				m_MCPStancePending = false;
+				m_MCPStanceWaitingOwner = false;
+			}
 			Print("[DayZ_MCP] MCPStance request=" + requestId.ToString() + " reason=cancel_ack");
 			return true;
 		}
@@ -376,6 +381,11 @@ modded class PlayerBase
 		}
 		if (!m_MCPStancePending)
 		{
+			return;
+		}
+		if (m_MCPStanceRequestId > 0 && m_MCPStanceRequestId <= m_MCPStanceClosedFloor)
+		{
+			m_MCPStancePending = false;
 			return;
 		}
 		if (GetGame() && GetGame().GetTickTime() > m_MCPStanceDeadlineS)
@@ -505,8 +515,8 @@ modded class PlayerBase
 			if (moveCmd && !moveCmd.IsChangingStance())
 			{
 				moveCmd.ForceStance(-1);
+				m_MCPStanceUnlock = false;
 			}
-			m_MCPStanceUnlock = false;
 		}
 		if (!hadRequest)
 		{
@@ -573,6 +583,17 @@ modded class PlayerBase
 		}
 		MCPStanceCancel("lease_close");
 		return true;
+	}
+
+	override void OnReconnect()
+	{
+		super.OnReconnect();
+		m_MCPStanceCancelOutstanding = false;
+		m_MCPStanceCancelRequestId = 0;
+		m_MCPStanceWaitingOwner = false;
+		m_MCPStancePending = false;
+		m_MCPStanceIudRetry = false;
+		m_MCPStanceDeadlineS = 0;
 	}
 
 	string MCPStanceNameFromId(int stanceId)

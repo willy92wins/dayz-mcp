@@ -293,6 +293,8 @@ class PlayerSetStanceSourceTest(unittest.TestCase):
         self.assertLess(self.begin.index("if (m_MCPStanceCancelOutstanding)"), self.begin.index("SendPlayerUnconsciousness"))
         self.assertIn("if (hadUnlock)", self.stance)
         self.assertIn("if (!hadRequest)", self.stance)
+        self.assertIn("override void OnReconnect()", self.stance)
+        self.assertIn("m_MCPStanceRequestId <= m_MCPStanceClosedFloor", self.stance)
         self.assertIn("CallLater(MCPStanceVerify, 1500, false)", self.apply)
         self.assertIn(" observed=", self.stance)
         self.assertIn("stanceReport.requested = stanceWanted", self.dispatch)
