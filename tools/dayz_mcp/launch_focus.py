@@ -331,8 +331,10 @@ class FocusGuard:
                 return
             self._attempts += 1
             pids = set(self._pids)
-        outcome, restored = self.give_back(fg, prev, pids)
+        outcome, restored, departed = self.give_back(fg, prev, pids, pid)
         with self._lock:
+            if departed:
+                self._in_steal = False
             self._counters[outcome] += 1
             if not restored:
                 self._counters["restore_failed"] += 1
@@ -373,64 +375,59 @@ class FocusGuard:
             self.sleep(self.poll_s)
 
     def give_back(
-        self, fg: int, prev: int, pids: set[int]
-    ) -> tuple[str, bool]:
+        self, fg: int, prev: int, pids: set[int], verified_pid: int
+    ) -> tuple[str, bool, bool]:
         self._idle.clear()
         minimized: list[tuple[int, int]] = []
+        departed = False
         outcome = "failed"
         restored = False
         try:
             target = fg
+            target_pid = verified_pid
             deadline = self.clock() + self.settle_s
             while True:
                 if not self.armed:
                     break
                 if not any(window == target for window, _ in minimized):
-                    pid = self.fns.window_pid(target)
+                    current_pid = self.fns.window_pid(target)
+                    if current_pid != target_pid or target_pid not in pids:
+                        break
                     try:
                         self.fns.minimize(target)
                     except Exception:
                         break
-                    minimized.append((target, pid))
+                    minimized.append((target, target_pid))
                 cur = int(self.fns.foreground() or 0)
                 if cur != 0 and self.fns.window_pid(cur) not in pids:
+                    departed = True
                     break
                 cur_minimized = any(window == cur for window, _ in minimized)
-                if (
-                    cur != 0
-                    and not cur_minimized
-                    and self.clock() < deadline
-                    and self._verified(self.fns.window_pid(cur))
-                ):
-                    target = cur
-                    continue
+                if cur != 0 and not cur_minimized and self.clock() < deadline:
+                    cur_pid = self.fns.window_pid(cur)
+                    if self._verified(cur_pid):
+                        target = cur
+                        target_pid = cur_pid
+                        continue
                 left = deadline - self.clock()
                 if left <= 0:
                     break
                 self.sleep(min(self.poll_s, left))
         finally:
-            keep = [
-                (window, pid)
+            accepted: dict[int, bool | None] = {}
+            for window, pid in minimized:
+                accepted[window] = self._show_if_owned(window, pid)
+            if not any(value is False for value in accepted.values()):
+                self._observe(minimized, accepted)
+            for window, pid in minimized:
+                if self._window_resolved(window, pid, accepted.get(window)):
+                    continue
+                accepted[window] = self._show_if_owned(window, pid)
+            self._observe(minimized, accepted)
+            restored = all(
+                self._window_resolved(window, pid, accepted.get(window))
                 for window, pid in minimized
-                if self.fns.window_pid(window) == pid
-            ]
-            if not keep:
-                restored = True
-            else:
-                for window, _ in keep:
-                    try:
-                        self.fns.show_no_activate(window)
-                    except Exception:
-                        pass
-                restored = self._observe_restored(keep)
-                if not restored:
-                    for window, _ in keep:
-                        if self.fns.is_window(window) and self.fns.is_iconic(window):
-                            try:
-                                self.fns.show_no_activate(window)
-                            except Exception:
-                                pass
-                    restored = self._observe_restored(keep)
+            )
             front = int(self.fns.foreground() or 0)
             if front == prev:
                 outcome = "returned"
@@ -439,19 +436,50 @@ class FocusGuard:
             else:
                 outcome = "failed"
             self._idle.set()
-        return outcome, restored
+        return outcome, restored, departed
 
-    def _observe_restored(self, keep: list[tuple[int, int]]) -> bool:
+    def _show_if_owned(self, window: int, pid: int) -> bool | None:
+        try:
+            if not self.fns.is_window(window):
+                return None
+            if self.fns.window_pid(window) != pid:
+                return None
+            try:
+                return bool(self.fns.show_no_activate(window))
+            except Exception:
+                return False
+        except Exception:
+            return False
+
+    def _window_resolved(
+        self, window: int, pid: int, accepted: bool | None
+    ) -> bool:
+        try:
+            if not self.fns.is_window(window):
+                return True
+            if self.fns.window_pid(window) != pid:
+                return True
+            return accepted is True and not self.fns.is_iconic(window)
+        except Exception:
+            return True
+
+    def _observe(
+        self,
+        windows: list[tuple[int, int]],
+        accepted: dict[int, bool | None],
+    ) -> None:
+        if any(value is False for value in accepted.values()):
+            return
         deadline = self.clock() + self.settle_s
         while True:
-            if not any(
-                self.fns.is_window(window) and self.fns.is_iconic(window)
-                for window, _ in keep
+            if all(
+                self._window_resolved(window, pid, accepted.get(window))
+                for window, pid in windows
             ):
-                return True
+                return
             left = deadline - self.clock()
             if left <= 0:
-                return False
+                return
             self.sleep(min(self.poll_s, left))
 
     def _verified(self, pid: int) -> bool:

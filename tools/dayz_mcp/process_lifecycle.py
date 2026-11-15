@@ -2468,6 +2468,7 @@ class ProcessLifecycle:
         bridge_probe: object | None = None,
         daemon_generation: str | None = None,
         steam_gate: object | None = None,
+        focus_fns: launch_focus.FocusFns | None = None,
     ) -> None:
         self.coordinator = coordinator
         self.manifest = manifest
@@ -2535,9 +2536,10 @@ class ProcessLifecycle:
         # inbox 5c8e: per-session launch-focus preference and the one guard a
         # run may have. Both live in daemon memory only.
         self._launch_focus_by_session: dict[str, tuple[str, float]] = {}
+        self._launch_focus_by_run: dict[str, str] = {}
         self._focus_guards: dict[str, launch_focus.FocusGuard] = {}
         self._launch_focus_lock = threading.Lock()
-        self.focus_fns = None
+        self.focus_fns = focus_fns
         self.focus_start = None
         self.focus_clock = time.monotonic
         self._activity_lock = threading.Lock()
@@ -4889,14 +4891,7 @@ class ProcessLifecycle:
                 del self._steam_preparation_by_session[oldest]
 
     def _focus_fns(self) -> launch_focus.FocusFns | None:
-        if self.focus_fns is not None:
-            return self.focus_fns
-        if os.name != "nt":
-            return None
-        try:
-            return launch_focus.real_win32()
-        except (AttributeError, OSError):
-            return None
+        return self.focus_fns
 
     def _focus_foreground(self) -> int:
         fns = self._focus_fns()
@@ -4934,6 +4929,32 @@ class ProcessLifecycle:
             return mode
         return launch_focus.DEFAULT_FOCUS
 
+    def _launch_focus_for_run(self, client: ClientIdentity, run_id: str) -> str:
+        key = _steam_preparation_key(client.session_id)
+        with self._launch_focus_lock:
+            stored = self._launch_focus_by_session.pop(key, None)
+            if stored is not None:
+                mode, stored_at = stored
+                if self.focus_clock() - stored_at <= _LAUNCH_FOCUS_TTL_S:
+                    self._launch_focus_by_run.pop(run_id, None)
+                    self._launch_focus_by_run[run_id] = mode
+                    while len(self._launch_focus_by_run) > _LAUNCH_FOCUS_BOUND:
+                        oldest = next(iter(self._launch_focus_by_run))
+                        del self._launch_focus_by_run[oldest]
+                    return mode
+            return self._launch_focus_by_run.get(
+                run_id, launch_focus.DEFAULT_FOCUS
+            )
+
+    def stop_launch_focus(self, reason: str = "daemon_stopping") -> None:
+        try:
+            with self._launch_focus_lock:
+                guards = list(self._focus_guards.values())
+            for guard in guards:
+                guard.disarm(reason)
+        except Exception:
+            pass
+
     def _focus_live_pids(self, run_id: str) -> set[int]:
         run = self.manifest.get(run_id)
         if run is None or run.state not in _ACTIVE_STATES:
@@ -4962,7 +4983,7 @@ class ProcessLifecycle:
         foreground_before: int = 0,
     ) -> None:
         try:
-            if self.launch_focus_mode(client.session_id) != "keep":
+            if self._launch_focus_for_run(client, run_id) != "keep":
                 self._disarm_launch_focus(run_id, "take")
                 return
             fns = self._focus_fns()
@@ -8137,6 +8158,9 @@ class ProcessLifecycle:
                         )
                 if player is None:
                     return self._reject_reserved(authority, command, "client_process_gone")
+                self._disarm_launch_focus(
+                    run_id, "foreground_verb", wait_s=3.0
+                )
                 windows = getattr(self, "window_fns", None)
                 fns = getattr(self, "foreground_fns", None)
                 hwnd = window_foreground.client_window(
@@ -8177,9 +8201,6 @@ class ProcessLifecycle:
                             "granted": None,
                             "held_s": 0.0,
                         }
-                    self._disarm_launch_focus(
-                        run_id, "foreground_verb", wait_s=3.0
-                    )
                     granted = window_foreground.set_foreground(
                         hwnd, player.pid, windows=windows, fns=fns
                     )
