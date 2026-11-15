@@ -8221,13 +8221,20 @@ class ServerState:
             self._flush_abandon_outcome(late_outcome)
             # The abandon has no caller to report to: a release that could not
             # be queued (cleanup_degraded and its cause) is audited here, and
-            # the lease close stays the group's backstop.
+            # the lease close stays the group's backstop. The audit file takes
+            # an event only with a reason and a duration_s (JsonlAuditWriter).
+            outcome_body = dict(late_outcome["body"])
             self._audit_fence(
                 "late_answer_abandon",
                 command_id,
                 late_expected,
                 instance,
-                extra=dict(late_outcome["body"]),
+                extra={
+                    **outcome_body,
+                    "reason": "late_answer",
+                    "decision": str(outcome_body.get("status") or ""),
+                    "duration_s": 0.0,
+                },
             )
 
         if owner_operation is not None and self.coordination is not None:

@@ -11,6 +11,7 @@ import json
 import math
 import re
 import sys
+import tempfile
 import threading
 import unittest
 import urllib.parse
@@ -26,6 +27,7 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import loopback, server
 from dayz_mcp.bridge_readiness import EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
+from dayz_mcp.runtime_state import JsonlAuditWriter, RuntimePaths
 from tests._addon_paths import addon_root
 from tests.enforce_subset_helpers import (
     EnforceArray,
@@ -801,6 +803,37 @@ class AIGroupSpawnLateAnswerTest(unittest.TestCase):
             [("late_answer_abandon", "cleanup_degraded", "queue_full")],
         )
         self.assertNotIn(RELEASE, [cmd for cmd, _args in self._queued(state)])
+
+    def test_the_late_answer_audit_reaches_the_real_audit_file(self) -> None:
+        # Mutant killed: a late_answer_abandon payload without reason and
+        # duration_s. The daemon's JsonlAuditWriter refuses it and
+        # _audit_fence swallows the error, so the event never reaches
+        # events.jsonl (a fake writer that keeps any dict cannot see this).
+        for fill_queue, expected in (
+            (False, ("release_queued", None)),
+            (True, ("cleanup_degraded", "queue_full")),
+        ):
+            with self.subTest(fill_queue=fill_queue), tempfile.TemporaryDirectory() as tmp:
+                state, now, command_id = self._delivered_spawn()
+                root = Path(tmp)
+                paths = RuntimePaths(root, root / "audit", root / "coordination.json", root / "runs.json")
+                state.audit_writer = JsonlAuditWriter(paths, "gen-late-answer")
+                if fill_queue:
+                    for _ in range(loopback.MAX_QUEUE):
+                        status, body = self._enqueue_leased(state, "world_time_get", {})
+                        self.assertEqual(status, 200, body)
+                now[0] += 0.126
+                self.assertTrue(self._answer(state, command_id).get("discarded"))
+                audit_file = root / "audit" / "events.jsonl"
+                lines = [
+                    json.loads(line)
+                    for line in audit_file.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                late = [e for e in lines if e.get("event") == "late_answer_abandon"]
+                self.assertEqual(len(late), 1, lines)
+                self.assertEqual(late[0]["command_id"], command_id)
+                self.assertEqual((late[0]["decision"], late[0].get("cause")), expected)
 
     def test_a_late_failed_answer_also_queues_the_release_once(self) -> None:
         # Mutant killed: abandoning only on ok=1. A spawn that created part of
