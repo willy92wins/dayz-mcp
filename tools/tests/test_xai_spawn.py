@@ -1036,6 +1036,21 @@ class AIGroupSpawnLateAnswerTest(unittest.TestCase):
                 self.assertEqual(late[0]["command_id"], command_id)
                 self.assertEqual((late[0]["decision"], late[0].get("cause")), expected)
 
+    def test_a_late_answer_under_retail_quarantine_queues_no_release(self) -> None:
+        # Mutant killed: the late abandon not reading the retail quarantine
+        # (late_quarantine left None), which would queue the release while a
+        # retail DayZ runs.
+        state, now, command_id = self._delivered_spawn()
+        events = self._audit(state)
+        state.retail_probe = lambda: {"known": True, "processes": [{"pid": 123}]}
+        now[0] += 0.126
+        self.assertTrue(self._answer(state, command_id).get("discarded"))
+        self.assertNotIn(RELEASE, [cmd for cmd, _args in self._queued(state)])
+        self.assertEqual(
+            [(e["event"], e["status"], e.get("cause")) for e in events],
+            [("late_answer_abandon", "cleanup_degraded", "quarantine")],
+        )
+
     def test_a_late_failed_answer_also_queues_the_release_once(self) -> None:
         # Mutant killed: abandoning only on ok=1. A spawn that created part of
         # its group and then failed answers ok=0 with created set.
