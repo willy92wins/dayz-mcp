@@ -581,6 +581,9 @@ class ControlClient:
             + window_foreground.SETTLE_S,
         )
 
+    async def lifecycle_focus(self, mode: str) -> dict[str, object]:
+        return await self._session_call("/lifecycle/focus", {"mode": mode})
+
     async def lifecycle_reap(self, run_id: str) -> dict[str, object]:
         payload: dict[str, object] = {"run_id": run_id}
         token = self.active_lease_token
