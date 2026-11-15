@@ -6,6 +6,7 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -15,7 +16,9 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import loopback, result_prune, server
 from dayz_mcp.bridge_readiness import EXPECTED_SERVER_ARG_CONTRACT_HASH
 from tests._addon_paths import addon_root
+from tests.enforce_subset_helpers import method_body as _enforce_method_body, python_source
 from tests.fence_helpers import INST_SERVER, PID_SERVER, bound_queue
+from tests.player_move_helpers import _LogString, _without_comments
 
 
 REPO = _TOOLS_DIR.parent
@@ -80,6 +83,303 @@ def _method_body(source: str, signature: str) -> str:
     if match is None:
         raise AssertionError(f"method not found: {signature}")
     return match.group("body")
+
+
+_STANCE_CONSTS = SimpleNamespace(
+    STANCEIDX_ERECT=0,
+    STANCEIDX_CROUCH=1,
+    STANCEIDX_PRONE=2,
+    STANCEIDX_RAISEDERECT=3,
+    STANCEIDX_RAISEDCROUCH=4,
+    STANCEIDX_RAISEDPRONE=5,
+)
+
+_STANCE_SIGNATURES = (
+    "protected bool MCPStanceBusyNow()",
+    "string MCPStanceBegin(string stance, bool recover)",
+    "string MCPSetStanceServer(string stance, bool recover)",
+    "protected string MCPStanceHardRefusal(int stanceId)",
+    "protected string MCPStanceSoftRefusal(int stanceId)",
+    "protected string MCPStanceApplyRefusal()",
+    "protected bool MCPStanceSendOwnerRpc(PlayerIdentity identity)",
+    "protected bool MCPStanceSendOwnerIud()",
+    "override void OnRPC(PlayerIdentity sender, int rpc_type, ParamsReadContext ctx)",
+    "override bool OnInputUserDataProcess(int userDataType, ParamsReadContext ctx)",
+    "override void CommandHandler(float pDt, int pCurrentCommandID, bool pCurrentCommandFinished)",
+    "protected void MCPStanceOnCommandHandler(float pDt)",
+    "protected void MCPStanceOwnerCancelStep()",
+    "void MCPStanceVerify()",
+    "protected void MCPStanceTryUnlock()",
+    "protected string MCPStanceLogLine(string observed)",
+    "bool MCPStanceActiveNow()",
+    "void MCPStanceCancel(string reason)",
+    "protected bool MCPStanceSendCancelIud()",
+    "protected void MCPStanceSendCancelRpc(PlayerIdentity identity)",
+    "bool MCPStanceCloseServer(int connGen)",
+    "override void OnReconnect()",
+    "string MCPStanceNameFromId(int stanceId)",
+)
+
+_ENFORCE_STR_LIT = re.compile(r'"(?:\\.|[^"\\])*"')
+_STANCE_CLASS_TYPES = frozenset(
+    {
+        "PlayerIdentity",
+        "EntityAI",
+        "HumanCommandMove",
+        "HumanMovementState",
+        "ScriptRPC",
+        "ScriptInputUserData",
+        "ParamsReadContext",
+    }
+)
+
+
+class _ParamsReadCtx:
+    def __init__(self, values: list[object]) -> None:
+        self._values = list(values)
+        self._index = 0
+
+    def _read(self) -> tuple[bool, object]:
+        if self._index >= len(self._values):
+            return False, 0
+        val = self._values[self._index]
+        self._index += 1
+        return True, val
+
+
+def _translate_stance_method(
+    source: str, signature: str, ns: dict[str, object], members: set[str]
+) -> None:
+    body = _enforce_method_body(source, signature)
+
+    def _rewrite(code: str) -> str:
+        code = re.sub(r"\b([A-Za-z_]\w*)\s*\+=\s*([^;]+);", r"\1 = \1 + (\2);", code)
+        return re.sub(r"\b([A-Za-z_][\w.]*)\.ToString\(\)", r"ToStr(\1)", code)
+
+    pieces: list[str] = []
+    last = 0
+    for m in _ENFORCE_STR_LIT.finditer(body):
+        pieces.append(_rewrite(body[last : m.start()]))
+        pieces.append(m.group(0))
+        last = m.end()
+    pieces.append(_rewrite(body[last:]))
+    wrapped = signature + "\n{" + "".join(pieces) + "}\n"
+    name, py_code = python_source(wrapped, signature, class_types=_STANCE_CLASS_TYPES, members=members)
+    py_code = re.sub(r"ctx\.Read\((\w+)\)", r"(_r := ctx._read(), \1 := _r[1])[0][0]", py_code)
+    ns.setdefault("_S", _LogString)
+    ns.setdefault(
+        "_string_copy",
+        lambda v: _LogString(v.data) if isinstance(v, _LogString) else v,
+    )
+    exec(compile(py_code, f"<enforce:{name}>", "exec"), ns)
+
+
+class _StancePeer:
+    def __init__(
+        self,
+        stance_source: str,
+        care_source: str,
+        *,
+        is_server: bool,
+        is_client: bool,
+        is_dedicated: bool,
+        conn_gen: int,
+        rpc_out: list[tuple[int, list[object]]],
+        iud_out: list[list[object]],
+    ) -> None:
+        self.is_server = is_server
+        self.is_client = is_client
+        self.is_dedicated = is_dedicated
+        self.multiplayer = True
+        self.conn_gen = conn_gen
+        self.can_store_iud = True
+        self.alive = True
+        self.unconscious = False
+        self.in_vehicle = False
+        self.swimming = False
+        self.climbing_ladder = False
+        self.climbing = False
+        self.in_water = False
+        self.heavy_item = False
+        self.restrained = False
+        self.in_action = False
+        self.emote_playing = False
+        self.inventory_processing = False
+        self.weapon_running = False
+        self.can_change_stance = True
+        self.has_move = True
+        self.changing_stance = False
+        self.has_identity = True
+        self.stance_idx = _STANCE_CONSTS.STANCEIDX_ERECT
+        self.force_calls: list[int] = []
+        self.hand_stops = 0
+        self.uncon_junctures: list[bool] = []
+        self.logs: list[str] = []
+        peer = self
+
+        class FakeMoveCmd:
+            def IsChangingStance(self) -> bool:
+                return peer.changing_stance
+
+            def ForceStance(self, stance_id: int) -> None:
+                peer.force_calls.append(stance_id)
+                if stance_id >= 0:
+                    peer.stance_idx = stance_id
+
+        self._move_cmd = FakeMoveCmd()
+
+        class FakeScriptRPC:
+            def __init__(self) -> None:
+                self.values: list[object] = []
+
+            def Write(self, value: object) -> None:
+                self.values.append(value)
+
+            def Send(self, _target: object, rpc_type: int, _reliable: bool, _identity: object) -> None:
+                rpc_out.append((rpc_type, list(self.values)))
+
+        class FakeInputUserData:
+            def __init__(self) -> None:
+                self.values: list[object] = []
+
+            @staticmethod
+            def CanStoreInputUserData() -> bool:
+                return peer.can_store_iud
+
+            def Write(self, value: object) -> None:
+                self.values.append(value)
+
+            def Send(self) -> None:
+                iud_out.append(list(self.values))
+
+        constants: dict[str, int | float] = {}
+        for ctype, cname, cval in re.findall(r"^const (int|float) (\w+) = (-?[0-9.]+);", stance_source, re.M):
+            constants[cname] = int(cval) if ctype == "int" else float(cval)
+
+        defaults = {"bool": False, "int": 0, "float": 0.0, "string": _LogString.of("")}
+        members: set[str] = {"m_MovementState"}
+        member_init: dict[str, object] = {"m_MovementState": SimpleNamespace(m_iStanceIdx=0)}
+        for mtype, mname in re.findall(r"^\tprotected (bool|int|float|string) (m_\w+);", stance_source, re.M):
+            members.add(mname)
+            member_init[mname] = _LogString.of("") if mtype == "string" else defaults[mtype]
+
+        identity_obj = SimpleNamespace(GetPlainId=lambda: _LogString.of(UID))
+        game_obj = SimpleNamespace(
+            IsMultiplayer=lambda: peer.multiplayer,
+            IsServer=lambda: peer.is_server,
+            IsClient=lambda: peer.is_client,
+            IsDedicatedServer=lambda: peer.is_dedicated,
+        )
+
+        self.ns: dict[str, object] = {
+            "_S": _LogString,
+            "ToStr": lambda v: _LogString.of(str(v)),
+            "this": self,
+            "super": SimpleNamespace(
+                OnRPC=lambda *_a: None,
+                OnInputUserDataProcess=lambda *_a: False,
+                CommandHandler=lambda *_a: None,
+                OnReconnect=lambda: None,
+            ),
+            "Print": lambda line: peer.logs.append(line.text),
+            "GetGame": lambda: game_obj,
+            "GetIdentity": lambda: identity_obj if peer.has_identity else None,
+            "MCPConnGenValue": lambda: peer.conn_gen,
+            "IsAlive": lambda: peer.alive,
+            "IsUnconscious": lambda: peer.unconscious,
+            "IsInVehicle": lambda: peer.in_vehicle,
+            "IsSwimming": lambda: peer.swimming,
+            "IsClimbingLadder": lambda: peer.climbing_ladder,
+            "IsClimbing": lambda: peer.climbing,
+            "IsInWater": lambda: peer.in_water,
+            "GetItemInHands": lambda: SimpleNamespace(IsHeavyBehaviour=lambda: peer.heavy_item) if peer.heavy_item else None,
+            "IsRestrained": lambda: peer.restrained,
+            "GetCommand_Action": lambda: object() if peer.in_action else None,
+            "GetEmoteManager": lambda: SimpleNamespace(IsEmotePlaying=lambda: peer.emote_playing),
+            "GetDayZPlayerInventory": lambda: SimpleNamespace(IsProcessing=lambda: peer.inventory_processing),
+            "GetWeaponManager": lambda: SimpleNamespace(IsRunning=lambda: peer.weapon_running),
+            "GetCommand_Move": lambda: peer._move_cmd if peer.has_move else None,
+            "StopHandEvent": lambda: setattr(peer, "hand_stops", peer.hand_stops + 1),
+            "GetMovementState": lambda state: setattr(state, "m_iStanceIdx", peer.stance_idx),
+            "HumanMovementState": lambda: SimpleNamespace(m_iStanceIdx=0),
+            "DayZPlayerConstants": _STANCE_CONSTS,
+            "DayZPlayerUtils": SimpleNamespace(PlayerCanChangeStance=lambda _p, _s: peer.can_change_stance),
+            "DayZPlayerSyncJunctures": SimpleNamespace(
+                SendPlayerUnconsciousness=lambda _p, val: peer.uncon_junctures.append(val)
+            ),
+            "ScriptRPC": FakeScriptRPC,
+            "ScriptInputUserData": FakeInputUserData,
+            **constants,
+            **member_init,
+        }
+        for care_sig in ("string MCPStanceName()", "int MCPStanceIdFromName(string stance)"):
+            _translate_stance_method(care_source, care_sig, self.ns, members)
+        for sig in _STANCE_SIGNATURES:
+            _translate_stance_method(stance_source, sig, self.ns, members)
+
+    def command_handler(self, dt: float) -> None:
+        self.ns["CommandHandler"](dt, 0, False)  # type: ignore[operator]
+
+    def cancel(self, reason: str) -> None:
+        self.ns["MCPStanceCancel"](_LogString.of(reason))  # type: ignore[operator]
+
+    def close_server(self, conn_gen: int) -> bool:
+        return bool(self.ns["MCPStanceCloseServer"](conn_gen))  # type: ignore[operator]
+
+    def active_now(self) -> bool:
+        return bool(self.ns["MCPStanceActiveNow"]())  # type: ignore[operator]
+
+    def busy_now(self) -> bool:
+        return bool(self.ns["MCPStanceBusyNow"]())  # type: ignore[operator]
+
+
+class _StancePair:
+    def __init__(self, stance_source: str, care_source: str, conn_gen: int = 7) -> None:
+        self.conn_gen = conn_gen
+        self.rpcs: list[tuple[int, list[object]]] = []
+        self.iuds: list[list[object]] = []
+        self.server = _StancePeer(
+            stance_source,
+            care_source,
+            is_server=True,
+            is_client=False,
+            is_dedicated=True,
+            conn_gen=conn_gen,
+            rpc_out=self.rpcs,
+            iud_out=[],
+        )
+        self.owner = _StancePeer(
+            stance_source,
+            care_source,
+            is_server=False,
+            is_client=True,
+            is_dedicated=False,
+            conn_gen=conn_gen,
+            rpc_out=[],
+            iud_out=self.iuds,
+        )
+
+    def begin(self, stance: str, recover: bool = False) -> str:
+        res = self.server.ns["MCPSetStanceServer"](_LogString.of(stance), recover)  # type: ignore[operator]
+        return res.text
+
+    def deliver_rpcs(self) -> None:
+        while self.rpcs:
+            rpc_type, payload = self.rpcs.pop(0)
+            self.owner.ns["OnRPC"](None, rpc_type, _ParamsReadCtx(payload))  # type: ignore[operator]
+
+    def deliver_iuds(self) -> None:
+        while self.iuds:
+            payload = self.iuds.pop(0)
+            udt = int(payload[0])  # type: ignore[arg-type]
+            self.server.ns["OnInputUserDataProcess"](udt, _ParamsReadCtx(payload[1:]))  # type: ignore[operator]
+
+    def step(self, dt: float) -> None:
+        self.deliver_rpcs()
+        self.owner.command_handler(dt)
+        self.deliver_iuds()
+        self.server.command_handler(dt)
+        self.deliver_rpcs()
 
 
 class PlayerSetStanceSchemaTest(unittest.IsolatedAsyncioTestCase):
@@ -386,6 +686,32 @@ class PlayerSetStanceM1RegressionTest(unittest.TestCase):
         self.assertIn('MCPStanceCancel("no_owner_ack")', handler)
         self.assertIn('MCPStanceCancel("lease_close")', close_srv)
 
+        # Replay applied_after_close + subsequent cancel ACK while server is busy:
+        pair = _StancePair(self.stance, CARE.read_text(encoding="utf-8"))
+        self.assertEqual(pair.begin("prone", False), "")
+        pair.deliver_rpcs()
+        pair.owner.command_handler(0.1)
+        self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+        # Server closes before start IUD arrives; late start IUD is accepted as applied_after_close.
+        self.assertTrue(pair.server.close_server(pair.conn_gen))
+        pair.server.inventory_processing = True
+        pair.deliver_iuds()
+        self.assertTrue(any("reason=applied_after_close" in line for line in pair.server.logs))
+        pair.server.command_handler(0.1)
+        self.assertEqual(pair.server.force_calls, [])
+        # Owner processes cancel RPC and sends cancel ACK; server still keeps pending apply.
+        pair.deliver_rpcs()
+        pair.owner.command_handler(0.1)
+        pair.deliver_iuds()
+        self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+        self.assertTrue(pair.server.ns["m_MCPStancePending"])
+        pair.server.inventory_processing = False
+        pair.server.command_handler(0.1)
+        self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+        pair.server.command_handler(0.1)
+        self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+        self.assertFalse(pair.server.active_now())
+
     def test_case_c_owner_decides_timeouts_on_sim_time(self) -> None:
         self.assertNotIn("GetTickTime", self.stance)
         self.assertNotIn("CallLater", self.stance)
@@ -405,6 +731,172 @@ class PlayerSetStanceM1RegressionTest(unittest.TestCase):
         self.assertIn('MCPStanceCancel("owner_gone")', pending_tail)
         self.assertIn('MCPStanceCancel("timeout")', pending_tail)
         self.assertNotIn("m_MCPStanceRequestId <= m_MCPStanceClosedFloor", pending_tail)
+
+    def test_p1_1_owner_checks_guards_and_move_before_sending_start_iud(self) -> None:
+        # Sol P1 #1a: when the owner is impeded (no_move_command or busy) while
+        # the server is ready, the owner must NOT emit a start IUD early; on
+        # timeout both sides finish with ForceStance=[] instead of server=[prone]
+        # and owner=[].
+        for impediment in ("no_move_command", "busy"):
+            with self.subTest(impediment=impediment, outcome="timeout"):
+                pair = _StancePair(self.stance, CARE.read_text(encoding="utf-8"))
+                if impediment == "no_move_command":
+                    pair.owner.has_move = False
+                else:
+                    pair.owner.inventory_processing = True
+                self.assertEqual(pair.begin("prone", False), "")
+                pair.deliver_rpcs()
+                for _ in range(10):
+                    pair.step(0.5)
+                    self.assertEqual(pair.owner.force_calls, [])
+                    self.assertEqual(pair.server.force_calls, [])
+                pair.step(0.2)
+                self.assertEqual(pair.owner.force_calls, [])
+                self.assertEqual(pair.server.force_calls, [])
+                self.assertFalse(pair.owner.active_now())
+                self.assertFalse(pair.server.active_now())
+                self.assertFalse(pair.server.busy_now())
+
+            with self.subTest(impediment=impediment, outcome="recovers_before_timeout"):
+                pair = _StancePair(self.stance, CARE.read_text(encoding="utf-8"))
+                if impediment == "no_move_command":
+                    pair.owner.has_move = False
+                else:
+                    pair.owner.inventory_processing = True
+                self.assertEqual(pair.begin("prone", False), "")
+                pair.deliver_rpcs()
+                pair.step(0.5)
+                self.assertEqual(pair.owner.force_calls, [])
+                self.assertEqual(pair.server.force_calls, [])
+                pair.owner.has_move = True
+                pair.owner.inventory_processing = False
+                pair.step(0.5)
+                self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+                self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+                pair.step(1.6)
+                self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+                self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+
+    def test_p1_1_owner_terminal_refusal_sends_cancel_to_server(self) -> None:
+        # Sol P1 #1b: a terminal refusal on the owner (both in SendWanted and in
+        # the pending fallback branch) must send a cancel IUD so the server does
+        # not remain stuck waiting.
+        with self.subTest(phase="send_wanted"):
+            pair = _StancePair(self.stance, CARE.read_text(encoding="utf-8"))
+            self.assertEqual(pair.begin("prone", False), "")
+            pair.deliver_rpcs()
+            pair.owner.in_vehicle = True
+            pair.step(0.1)
+            self.assertEqual(pair.owner.force_calls, [])
+            self.assertEqual(pair.server.force_calls, [])
+            self.assertFalse(pair.owner.active_now())
+            self.assertFalse(pair.server.active_now())
+            self.assertFalse(pair.server.busy_now())
+            self.assertTrue(any("reason=in_vehicle" in line for line in pair.owner.logs))
+            self.assertTrue(any("reason=cancel_ack" in line for line in pair.server.logs))
+
+        with self.subTest(phase="pending_branch_with_delayed_iud_slot"):
+            pair = _StancePair(self.stance, CARE.read_text(encoding="utf-8"))
+            self.assertEqual(pair.begin("prone", False), "")
+            pair.deliver_rpcs()
+            # Force the defensive pending path directly with IUD slot initially full.
+            pair.owner.ns["m_MCPStanceSendWanted"] = False
+            pair.owner.ns["m_MCPStancePending"] = True
+            pair.owner.in_vehicle = True
+            pair.owner.can_store_iud = False
+            pair.owner.command_handler(0.1)
+            self.assertFalse(pair.owner.ns["m_MCPStancePending"])
+            self.assertTrue(pair.owner.active_now())
+            pair.owner.can_store_iud = True
+            pair.step(0.1)
+            self.assertEqual(pair.owner.force_calls, [])
+            self.assertEqual(pair.server.force_calls, [])
+            self.assertFalse(pair.owner.active_now())
+            self.assertFalse(pair.server.active_now())
+            self.assertFalse(pair.server.busy_now())
+
+    def test_p1_2_cancel_ack_after_owner_apply_keeps_server_start_until_applied_then_unlocks(self) -> None:
+        # Sol P1 #2: owner applies; server accepts start IUD but waits on
+        # busy/no_move_command; lease_close arrives and owner sends cancel ACK;
+        # server must NOT drop its pending apply, must apply once the impediment
+        # clears, and must then release the ForceStance lock.
+        for impediment in ("busy", "no_move_command"):
+            for client_first in (False, True):
+                with self.subTest(impediment=impediment, client_first=client_first):
+                    pair = _StancePair(self.stance, CARE.read_text(encoding="utf-8"))
+                    self.assertEqual(pair.begin("prone", False), "")
+                    pair.deliver_rpcs()
+                    # Owner applies and emits start IUD; server accepts it.
+                    pair.owner.command_handler(0.1)
+                    self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+                    pair.deliver_iuds()
+                    self.assertTrue(pair.server.ns["m_MCPStancePending"])
+                    self.assertTrue(pair.server.ns["m_MCPStanceFromIud"])
+
+                    # Server is temporarily impeded when its CommandHandler runs.
+                    if impediment == "no_move_command":
+                        pair.server.has_move = False
+                    else:
+                        pair.server.inventory_processing = True
+                    pair.server.command_handler(0.1)
+                    self.assertEqual(pair.server.force_calls, [])
+                    self.assertTrue(pair.server.ns["m_MCPStancePending"])
+
+                    # lease_close runs on both sides and owner ACKs cancel.
+                    if client_first:
+                        pair.owner.cancel("lease_close")
+                        pair.owner.command_handler(0.1)
+                        pair.deliver_iuds()
+                        self.assertTrue(pair.server.close_server(pair.conn_gen))
+                        pair.deliver_rpcs()
+                    else:
+                        self.assertTrue(pair.server.close_server(pair.conn_gen))
+                        pair.owner.cancel("lease_close")
+                        pair.deliver_rpcs()
+                        pair.owner.command_handler(0.1)
+                        pair.deliver_iuds()
+
+                    self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+                    self.assertFalse(pair.owner.active_now())
+                    self.assertFalse(pair.server.ns["m_MCPStanceCancelOutstanding"])
+                    self.assertTrue(pair.server.ns["m_MCPStancePending"])
+                    self.assertTrue(pair.server.ns["m_MCPStanceFromIud"])
+                    self.assertTrue(pair.server.active_now())
+
+                    # Impediment clears: server completes ForceStance(prone), then unlocks.
+                    pair.server.has_move = True
+                    pair.server.inventory_processing = False
+                    pair.server.command_handler(0.1)
+                    self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+                    pair.server.command_handler(0.1)
+                    self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+                    self.assertFalse(pair.server.active_now())
+                    self.assertFalse(pair.server.busy_now())
+
+    def test_enforce_script_no_ternary_and_locals_at_top(self) -> None:
+        stripped = _without_comments(self.stance)
+        no_strings = re.sub(r'"(?:\\.|[^"\\])*"', '""', stripped)
+        self.assertNotIn("?", no_strings)
+        local_decl = re.compile(
+            r"^\s*(?:string|int|float|bool|PlayerIdentity|EntityAI|HumanCommandMove|"
+            r"ScriptRPC|ScriptInputUserData)\s+(\w+)\s*(?:=[^;]*)?;\s*$"
+        )
+        for sig in _STANCE_SIGNATURES:
+            with self.subTest(signature=sig):
+                body = _enforce_method_body(self.stance, sig)
+                seen_stmt = False
+                names: set[str] = set()
+                for raw in _without_comments(body).splitlines():
+                    line = raw.strip()
+                    if not line or line in ("{", "}"):
+                        continue
+                    m = local_decl.match(raw)
+                    if m is None:
+                        seen_stmt = True
+                        continue
+                    self.assertFalse(seen_stmt, f"local declared after statement in {sig}: {line}")
+                    self.assertNotIn(m.group(1), names, f"duplicate local in {sig}: {line}")
+                    names.add(m.group(1))
 
 
 class PlayerSetStanceShouldTest(unittest.TestCase):
@@ -509,6 +1001,12 @@ class PlayerSetStanceShouldTest(unittest.TestCase):
         self.assertIn("busy", desc)
         self.assertIn("rpc_failed", desc)
         self.assertIn(server.GODMODE_DEFAULT_LINE, desc)
+        messages = MESSAGES.read_text(encoding="utf-8")
+        stance_msg_block = messages[
+            messages.index("// player_set_stance reply.") : messages.index("class MCPPlayerKill")
+        ]
+        self.assertNotIn("CallLater", stance_msg_block)
+        self.assertIn("CommandHandler", stance_msg_block)
 
 
 if __name__ == "__main__":

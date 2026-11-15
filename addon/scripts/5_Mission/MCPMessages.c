@@ -1095,7 +1095,7 @@ class MCPPlayerGodmode
 // apply was accepted (RPC/queue), not when GetMovementState already
 // matches: that only updates on the next CommandHandler. before is the
 // pre-apply snapshot. recover_requested echoes the request. The later
-// observed= line is printed from CallLater, not this reply. Primitives
+// observed= line is printed from CommandHandler, not this reply. Primitives
 // only: no entity reference.
 class MCPPlayerSetStance
 {
