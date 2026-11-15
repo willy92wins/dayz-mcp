@@ -43,6 +43,10 @@ modded class PlayerBase
 		{
 			return "bad_args";
 		}
+		if (m_MCPStanceCancelOutstanding)
+		{
+			return "busy";
+		}
 		if (!IsAlive())
 		{
 			return "player_dead";
@@ -71,10 +75,6 @@ modded class PlayerBase
 			{
 				return "no_move_command";
 			}
-		}
-		if (m_MCPStanceCancelOutstanding)
-		{
-			return "busy";
 		}
 		m_MCPStanceLastId = m_MCPStanceLastId + 1;
 		m_MCPStanceRequestId = m_MCPStanceLastId;
@@ -487,7 +487,11 @@ modded class PlayerBase
 		HumanCommandMove moveCmd;
 		PlayerIdentity identity;
 		bool wasActive;
+		bool hadUnlock;
+		bool hadRequest;
 		wasActive = MCPStanceActiveNow();
+		hadUnlock = m_MCPStanceUnlock;
+		hadRequest = wasActive || m_MCPStanceRequestId > 0 || m_MCPStanceClosedFloor > 0;
 		if (m_MCPStanceRequestId > m_MCPStanceClosedFloor)
 		{
 			m_MCPStanceClosedFloor = m_MCPStanceRequestId;
@@ -495,21 +499,24 @@ modded class PlayerBase
 		m_MCPStancePending = false;
 		m_MCPStanceWaitingOwner = false;
 		m_MCPStanceIudRetry = false;
-		moveCmd = GetCommand_Move();
-		if (moveCmd && !moveCmd.IsChangingStance())
+		if (hadUnlock)
 		{
-			moveCmd.ForceStance(-1);
+			moveCmd = GetCommand_Move();
+			if (moveCmd && !moveCmd.IsChangingStance())
+			{
+				moveCmd.ForceStance(-1);
+			}
 			m_MCPStanceUnlock = false;
+		}
+		if (!hadRequest)
+		{
+			return;
 		}
 		if (wasActive)
 		{
 			Print(MCPStanceLogLine("cancelled") + " reason=" + reason);
 		}
-		if (!wasActive)
-		{
-			return;
-		}
-		if (GetGame() && GetGame().IsServer() && GetGame().IsMultiplayer())
+		if (GetGame() && GetGame().IsServer() && GetGame().IsMultiplayer() && wasActive)
 		{
 			identity = GetIdentity();
 			if (identity)
