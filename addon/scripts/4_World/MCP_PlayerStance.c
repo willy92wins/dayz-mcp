@@ -630,10 +630,10 @@ modded class PlayerBase
 				m_MCPStanceCancelElapsedS += pDt;
 				if (m_MCPStanceCancelElapsedS > MCP_STANCE_CANCEL_TIMEOUT_S)
 				{
-					if (m_MCPStanceAcceptedId < m_MCPStanceCancelRequestId && m_MCPStanceCancelRequestId > m_MCPStanceOwnerClosedFloor)
-					{
-						m_MCPStanceOwnerClosedFloor = m_MCPStanceCancelRequestId;
-					}
+					// M-1: a missing cancel ack is NOT evidence that the owner did
+					// not apply. Only a real owner cancel IUD (or a conn-gen change)
+					// raises m_MCPStanceOwnerClosedFloor, so a late matching start
+					// IUD still reaches applied_after_close and the server applies.
 					if (m_MCPStanceCancelRequestId > m_MCPStanceOwnerAckedFloor)
 					{
 						m_MCPStanceOwnerAckedFloor = m_MCPStanceCancelRequestId;

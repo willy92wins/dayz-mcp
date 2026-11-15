@@ -1334,6 +1334,63 @@ class PlayerSetStanceM1RegressionTest(unittest.TestCase):
             self.assertFalse(pair.server.ns["m_MCPStanceCancelOutstanding"])
             self.assertFalse(pair.server.active_now())
 
+    def test_r4_p1_cancel_ack_timeout_keeps_late_owner_applied_start(self) -> None:
+        # Sol @2b3fa813 P1 (M-1): owner applies prone, server closes the lease,
+        # then the owner's start IUD and its cancel-applied IUD are delayed (in
+        # order) past MCP_STANCE_CANCEL_TIMEOUT_S. no_cancel_ack must not be
+        # treated as "owner did not apply": the late matching start is accepted
+        # (applied_after_close), the server applies prone, and both sides end
+        # with ForceStance=[prone, -1].
+        care = CARE.read_text(encoding="utf-8")
+        for delay_s in (0.5, 2.0):
+            with self.subTest(delay_s=delay_s):
+                pair = _StancePair(self.stance, care)
+                cancel_timeout = float(pair.server.ns["MCP_STANCE_CANCEL_TIMEOUT_S"])  # type: ignore[arg-type]
+                cancel_applied = pair.server.ns["MCP_STANCE_IUD_CANCEL_APPLIED"]
+                self.assertEqual(pair.begin("prone", False), "")
+                pair.deliver_rpcs()
+                pair.owner.command_handler(0.1)
+                self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+                self.assertEqual(len(pair.iuds), 1)
+
+                self.assertTrue(pair.server.close_server(pair.conn_gen))
+                self.assertTrue(pair.server.ns["m_MCPStanceCancelOutstanding"])
+
+                # Hold the start IUD; owner processes the cancel RPC and emits
+                # cancel-applied, which is held behind the start (order kept).
+                delayed: list[list[object]] = list(pair.iuds)
+                pair.iuds.clear()
+                pair.deliver_rpcs()
+                pair.owner.command_handler(0.1)
+                delayed.extend(pair.iuds)
+                pair.iuds.clear()
+                self.assertEqual(len(delayed), 2)
+                self.assertEqual(delayed[0][-1], _STANCE_CONSTS.STANCEIDX_PRONE)
+                self.assertEqual(delayed[1][-1], cancel_applied)
+
+                elapsed = 0.0
+                while elapsed < delay_s:
+                    pair.step(0.25)
+                    elapsed += 0.25
+                    self.assertEqual(pair.server.force_calls, [])
+                    self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+                    self.assertTrue(pair.owner.active_now())
+                timed_out = any("reason=no_cancel_ack" in line for line in pair.server.logs)
+                self.assertEqual(timed_out, delay_s > cancel_timeout)
+
+                pair.iuds.extend(delayed)
+                pair.step(0.1)
+                self.assertTrue(any("reason=applied_after_close" in line for line in pair.server.logs))
+                self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+                self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE])
+                pair.step(0.1)
+                pair.step(0.1)
+                self.assertEqual(pair.owner.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+                self.assertEqual(pair.server.force_calls, [_STANCE_CONSTS.STANCEIDX_PRONE, -1])
+                self.assertFalse(pair.owner.active_now())
+                self.assertFalse(pair.server.active_now())
+                self.assertFalse(pair.server.busy_now())
+
     def test_enforce_script_no_ternary_and_locals_at_top(self) -> None:
         stripped = _without_comments(self.stance)
         no_strings = re.sub(r'"(?:\\.|[^"\\])*"', '""', stripped)
