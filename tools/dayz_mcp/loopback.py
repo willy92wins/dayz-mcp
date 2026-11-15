@@ -323,6 +323,12 @@ _ABANDON_REASONS = frozenset({"cancelled", "tool_timeout"})
 # camera_path_play answer is left to the lease close, and the other release
 # sources keep their paths.
 _LATE_ANSWER_ABANDON_SOURCES = frozenset({"ai_group_spawn"})
+# A delivered spawn whose answer was stored on time but not read yet: its caller
+# may already have given up (the caller's deadline starts at the call, the
+# daemon's at enqueue), so the row stays until a read takes the answer, and an
+# abandon or the deadline releases the group and drops the unread answer.
+# Only ai_group_spawn.
+_UNREAD_ANSWER_RELEASE_SOURCES = frozenset({"ai_group_spawn"})
 _FENCE_PEER_NAMES = frozenset({"server", "client"})
 _BROKER_FENCE_ERRORS = frozenset(
     {
@@ -6597,6 +6603,9 @@ class ServerState:
             self._settle_hold_for_command_locked(command_id, delivered=False)
             body = {"status": "dropped"}
         elif state_name == "delivered":
+            if row.get("answered") is True:
+                # Its caller never read this answer: it leaves with the row.
+                self._results.pop(command_id, None)
             self._forget_command_tracking_locked(command_id)
             self._settle_hold_for_command_locked(command_id, delivered=True)
             release = row.get("release")
@@ -8204,7 +8213,18 @@ class ServerState:
                     stored["_server"] = meta
                     self._remember_result_locked(command_id, stored)
                     owner = self._command_owner.get(command_id)
-                    self._drop_broker_row_locked(command_id)
+                    answered_row = self._broker_rows.get(command_id)
+                    if (
+                        isinstance(answered_row, dict)
+                        and answered_row.get("cmd") in _UNREAD_ANSWER_RELEASE_SOURCES
+                        and answered_row.get("state") == "delivered"
+                    ):
+                        # Stored, not read yet: the row stays until a read
+                        # takes the answer (_extract_result_locked), so an
+                        # abandon or the deadline still releases the group.
+                        answered_row["answered"] = True
+                    else:
+                        self._drop_broker_row_locked(command_id)
                     if owner is not None:
                         owner_operation = (owner[0], owner[1], command_id)
                 self._note_hold_result_locked(

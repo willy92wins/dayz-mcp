@@ -43,10 +43,13 @@ server. It ships in `addon_expansion_ai/` and packs as
   delivered spawn's answer arrives, from the instance it was sent to, at or
   after its deadline before any reap (for example after
   `daemon_response_ambiguous`, when the caller never learned the id; the
-  broker audits that case as `late_answer_abandon`). It is queued at most
-  once and not retried: when it cannot be queued (a full queue, for
-  example), the lease close is what still asks the group to release. It is
-  not a public tool and never runs from lease-end cleanup.
+  broker audits that case as `late_answer_abandon`). A spawn whose answer
+  was stored on time but not read yet counts as delivered: until a read
+  takes the answer, the caller's abandon or the deadline queues the release
+  and drops the unread answer. It is queued at most once and not retried:
+  when it cannot be queued (a full queue, for example), the lease close is
+  what still asks the group to release. It is not a public tool and never
+  runs from lease-end cleanup.
 - The adapter keeps its own group registry on the server (groups are never
   deleted from it; a group is `active` or `releasing`). Members also enter
   the base `m_RuntimeObjects` and, with a `scene_id`, the scene registry,
