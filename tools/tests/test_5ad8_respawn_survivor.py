@@ -318,7 +318,7 @@ class EnforceSourceTest(unittest.TestCase):
         self.assertIn(COMMAND, announced_caps(BRIDGE))
         self.assertEqual(set(announced_caps(BRIDGE)), set(dispatch_census(BRIDGE)))
         found = re.findall(r'CLIENT_POLL_CAPS_MASK\s*=\s*"([^"]*)"', BRIDGE)
-        self.assertEqual(found, ["1.7fffffffffff"])
+        self.assertEqual(found, ["1.1ffffffffffff"])
         names, reason = parse_capability_mask("client", found[0])
         self.assertEqual(reason, "ok")
         self.assertEqual(set(names or ()), set(announced_caps(BRIDGE)))
@@ -339,7 +339,7 @@ class EnforceSourceTest(unittest.TestCase):
     def test_capability_tables_are_append_only_and_server_tables_unchanged(self) -> None:
         self.assertEqual(CLIENT_CAPABILITY_BITS[:46], BASE_CLIENT)
         self.assertEqual(CLIENT_CAPABILITY_BITS[46], COMMAND)
-        self.assertEqual(len(CLIENT_CAPABILITY_BITS), 47)
+        self.assertEqual(CLIENT_CAPABILITY_BITS[47:], ("ui_menu_set", "ui_map_set"))
         self.assertEqual(SERVER_CAPABILITY_BITS, SERVER_BITS)
         self.assertEqual(SERVER_ARG_CONTRACT, SERVER_CONTRACT)
         self.assertEqual(server_arg_contract_hash(), "3b800b7c7ee0674c")
@@ -370,13 +370,19 @@ class CompatibilityTest(unittest.TestCase):
         names, reason = parse_capability_mask("client", "1.3fffffffffff")
         self.assertEqual((names, reason), (BASE_CLIENT, "ok"))
         self.assertNotIn(COMMAND, names or ())
+        # Bits 47-48 (ui_menu_set, ui_map_set) are required client commands,
+        # so the PBO that must still match is one that lacks only bit 46.
+        without_pinned = "1.1bfffffffffff"
+        names, reason = parse_capability_mask("client", without_pinned)
+        self.assertEqual(reason, "ok")
+        self.assertEqual(names, tuple(n for n in CLIENT_CAPABILITY_BITS if n != COMMAND))
         state = _state()
         status, body = state.record_poll(
             "server", VERSION, instance=INST_SERVER, source_pid=PID_SERVER,
             cm="1.ffffffffffff", ach="3b800b7c7ee0674c",
         )
         self.assertEqual(status, 200, body)
-        _poll_client(state, "1.3fffffffffff")
+        _poll_client(state, without_pinned)
         snapshot = state.status_snapshot()
         payload: dict[str, Any] = {}
         for peer, key in (("server", "server_peer"), ("client", "client_peer")):
@@ -418,7 +424,7 @@ class CompatibilityTest(unittest.TestCase):
 
     def test_current_client_receives_the_pinned_command(self) -> None:
         state = _state()
-        _poll_client(state, "1.7fffffffffff")
+        _poll_client(state, "1.1ffffffffffff")
         status, body = state.enqueue_command(COMMAND, {"survivor_type": "SurvivorM_Manua"})
         self.assertEqual((status, body["peer"], body["cmd"]), (200, "client", COMMAND))
 
