@@ -241,6 +241,11 @@ modded class PlayerBase
 		{
 			return;
 		}
+		if (stanceId < 0)
+		{
+			MCPStanceCancel("owner_rpc_cancel");
+			return;
+		}
 		if (stanceId != DayZPlayerConstants.STANCEIDX_ERECT && stanceId != DayZPlayerConstants.STANCEIDX_CROUCH && stanceId != DayZPlayerConstants.STANCEIDX_PRONE)
 		{
 			return;
@@ -285,15 +290,24 @@ modded class PlayerBase
 			Print("[DayZ_MCP] MCPStance request=" + requestId.ToString() + " reason=bad_args");
 			return true;
 		}
-		m_MCPStanceRequestId = requestId;
-		m_MCPStanceId = stanceId;
-		m_MCPStanceRequestedName = MCPStanceNameFromId(stanceId);
+		if (!m_MCPStanceWaitingOwner)
+		{
+			Print("[DayZ_MCP] MCPStance request=" + requestId.ToString() + " reason=not_waiting");
+			return true;
+		}
+		if (requestId != m_MCPStanceRequestId || stanceId != m_MCPStanceId)
+		{
+			Print("[DayZ_MCP] MCPStance request=" + requestId.ToString() + " reason=request_mismatch");
+			return true;
+		}
+		if (GetGame() && GetGame().GetTickTime() > m_MCPStanceDeadlineS)
+		{
+			Print("[DayZ_MCP] MCPStance request=" + requestId.ToString() + " reason=expired");
+			m_MCPStanceWaitingOwner = false;
+			return true;
+		}
 		m_MCPStancePending = true;
 		m_MCPStanceWaitingOwner = false;
-		if (GetGame())
-		{
-			m_MCPStanceDeadlineS = GetGame().GetTickTime() + 5.0;
-		}
 		return true;
 	}
 
@@ -418,6 +432,63 @@ modded class PlayerBase
 			uid = identity.GetPlainId();
 		}
 		return "[DayZ_MCP] MCPStance uid=" + uid + " requested=" + m_MCPStanceRequestedName + " observed=" + observed;
+	}
+
+	bool MCPStanceActiveNow()
+	{
+		if (m_MCPStancePending || m_MCPStanceWaitingOwner || m_MCPStanceIudRetry || m_MCPStanceUnlock)
+		{
+			return true;
+		}
+		return false;
+	}
+
+	void MCPStanceCancel(string reason)
+	{
+		HumanCommandMove moveCmd;
+		PlayerIdentity identity;
+		if (!MCPStanceActiveNow())
+		{
+			return;
+		}
+		m_MCPStancePending = false;
+		m_MCPStanceWaitingOwner = false;
+		m_MCPStanceIudRetry = false;
+		moveCmd = GetCommand_Move();
+		if (moveCmd && !moveCmd.IsChangingStance())
+		{
+			moveCmd.ForceStance(-1);
+			m_MCPStanceUnlock = false;
+		}
+		Print(MCPStanceLogLine("cancelled") + " reason=" + reason);
+		if (GetGame() && GetGame().IsServer() && GetGame().IsMultiplayer())
+		{
+			identity = GetIdentity();
+			if (identity)
+			{
+				MCPStanceSendCancelRpc(identity);
+			}
+		}
+	}
+
+	protected void MCPStanceSendCancelRpc(PlayerIdentity identity)
+	{
+		ScriptRPC rpc;
+		rpc = new ScriptRPC();
+		rpc.Write(m_MCPStanceRequestId);
+		rpc.Write(-1);
+		rpc.Write(false);
+		rpc.Send(this, MCP_RPC_PLAYER_STANCE, true, identity);
+	}
+
+	bool MCPStanceCloseServer(int connGen)
+	{
+		if (connGen == 0 || connGen != MCPConnGenValue())
+		{
+			return false;
+		}
+		MCPStanceCancel("lease_close");
+		return true;
 	}
 
 	string MCPStanceNameFromId(int stanceId)

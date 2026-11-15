@@ -8756,6 +8756,7 @@ class MCPBridge : Managed
 		bool moveActive = false;
 		bool weaponActive = false;
 		bool lookActive = false;
+		bool stanceActive = false;
 		bool holdActive = false;
 		m_Players.Clear();
 		GetGame().GetPlayers(m_Players);
@@ -8791,6 +8792,11 @@ class MCPBridge : Managed
 					lookActive = true;
 				}
 
+				if (player.MCPStanceActiveNow())
+				{
+					stanceActive = true;
+				}
+
 				// §2.7 step 3: census only, no new interrupt from the server.
 				ActionManagerServer holdManager = ActionManagerServer.Cast(player.GetActionManager());
 				if (holdManager && holdManager.MCP_HoldServerBusy())
@@ -8805,6 +8811,7 @@ class MCPBridge : Managed
 		AddCloseEntry(census, "survivor_drive", MCPSurvivorDrive.LeaseCloseBusy(), "survivor_drive");
 		AddCloseEntry(census, "move_copy", moveActive, "move_copy");
 		AddCloseEntry(census, "look_copy", lookActive, "look_copy");
+		AddCloseEntry(census, "stance_copy", stanceActive, "stance_copy");
 		AddCloseEntry(census, "weapon", weaponActive, "weapon");
 		AddCloseEntry(census, "action_hold", holdActive, "action_hold");
 		bool jobsActive = false;
@@ -8947,6 +8954,7 @@ class MCPBridge : Managed
 							floorPlayer.MCPMoveCloseServer(carried.move_id, carried.conn_gen);
 							floorPlayer.MCPWeaponCloseServer(carried.weapon_id, carried.conn_gen);
 							floorPlayer.MCPLookCloseServer(carried.look_id, carried.conn_gen);
+							floorPlayer.MCPStanceCloseServer(carried.conn_gen);
 						}
 					}
 
@@ -8955,6 +8963,19 @@ class MCPBridge : Managed
 
 				f = f + 1;
 			}
+		}
+
+		m_Players.Clear();
+		GetGame().GetPlayers(m_Players);
+		int stanceCloseIndex = 0;
+		while (stanceCloseIndex < m_Players.Count())
+		{
+			PlayerBase stanceClosePlayer = PlayerBase.Cast(m_Players.Get(stanceCloseIndex));
+			if (stanceClosePlayer)
+			{
+				stanceClosePlayer.MCPStanceCloseServer(stanceClosePlayer.MCPConnGenValue());
+			}
+			stanceCloseIndex = stanceCloseIndex + 1;
 		}
 
 		if (m_Jobs)

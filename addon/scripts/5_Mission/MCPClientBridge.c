@@ -9727,6 +9727,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		AddCloseEntry(census, "look_at", lookActive, "look_at");
+		bool stanceActive = false;
+		if (player && player.MCPStanceActiveNow())
+		{
+			stanceActive = true;
+		}
+
+		AddCloseEntry(census, "player_stance", stanceActive, "player_stance");
 		bool cameraActive = false;
 		if (m_ActiveCam || m_CameraHandoffPending)
 		{
@@ -10067,6 +10074,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// §2.6 C14: after AbortAll, so an open ui_pause job answers once,
 		// and before the census.
 		StopLeaseClosePause();
+		PlayerBase stanceClosePlayer = PlayerBase.Cast(GetGame().GetPlayer());
+		if (stanceClosePlayer)
+		{
+			stanceClosePlayer.MCPStanceCancel("lease_close");
+		}
 		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(command.args);
 		if (LeaseCloseCensusSettled(census))
 		{
