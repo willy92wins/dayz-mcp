@@ -4078,14 +4078,11 @@ class MCPBridge : Managed
 
 		stanceReport = new MCPPlayerSetStance();
 		stanceReport.uid = stanceUid;
-		stanceReport.stance = stanceWanted;
-		stanceReport.recover = command.args.recover;
+		stanceReport.requested = stanceWanted;
+		stanceReport.recover_requested = command.args.recover;
 		stanceReport.before = stancePlayer.MCPStanceName();
-		stanceReport.unconscious_before = stancePlayer.IsUnconscious();
 		stanceError = stancePlayer.MCPSetStanceServer(stanceWanted, command.args.recover);
-		stanceReport.after = stancePlayer.MCPStanceName();
-		stanceReport.unconscious_after = stancePlayer.IsUnconscious();
-		stanceReport.recovered = stanceReport.unconscious_before && !stanceReport.unconscious_after;
+		stanceReport.applied = stanceError == "";
 		result.player_set_stance = stanceReport;
 		if (stanceError != "")
 		{

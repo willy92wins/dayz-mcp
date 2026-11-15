@@ -528,59 +528,12 @@ modded class PlayerBase
 		return -1;
 	}
 
-	// player_set_stance: server-authoritative body stance for a living player.
-	// Does not write health or shock, does not kill, does not respawn.
-	// recover=true may call DayZPlayerSyncJunctures.SendPlayerUnconsciousness(this, false)
-	// (dayzplayersyncjunctures.c; the same vanilla juncture MCPHealServer uses
-	// after a vitals reset). This tool does not raise shock first; the
-	// juncture may apply on a later tick, and if shock is still under the
-	// vanilla unconscious threshold the player may fall unconscious again.
-	// Stance is applied with HumanCommandMove.ForceStance (human.c) to
-	// STANCEIDX_ERECT/CROUCH/PRONE. Client UAStance is not used.
+	// player_set_stance: queues a both-sides ForceStance (MCP_PlayerStance.c)
+	// and does not write health or shock, kill, or respawn. recover=true may
+	// request DayZPlayerSyncJunctures.SendPlayerUnconsciousness(this, false).
+	// StartCommand_Move is never called from this tool.
 	string MCPSetStanceServer(string stance, bool recover)
 	{
-		HumanCommandMove moveCmd;
-		int stanceId;
-		stanceId = MCPStanceIdFromName(stance);
-		if (stanceId < 0)
-		{
-			return "bad_args";
-		}
-		if (!IsAlive())
-		{
-			return "player_dead";
-		}
-		if (IsInVehicle())
-		{
-			return "in_vehicle";
-		}
-		if (IsUnconscious())
-		{
-			if (!recover)
-			{
-				return "still_unconscious";
-			}
-			DayZPlayerSyncJunctures.SendPlayerUnconsciousness(this, false);
-			if (IsUnconscious())
-			{
-				return "still_unconscious";
-			}
-		}
-		moveCmd = GetCommand_Move();
-		if (!moveCmd)
-		{
-			StartCommand_Move();
-			moveCmd = GetCommand_Move();
-		}
-		if (!moveCmd)
-		{
-			return "no_move_command";
-		}
-		// ForceStance holds a lock until ForceStance(-1) (human.c:497-499).
-		// Vanilla scripts never release that way, and a same-tick -1 is not
-		// proven not to undo the change. Release is left to a later in-game
-		// check (and a follow-up if the player cannot change stance by input).
-		moveCmd.ForceStance(stanceId);
-		return "";
+		return MCPStanceBegin(stance, recover);
 	}
 };

@@ -21,6 +21,7 @@ from tests.fence_helpers import INST_SERVER, PID_SERVER, bound_queue
 BRIDGE = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 MESSAGES = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
 CARE = addon_root() / "scripts" / "4_World" / "MCP_PlayerCare.c"
+STANCE = addon_root() / "scripts" / "4_World" / "MCP_PlayerStance.c"
 UID = "76561198000000001"
 CMD = "player_set_stance"
 VALID = {"uid": UID, "stance": "erect", "recover": False}
@@ -206,11 +207,21 @@ class PlayerSetStanceSourceTest(unittest.TestCase):
         self.bridge = BRIDGE.read_text(encoding="utf-8")
         self.messages = MESSAGES.read_text(encoding="utf-8")
         self.care = CARE.read_text(encoding="utf-8")
+        self.stance = STANCE.read_text(encoding="utf-8")
         self.dispatch = _method_body(
             self.bridge, "protected bool DispatchPlayerSetStance(MCPCommand command, MCPResult result)"
         )
         self.method = _method_body(
             self.care, "string MCPSetStanceServer(string stance, bool recover)"
+        )
+        self.begin = _method_body(
+            self.stance, "string MCPStanceBegin(string stance, bool recover)"
+        )
+        self.apply = _method_body(
+            self.stance, "protected void MCPStanceOnCommandHandler()"
+        )
+        self.verify = _method_body(
+            self.stance, "void MCPStanceVerify()"
         )
 
     def test_handler_uses_uid_and_vanilla_primitives_without_health_writes(self) -> None:
@@ -227,17 +238,57 @@ class PlayerSetStanceSourceTest(unittest.TestCase):
         self.assertNotIn("SetHealth", self.method)
         self.assertNotIn("MCPHealServer", self.method)
         self.assertNotIn("ResetAllZones", self.method)
-        self.assertIn("moveCmd.ForceStance(stanceId)", self.method)
-        self.assertIn("DayZPlayerSyncJunctures.SendPlayerUnconsciousness(this, false)", self.method)
+        self.assertIn("return MCPStanceBegin(stance, recover);", self.method)
+        self.assertNotIn("StartCommand_Move()", self.method)
+        self.assertNotIn("StartCommand_Move()", self.stance)
+        self.assertNotIn("StartCommand_Move()", self.dispatch)
+        self.assertIn("DayZPlayerSyncJunctures.SendPlayerUnconsciousness(this, false)", self.begin)
         self.assertIn("GetMovementState(state)", self.care)
         self.assertIn("m_iStanceIdx", self.care)
-        self.assertNotIn("moveCmd.ForceStance(-1)", self.method)
         self.assertIn("DayZPlayerConstants.STANCEIDX_ERECT", self.care)
         self.assertIn("DayZPlayerConstants.STANCEIDX_CROUCH", self.care)
         self.assertIn("DayZPlayerConstants.STANCEIDX_PRONE", self.care)
-        self.assertIn('return "still_unconscious"', self.method)
-        self.assertIn('return "in_vehicle"', self.method)
-        self.assertIn('return "no_move_command"', self.method)
+        self.assertIn('return "still_unconscious"', self.begin)
+        self.assertIn('return "in_vehicle"', self.stance)
+        self.assertIn('return "no_move_command"', self.begin)
+        self.assertIn('return "swimming"', self.stance)
+        self.assertIn('return "climbing"', self.stance)
+        self.assertIn('return "in_water"', self.stance)
+        self.assertIn('return "heavy_item"', self.stance)
+        self.assertIn('return "cannot_change_stance"', self.stance)
+        self.assertIn('return "busy"', self.stance)
+        self.assertIn("IsSwimming()", self.stance)
+        self.assertIn("IsClimbingLadder()", self.stance)
+        self.assertIn("IsClimbing()", self.stance)
+        self.assertIn("IsInWater()", self.stance)
+        self.assertIn("DayZPlayerUtils.PlayerCanChangeStance(this, stanceId)", self.stance)
+        self.assertIn("IsHeavyBehaviour()", self.stance)
+        self.assertIn("const int MCP_INPUT_UDT_PLAYER_STANCE = 78541080", self.stance)
+        self.assertIn("const int MCP_RPC_PLAYER_STANCE = 78541081", self.stance)
+        self.assertIn("rpc.Send(this, MCP_RPC_PLAYER_STANCE, true, identity)", self.stance)
+        self.assertIn("override void OnRPC(PlayerIdentity sender, int rpc_type, ParamsReadContext ctx)", self.stance)
+        self.assertIn(
+            "override bool OnInputUserDataProcess(int userDataType, ParamsReadContext ctx)",
+            self.stance,
+        )
+        self.assertIn(
+            "override void CommandHandler(float pDt, int pCurrentCommandID, bool pCurrentCommandFinished)",
+            self.stance,
+        )
+        self.assertIn("new ScriptInputUserData()", self.stance)
+        self.assertIn("message.Write(MCP_INPUT_UDT_PLAYER_STANCE)", self.stance)
+        self.assertIn("moveCmd.ForceStance(m_MCPStanceId)", self.apply)
+        self.assertIn("moveCmd.ForceStance(-1)", self.stance)
+        self.assertIn("CallLater(MCPStanceVerify, 1500, false)", self.apply)
+        self.assertIn(" observed=", self.stance)
+        self.assertIn("stanceReport.requested = stanceWanted", self.dispatch)
+        self.assertIn("stanceReport.applied = stanceError == """, self.dispatch)
+        self.assertIn("stanceReport.recover_requested = command.args.recover", self.dispatch)
+        self.assertNotIn("stanceReport.after", self.dispatch)
+        self.assertNotIn("stanceReport.recovered", self.dispatch)
+        self.assertIn("string requested", self.messages)
+        self.assertIn("bool applied", self.messages)
+        self.assertIn("bool recover_requested", self.messages)
         self.assertIn("class MCPPlayerSetStance", self.messages)
         self.assertIn("ref MCPPlayerSetStance player_set_stance", self.messages)
         self.assertIn("player_set_stance: erect, crouch or prone", self.messages)

@@ -1090,21 +1090,20 @@ class MCPPlayerGodmode
 };
 
 
-// player_set_stance reply. before/after are the closed stance names
-// (erect, crouch, prone, or unknown). unconscious_* is IsUnconscious()
-// around the call. recover echoes the request. recovered is true when
-// the body was unconscious before and conscious after the vanilla
-// juncture. Primitives only: no entity reference.
+// player_set_stance reply. requested is the closed stance name that was
+// queued (erect, crouch or prone). applied is true when the two-sided
+// apply was accepted (RPC/queue), not when GetMovementState already
+// matches: that only updates on the next CommandHandler. before is the
+// pre-apply snapshot. recover_requested echoes the request. The later
+// observed= line is printed from CallLater, not this reply. Primitives
+// only: no entity reference.
 class MCPPlayerSetStance
 {
 	string uid;
-	string stance;
-	bool recover;
+	string requested;
+	bool applied;
+	bool recover_requested;
 	string before;
-	string after;
-	bool unconscious_before;
-	bool unconscious_after;
-	bool recovered;
 };
 
 // player_kill reply. health_* is GetHealth("", "") around SetHealth(0).
