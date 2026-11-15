@@ -148,7 +148,9 @@ class _Mission:
 
 
 class _Game:
-    def __init__(self, log: list, player: _Player | None, mode: int, available: Any) -> None:
+    def __init__(
+        self, log: list, player: _Player | None, mode: int, available: Any, drop_on_respawn: bool
+    ) -> None:
         self._log = log
         self._player = player
         self._mission = _Mission(log, mode)
@@ -156,6 +158,7 @@ class _Game:
         self._char_data = _CharData(log)
         self._queue = _CallQueue(log)
         self._available = available
+        self._drop_on_respawn = drop_on_respawn
 
     def GetMission(self) -> _Mission:
         return self._mission
@@ -171,6 +174,8 @@ class _Game:
 
     def RespawnPlayer(self) -> None:
         self._log.append(("RespawnPlayer",))
+        if self._drop_on_respawn:
+            self._player = None
 
     def GetPlayer(self) -> _Player | None:
         return self._player
@@ -196,10 +201,17 @@ def _run(
     mode: int = CUSTOM,
     survivor: str = CLASS,
     available: tuple[str, ...] = (CLASS,),
+    drop_on_respawn: bool = False,
 ) -> tuple[Any, Any, list]:
     log: list = []
     player = None if state is None else _Player(log, state)
-    game = _Game(log, player, mode, EnforceArray(EnforceString.of(name) for name in available))
+    game = _Game(
+        log,
+        player,
+        mode,
+        EnforceArray(EnforceString.of(name) for name in available),
+        drop_on_respawn,
+    )
     namespace: dict[str, Any] = {
         "GetGame": lambda: game,
         "MissionGameplay": _Identity,
@@ -244,12 +256,25 @@ class TranslatedDispatchTest(unittest.TestCase):
                     self.assertEqual((result.ok, result.requested, result.error.text), (True, True, ""))
                     self.assertEqual(log, [*HEAD[cmd], *TAIL])
 
-    def test_no_local_player_is_not_refused(self) -> None:
-        # Vanilla's menu reads a null player as not alive and offers the
-        # respawn (ingamemenu.c:321, 326); the recipe skips the body steps.
+    def test_the_guard_reads_a_null_player_safely(self) -> None:
+        # Dispatch answers client_not_in_game before any handler when there
+        # is no local player (EnforceSourceTest pins that gate); called
+        # directly, the handler's guard reads null without a crash and the
+        # recipe skips the body steps.
         for cmd in (TOOL, PINNED):
             with self.subTest(cmd=cmd):
                 returned, result, log = _run(cmd, None)
+                self.assertIs(returned, True)
+                self.assertEqual((result.ok, result.requested, result.error.text), (True, True, ""))
+                self.assertEqual(log, [*HEAD[cmd], *TAIL_WITHOUT_PLAYER])
+
+    def test_a_player_gone_after_the_request_still_finishes_the_recipe(self) -> None:
+        # The guard reads a dead body; the recipe's own read after
+        # RespawnPlayer finds none: the body steps are skipped and the menus,
+        # the respawn flag and the answer still follow.
+        for cmd in (TOOL, PINNED):
+            with self.subTest(cmd=cmd):
+                returned, result, log = _run(cmd, RESPAWNABLE["dead"], drop_on_respawn=True)
                 self.assertIs(returned, True)
                 self.assertEqual((result.ok, result.requested, result.error.text), (True, True, ""))
                 self.assertEqual(log, [*HEAD[cmd], *TAIL_WITHOUT_PLAYER])
@@ -303,6 +328,20 @@ class EnforceSourceTest(unittest.TestCase):
             body.index("player.SimulateDeath(true);"),
         ]
         self.assertEqual(order, sorted(order))
+
+    def test_dispatch_refuses_a_client_without_a_local_player_first(self) -> None:
+        # The CHANGELOG says a client with no local player is refused earlier
+        # with client_not_in_game: the gate reads GetPlayer() and comes
+        # before the respawn branches.
+        in_game = method_body(BRIDGE, "protected bool IsClientInGame()")
+        self.assertEqual(" ".join(in_game.split()), "return GetGame() && GetGame().GetPlayer();")
+        dispatch = method_body(BRIDGE, "protected void Dispatch(MCPCommand command)")
+        gate = "if (!IsClientInGame())"
+        refusal = 'result.error = "client_not_in_game";'
+        self.assertEqual(dispatch.count(gate), 1)
+        self.assertLess(dispatch.index(gate), dispatch.index(refusal))
+        self.assertLess(dispatch.index(refusal), dispatch.index('else if (command.cmd == "player_respawn")'))
+        self.assertLess(dispatch.index(refusal), dispatch.index('else if (command.cmd == "player_respawn_survivor")'))
 
 
 class DaemonErrorTextTest(unittest.TestCase):
@@ -377,7 +416,7 @@ class ToolTest(unittest.IsolatedAsyncioTestCase):
             "unconscious or restrained one to respawn it.",
             "With or without survivor_type, a living, conscious, unrestrained local player is refused "
             "as player_alive_conscious and nothing changes (player_kill first for a new body)",
-            "a client bridge older than this release answers ok/requested instead and nothing happens",
+            "an older client bridge that accepts the call answers ok/requested instead and nothing happens",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, description)
@@ -387,7 +426,12 @@ class ToolTest(unittest.IsolatedAsyncioTestCase):
         fixed = unreleased.split("### Fixed", 1)[1].split("### ", 1)[0]
         entry = [line for line in fixed.splitlines() if "`player_alive_conscious`" in line]
         self.assertEqual(len(entry), 1)
-        for phrase in ("missionserver.c:611-624", "Requires a new PBO", "in-game validation is pending"):
+        for phrase in (
+            "missionserver.c:611-624",
+            "a client with no local player is refused earlier, as before, with `client_not_in_game`",
+            "Requires a new PBO (an older client bridge that accepts the call still answers",
+            "in-game validation is pending",
+        ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, entry[0])
 

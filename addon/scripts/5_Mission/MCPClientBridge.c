@@ -2226,9 +2226,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// conscious, free player the request would change nothing on the
 		// server while the recipe below still ran SimulateDeath and the
 		// death screen here. Refused after the argument checks, before
-		// anything changes; a null player is not refused, as vanilla's menu
-		// treats it as not alive. The recipe keeps its own read after
-		// RespawnPlayer, as vanilla does.
+		// anything changes. A null player never gets here (Dispatch answers
+		// client_not_in_game first); the null test only keeps the read safe.
+		// The recipe keeps its own read after RespawnPlayer, as vanilla does.
 		PlayerBase localPlayer = PlayerBase.Cast(GetGame().GetPlayer());
 		if (localPlayer && localPlayer.IsAlive() && !localPlayer.IsUnconscious() && !localPlayer.IsRestrained())
 		{
