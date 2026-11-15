@@ -43,10 +43,12 @@ server. It ships in `addon_expansion_ai/` and packs as
   delivered spawn's answer arrives, from the instance it was sent to, at or
   after its deadline before any reap (for example after
   `daemon_response_ambiguous`, when the caller never learned the id; the
-  broker audits that case as `late_answer_abandon`). A spawn whose answer
-  was stored on time but not read yet counts as delivered: until a read
-  takes the answer, the caller's abandon or the deadline queues the release
-  and drops the unread answer. It is queued at most once and not retried:
+  broker audits that case as `late_answer_abandon`). A spawn with an
+  operation deadline whose answer was stored on time but not handed to a
+  caller yet (an `/await`, with or without `remove=1`) counts as delivered:
+  until then, the caller's abandon or the deadline queues the release and
+  drops the unread answer, also when the answer has left the result cache.
+  It is queued at most once and not retried:
   when it cannot be queued (a full queue, for example), the lease close is
   what still asks the group to release. It is not a public tool and never
   runs from lease-end cleanup.

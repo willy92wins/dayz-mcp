@@ -786,6 +786,102 @@ class AIGroupSpawnLateAnswerTest(unittest.TestCase):
         self.assertEqual(state.abandon_command(command_id, "tool_timeout"), {"status": "noop"})
         self.assertEqual(self._releases(state), [])
 
+    def _serve(self, state: loopback.ServerState) -> str:
+        httpd = loopback.create_http_server(0, state, log_sink=lambda _line: None)
+        thread = threading.Thread(
+            target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+        thread.start()
+        self.addCleanup(thread.join, 2.0)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        host, port = httpd.server_address
+        return f"http://{host}:{port}"
+
+    def test_an_answer_read_through_await_without_remove_is_never_released(self) -> None:
+        # Mutant killed: only remove=1 counting as the read. GET /await keeps
+        # remove=0 by default for the harness; a group whose answer it handed
+        # over would be released at the deadline.
+        state, now, command_id = self._delivered_spawn(timeout_s=0.3)
+        base = self._serve(state)
+        now[0] += 0.171
+        self._answer(state, command_id)
+        query = urllib.parse.urlencode({"id": command_id, "key": "k"})
+        with urllib.request.urlopen(f"{base}/await?{query}", timeout=2.0) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        self.assertEqual((body.get("status"), (body.get("result") or {}).get("ok")), ("done", 1), body)
+        now[0] += 0.2
+        state.status_snapshot()
+        self.assertEqual(state.abandon_command(command_id, "tool_timeout"), {"status": "noop"})
+        self.assertEqual(self._releases(state), [])
+
+    def test_an_availability_check_is_not_a_read(self) -> None:
+        # Mutant killed: wait_until_command_result counted as a read (an
+        # internal check would end the release before any caller had the
+        # answer).
+        state, now, command_id = self._delivered_spawn(timeout_s=0.3)
+        now[0] += 0.171
+        self._answer(state, command_id)
+        self.assertEqual(state.wait_until_command_result(command_id, 0.0), "ready")
+        abandoned = state.abandon_command(command_id, "tool_timeout")
+        self.assertEqual(abandoned.get("status"), "release_queued", abandoned)
+        self.assertEqual(self._releases(state), [(RELEASE, {"spawn_token": TOKEN})])
+
+    def test_an_unread_answer_evicted_from_the_result_cache_is_still_released(self) -> None:
+        # Mutant killed: eviction dropping the kept row with the answer (the
+        # release plan is lost again and the group waits for the lease end).
+        for ending in ("abandon", "deadline"):
+            with self.subTest(ending=ending):
+                state, now, command_id = self._delivered_spawn(timeout_s=30.0)
+                now[0] += 0.171
+                self._answer(state, command_id)
+                with state._lock:
+                    for index in range(loopback.MAX_RESULTS):
+                        filler = 100_000 + index
+                        state._remember_result_locked(filler, {"id": filler, "ok": 1})
+                self.assertIsNone(state.take_result(command_id))
+                if ending == "abandon":
+                    abandoned = state.abandon_command(command_id, "tool_timeout")
+                    self.assertEqual(abandoned.get("status"), "release_queued", abandoned)
+                else:
+                    now[0] += 30.0
+                    state.status_snapshot()
+                self.assertEqual(self._releases(state), [(RELEASE, {"spawn_token": TOKEN})])
+                self.assertEqual(self._releases(state), [])
+
+    def test_a_spawn_without_a_deadline_keeps_mains_answered_path(self) -> None:
+        # Mutant killed: the row kept for a spawn enqueued without an operation
+        # deadline (operation_timeout_s=0), where main's abandon is a noop.
+        state, now, command_id = self._delivered_spawn(timeout_s=0.0)
+        now[0] += 0.171
+        self._answer(state, command_id)
+        self.assertEqual(state.abandon_command(command_id, "tool_timeout"), {"status": "noop"})
+        self.assertEqual(self._releases(state), [])
+        stored = state.take_result(command_id)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.get("ok"), 1)
+
+    def test_abandoning_an_unread_answer_finishes_its_operation_once(self) -> None:
+        # Mutant killed: the abandon finishing the operation again after the
+        # store did (command_succeeded True, then False).
+        state, now, command_id = self._delivered_spawn(timeout_s=0.3)
+        coordination = state.coordination
+        assert coordination is not None
+        lease = coordination._active
+        with patch.object(
+            coordination,
+            "finish_operation_exact",
+            wraps=coordination.finish_operation_exact,
+        ) as finish:
+            now[0] += 0.171
+            self._answer(state, command_id)
+            abandoned = state.abandon_command(command_id, "tool_timeout")
+        self.assertEqual(abandoned.get("status"), "release_queued", abandoned)
+        finished = [c for c in finish.call_args_list if c.args[2] == command_id]
+        self.assertEqual(len(finished), 1, finish.call_args_list)
+        self.assertIs(finished[0].kwargs.get("command_succeeded"), True)
+        self.assertNotIn(command_id, lease.committed_commands)
+
     def test_the_late_abandon_finishes_the_lease_operation_once(self) -> None:
         # Mutant killed: the abandon outcome not flushed (the release is
         # queued, but the spawn stays a committed operation of the lease).

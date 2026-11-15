@@ -323,11 +323,13 @@ _ABANDON_REASONS = frozenset({"cancelled", "tool_timeout"})
 # camera_path_play answer is left to the lease close, and the other release
 # sources keep their paths.
 _LATE_ANSWER_ABANDON_SOURCES = frozenset({"ai_group_spawn"})
-# A delivered spawn whose answer was stored on time but not read yet: its caller
-# may already have given up (the caller's deadline starts at the call, the
-# daemon's at enqueue), so the row stays until a read takes the answer, and an
-# abandon or the deadline releases the group and drops the unread answer.
-# Only ai_group_spawn.
+# A delivered spawn with an operation deadline whose answer was stored on time
+# but not read yet: its caller may already have given up (the caller's deadline
+# starts at the call, the daemon's at enqueue), so the row stays until a read
+# hands the answer to a caller (an /await with or without remove=1, a
+# take_result), and an abandon or the deadline releases the group and drops the
+# unread answer. Evicting the answer from the result cache keeps the row. A
+# spawn without a deadline keeps main's path. Only ai_group_spawn.
 _UNREAD_ANSWER_RELEASE_SOURCES = frozenset({"ai_group_spawn"})
 _FENCE_PEER_NAMES = frozenset({"server", "client"})
 _BROKER_FENCE_ERRORS = frozenset(
@@ -6592,7 +6594,13 @@ class ServerState:
                 "finish_exact": finish_exact,
                 "existed": False,
             }
-        exact = self._exact_operation_locked(row, command_id)
+        # A row kept for an unread answer: store_result already finished its
+        # operation when it stored that answer.
+        exact = (
+            None
+            if row.get("answered") is True
+            else self._exact_operation_locked(row, command_id)
+        )
         if exact is not None:
             finish_exact.append(exact)
         state_name = row.get("state")
@@ -8035,6 +8043,12 @@ class ServerState:
         # take_result(remove=True) would have dropped. finish_operation_exact
         # already ran at store time (or discard already queued it).
         self._results.pop(command_id, None)
+        row = self._broker_rows.get(command_id)
+        if isinstance(row, dict) and row.get("answered") is True:
+            # An unread spawn answer leaves the cache, not the broker: its
+            # row, deadline and owner stay, so its abandon or its deadline
+            # still releases the group. Evicting is not reading.
+            return
         self._enqueued_at.pop(command_id, None)
         self._operation_deadlines.pop(command_id, None)
         self._command_owner.pop(command_id, None)
@@ -8218,6 +8232,7 @@ class ServerState:
                         isinstance(answered_row, dict)
                         and answered_row.get("cmd") in _UNREAD_ANSWER_RELEASE_SOURCES
                         and answered_row.get("state") == "delivered"
+                        and command_id in self._operation_deadlines
                     ):
                         # Stored, not read yet: the row stays until a read
                         # takes the answer (_extract_result_locked), so an
@@ -8302,6 +8317,8 @@ class ServerState:
         remove: bool = False,
         wait_s: float = 0.0,
         cancel: ResultWaitCancel | None = None,
+        *,
+        delivers: bool = True,
     ) -> tuple[dict | None, tuple[ClientIdentity, str] | None, bool]:
         """Block until command_id is stored, the wait ends, the server stops, or cancel.
 
@@ -8309,6 +8326,8 @@ class ServerState:
         the server was not stopping. remove=1 still pops the row once, under
         the same lock as the emptiness check. wait_s is clamped to
         AWAIT_LONG_POLL_MAX_S. A non-positive or non-finite wait does not block.
+        delivers=False is an availability check that hands the answer to no
+        caller, so a spawn kept for an unread answer stays releasable.
         """
         if (
             isinstance(wait_s, bool)
@@ -8335,7 +8354,7 @@ class ServerState:
                     owner_operation = None
                     break
                 result, owner, owner_operation = self._extract_result_locked(
-                    command_id, remove
+                    command_id, remove, delivers
                 )
                 if result is not None or wait_s <= 0.0 or self._stopping:
                     break
@@ -8366,7 +8385,7 @@ class ServerState:
         was still queued was only observed after the caller's deadline.
         """
         result, _owner, _exhausted = self.await_stored_result(
-            command_id, False, wait_s, cancel
+            command_id, False, wait_s, cancel, delivers=False
         )
         if result is not None:
             return "ready"
@@ -8375,13 +8394,14 @@ class ServerState:
         return "timeout"
 
     def _extract_result_locked(
-        self, command_id: int, remove: bool
+        self, command_id: int, remove: bool, delivers: bool = True
     ) -> tuple[
         dict | None,
         tuple[ClientIdentity, str] | None,
         tuple[ClientIdentity, str, int] | None,
     ]:
-        # Caller holds self._lock.
+        # Caller holds self._lock. delivers: this read hands the answer to its
+        # caller (an HTTP /await with or without remove=1, a take_result).
         owner: tuple[ClientIdentity, str] | None = None
         owner_operation: tuple[ClientIdentity, str, int] | None = None
         if remove:
@@ -8401,6 +8421,13 @@ class ServerState:
             result = self._results.get(command_id)
             if result is not None:
                 owner = self._command_owner.get(command_id)
+                if delivers:
+                    # Its caller has the answer now (the harness's /await
+                    # without remove=1): a spawn kept for an unread answer has
+                    # been read and has nothing left to release.
+                    row = self._broker_rows.get(command_id)
+                    if isinstance(row, dict) and row.get("answered") is True:
+                        self._broker_rows.pop(command_id, None)
         return result, owner, owner_operation
 
     def cancel_owner_pending(
