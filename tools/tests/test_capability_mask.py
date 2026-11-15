@@ -209,10 +209,10 @@ class AppendRetireRegressionTest(unittest.TestCase):
         )
         self.assertEqual(variant.count("ui_menu_set,ui_pause"), 1)
         variant = variant.replace("ui_menu_set,ui_pause", "ui_menu_set,ui_new_set,ui_pause", 1)
-        self.assertEqual(variant.count('CLIENT_POLL_CAPS_MASK = "1.ffffffffffff"'), 1)
+        self.assertEqual(variant.count('CLIENT_POLL_CAPS_MASK = "1.1ffffffffffff"'), 1)
         variant = variant.replace(
-            'CLIENT_POLL_CAPS_MASK = "1.ffffffffffff"',
             'CLIENT_POLL_CAPS_MASK = "1.1ffffffffffff"',
+            'CLIENT_POLL_CAPS_MASK = "1.3ffffffffffff"',
             1,
         )
         self.assertNotEqual(variant, source)
@@ -220,13 +220,13 @@ class AppendRetireRegressionTest(unittest.TestCase):
         CAPABILITY_MASK_TABLES["client"][1] = CLIENT_CAPABILITY_BITS + ("ui_new_set",)
         try:
             constant = _mask_constant(variant, "CLIENT_POLL_CAPS_MASK")
-            self.assertEqual(constant, "1.1ffffffffffff")
+            self.assertEqual(constant, "1.3ffffffffffff")
             census = _const_census(variant, "CLIENT_POLL_CAPS")
             names, reason = parse_capability_mask("client", constant)
             self.assertEqual(reason, "ok")
             self.assertEqual(set(names), set(census))
             self.assertEqual(set(names), set(client_dispatch_census(variant)))
-            self.assertEqual(len(names), 49)
+            self.assertEqual(len(names), 50)
             self.assertEqual(encode_capability_mask("client", census), constant)
             self.assertEqual(
                 _translated_poll_names(self, "MCPClientBridge.c", variant, "client"),
@@ -304,7 +304,7 @@ class EquivalenceTest(unittest.TestCase):
         _poll(legacy, "server", caps=SERVER_CAPS_MAIN, ach=server_ach, xai=xai)
         _poll(legacy, "client", caps=",".join(sorted(CLIENT_CAPABILITY_BITS)))
         _poll(masked, "server", cm="1.ffffffffffff", ach=server_ach, xai=xai)
-        _poll(masked, "client", cm="1.ffffffffffff")
+        _poll(masked, "client", cm="1.1ffffffffffff")
         return legacy, masked
 
     def test_cm_and_caps_are_equivalent(self) -> None:
@@ -352,7 +352,7 @@ class MixedPeersTest(unittest.TestCase):
     def test_server_caps_client_cm(self) -> None:
         state = _state()
         _poll(state, "server", caps=SERVER_CAPS_MAIN, ach=EXPECTED_SERVER_ARG_CONTRACT_HASH)
-        _poll(state, "client", cm="1.ffffffffffff")
+        _poll(state, "client", cm="1.1ffffffffffff")
         compared, ready = _bridge_status(state)
         self.assertEqual(ready, {"ready": True, "reason": "ready"})
         for key in ("server_peer", "client_peer"):
@@ -429,33 +429,34 @@ class DecoderTest(unittest.TestCase):
                 self.assertEqual(encode_capability_mask(peer, names), raw)
 
     def _assert_client_appended_bit_vectors(self) -> None:
-        # Independent of CLIENT_EPOCH1 (46 names, indices 0..45): bits 46
-        # and 47 are the post-epoch1 appends. 1 << 46 == 0x400000000000 and
-        # 1 << 47 == 0x800000000000, so each raw below sets exactly one bit.
+        # Independent of CLIENT_EPOCH1 (46 names, indices 0..45): bit 46 is
+        # player_respawn_survivor (5ad8); bits 47 and 48 are ui_menu_set and
+        # ui_map_set. 1 << 47 == 0x800000000000 and 1 << 48 ==
+        # 0x1000000000000, so each raw below sets exactly one bit.
         self.assertEqual(
-            parse_capability_mask("client", "1.400000000000"),
+            parse_capability_mask("client", "1.800000000000"),
             (("ui_menu_set",), "ok"),
         )
         self.assertEqual(
-            parse_capability_mask("client", "1.800000000000"),
+            parse_capability_mask("client", "1.1000000000000"),
             (("ui_map_set",), "ok"),
         )
         self.assertEqual(
             encode_capability_mask("client", ("ui_menu_set",)),
-            "1.400000000000",
+            "1.800000000000",
         )
         self.assertEqual(
             encode_capability_mask("client", ("ui_map_set",)),
-            "1.800000000000",
+            "1.1000000000000",
         )
 
-    def test_client_bits_46_and_47_known_answers(self) -> None:
+    def test_client_bits_47_and_48_known_answers(self) -> None:
         self._assert_client_appended_bit_vectors()
 
-    def test_swapping_client_bits_46_and_47_breaks_known_answers(self) -> None:
+    def test_swapping_client_bits_47_and_48_breaks_known_answers(self) -> None:
         original = CAPABILITY_MASK_TABLES["client"][1]
-        self.assertEqual(original[46:48], ("ui_menu_set", "ui_map_set"))
-        swapped = original[:46] + (original[47], original[46]) + original[48:]
+        self.assertEqual(original[47:49], ("ui_menu_set", "ui_map_set"))
+        swapped = original[:47] + (original[48], original[47]) + original[49:]
         CAPABILITY_MASK_TABLES["client"][1] = swapped
         try:
             with self.assertRaises(AssertionError):
@@ -463,20 +464,20 @@ class DecoderTest(unittest.TestCase):
             # The permuted table decodes each raw to the other verb: the
             # failure above is the swap, not a broken decoder.
             self.assertEqual(
-                parse_capability_mask("client", "1.400000000000"),
+                parse_capability_mask("client", "1.800000000000"),
                 (("ui_map_set",), "ok"),
             )
             self.assertEqual(
-                parse_capability_mask("client", "1.800000000000"),
+                parse_capability_mask("client", "1.1000000000000"),
                 (("ui_menu_set",), "ok"),
             )
             self.assertEqual(
                 encode_capability_mask("client", ("ui_menu_set",)),
-                "1.800000000000",
+                "1.1000000000000",
             )
             self.assertEqual(
                 encode_capability_mask("client", ("ui_map_set",)),
-                "1.400000000000",
+                "1.800000000000",
             )
         finally:
             CAPABILITY_MASK_TABLES["client"][1] = original

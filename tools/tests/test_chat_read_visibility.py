@@ -27,6 +27,9 @@ from tests.enforce_subset_helpers import (
     method_body,
     translate,
 )
+from tests.chat_read_utf8_helpers import (
+    keep_valid_utf8_bytes as _keep_valid_utf8_bytes_reference,
+)
 
 
 COMMAND = "chat_read"
@@ -441,7 +444,28 @@ class _ChatVisibilityModel:
         )
 
         def _make_chat_log() -> SimpleNamespace:
+            # The translator cannot hand a value-plus-out result back to a
+            # caller local, so the translated RecordLine/RecordDrop cannot
+            # carry the `out bool removed` back. That is only sound for
+            # valid UTF-8, for which Enforce sets removed False too, so the
+            # shim fails loudly below when the reference algorithm removes
+            # bytes instead of dropping them silently.
+            def _keep_valid_utf8_bytes(
+                value: _Utf8EnforceString, _removed: bool
+            ) -> _Utf8EnforceString:
+                cleaned, was_removed = _keep_valid_utf8_bytes_reference(value.data)
+                if was_removed:
+                    raise AssertionError(
+                        "translated RecordLine/RecordDrop cannot carry the "
+                        "`out bool removed` back, so this model must only be "
+                        "fed valid UTF-8 (the invalid-byte `cut` behaviour is "
+                        "pinned by test_chat_read.py and "
+                        "test_chat_read_utf8_sanitize.py)"
+                    )
+                return _Utf8EnforceString(cleaned)
+
             log_ns: dict[str, Any] = {
+                "KeepValidUtf8Bytes": _keep_valid_utf8_bytes,
                 "_S": _Utf8EnforceString,
                 "array": _RingArray,
                 "MCPChatLine": self.msg_ns["MCPChatLine"],

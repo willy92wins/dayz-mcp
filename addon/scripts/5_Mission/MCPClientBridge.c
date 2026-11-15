@@ -494,14 +494,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! short literals joined with +, split at commas
 	//! (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,dev_free_camera_set,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,lease_close_client,player_look_at,player_look_at_release,player_move," + "player_respawn,player_trace,player_view_set,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_map_set,ui_menu_set,ui_pause,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace," + "weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,dev_free_camera_set,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,lease_close_client,player_look_at,player_look_at_release,player_move," + "player_respawn,player_respawn_survivor,player_trace,player_view_set,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_map_set,ui_menu_set,ui_pause,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace," + "weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 	//! Compact announcement sent on every poll as cm=<epoch>.<hex>: the census
 	//! above as a bitmask. Bit order is bridge_readiness.CLIENT_CAPABILITY_BITS
 	//! in tools/dayz_mcp/bridge_readiness.py (append only, never reorder);
 	//! bit i set means the census name at index i is dispatched. Precomputed:
 	//! no runtime code computes it, and the tests tie it bit for bit to
 	//! CLIENT_POLL_CAPS and to Dispatch().
-	protected const string CLIENT_POLL_CAPS_MASK = "1.ffffffffffff";
+	protected const string CLIENT_POLL_CAPS_MASK = "1.1ffffffffffff";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -1500,6 +1500,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			postNow = DispatchPlayerRespawn(command, result);
 		}
+		else if (command.cmd == "player_respawn_survivor")
+		{
+			postNow = DispatchPlayerRespawn(command, result);
+		}
 		else if (command.cmd == "vehicle_get_in_client")
 		{
 			postNow = DispatchVehicleGetInClient(command, result);
@@ -2190,6 +2194,30 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
+		bool pinned = command.cmd == "player_respawn_survivor";
+		if (pinned)
+		{
+			if (!command.args || command.args.survivor_type == "")
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+			array<string> available = GetGame().ListAvailableCharacters();
+			if (!available || available.Find(command.args.survivor_type) < 0)
+			{
+				result.ok = false;
+				result.error = "survivor_type_unavailable";
+				return true;
+			}
+			if (missionGP.GetRespawnModeClient() != GameConstants.RESPAWN_MODE_CUSTOM)
+			{
+				result.ok = false;
+				result.error = "respawn_mode_random";
+				return true;
+			}
+		}
+
 		UIScriptedMenu respawnMenu;
 		UIManager ui = GetGame().GetUIManager();
 		if (ui)
@@ -2198,7 +2226,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		// Mirror vanilla InGameMenu.GameRespawn (5_Mission/gui/ingamemenu.c).
-		GetGame().GetMenuDefaultCharacterData(false).SetRandomCharacterForced(true);
+		if (pinned)
+		{
+			MenuDefaultCharacterData charData = GetGame().GetMenuDefaultCharacterData(false);
+			charData.SetCharacterType(command.args.survivor_type);
+			charData.SetRandomCharacterForced(false);
+		}
+		else
+		{
+			GetGame().GetMenuDefaultCharacterData(false).SetRandomCharacterForced(true);
+		}
 		GetGame().RespawnPlayer();
 
 		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());

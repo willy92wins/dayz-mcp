@@ -516,6 +516,7 @@ CLIENT_CAPABILITY_BITS: tuple[str, ...] = (
     "weapon_fire",
     "weapon_raise",
     "weapon_sights",
+    "player_respawn_survivor",
     "ui_menu_set",
     "ui_map_set",
 )
@@ -692,6 +693,12 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "player_look_at_release": None,
         "player_move": "player_move",
         "player_respawn": "player_respawn",
+        # Reached through player_respawn's survivor_type; the census
+        # comparator judges the player_respawn tool by the player_respawn
+        # command alone, so a census that lacks player_respawn still reads
+        # mismatch, and an older PBO without the variant still reads match;
+        # the variant's own gate is _CLIENT_ANNOUNCED_COMMANDS.
+        "player_respawn_survivor": None,
         "player_trace": "player_trace",
         "player_view_set": "player_view_set",
         "restore_gameplay": "restore_gameplay",

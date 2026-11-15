@@ -89,6 +89,7 @@
       "player_look_at_release": null,
       "player_move": "player_move",
       "player_respawn": "player_respawn",
+      "player_respawn_survivor": null,
       "player_trace": "player_trace",
       "player_view_set": "player_view_set",
       "restore_gameplay": "restore_gameplay",

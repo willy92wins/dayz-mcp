@@ -10,10 +10,21 @@ import sys
 import tempfile
 from pathlib import Path
 
-import build_native_launcher
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOCK_PATH = REPO_ROOT / "tools" / "packaged-modules.lock.json"
+LINUX_LOCK_PATH = REPO_ROOT / "tools" / "packaged-modules.linux.lock.json"
+LINUX_PACKAGED_MODULES = (
+    "byte_lock.py",
+    "linux_build.py",
+    "linux_compat.py",
+    "linux_worker_host.py",
+)
+LINUX_DRIFT_RECIPE = (
+    "A source sealed only in the Linux bundle differs from "
+    "tools/packaged-modules.linux.lock.json. Regenerate the Linux lock with "
+    "write_packaged_modules_lock.py --linux, then reinstall the Linux bundle with "
+    "python -m dayz_mcp.linux_launcher install. No Windows launcher rebuild is needed."
+)
 DRIFT_RECIPE = (
     "A source embedded in the sealed launcher differs from "
     "tools/packaged-modules.lock.json. Rebuild the launcher with build_native_launcher.py --offline "
@@ -25,6 +36,11 @@ DRIFT_RECIPE = (
 
 
 def expected_paths() -> list[str]:
+    # Imported here, not at module level: deriving the Windows set needs
+    # build_native_launcher (and its Windows-only import chain), while the
+    # Linux lock operations must run where that chain cannot be imported.
+    import build_native_launcher
+
     paths = [f"tools/dayz_mcp/{name}" for name in build_native_launcher.PACKAGED_MODULES]
     paths.append("tools/dayz_mcp/__init__.py")
     paths.append("tools/native-launchers/dayz-test-v1/src/app_main.py")
@@ -50,6 +66,65 @@ def _sha256(path: Path) -> str:
 def compute_lock(root: Path = REPO_ROOT) -> dict[str, object]:
     files = {relative: _sha256(root / relative) for relative in expected_paths()}
     return {"format_version": 1, "files": files}
+
+
+def expected_linux_paths() -> list[str]:
+    return sorted(f"tools/dayz_mcp/{name}" for name in LINUX_PACKAGED_MODULES)
+
+
+def _dayzmake_record(root: Path = REPO_ROOT) -> dict[str, object]:
+    import ast
+
+    tree = ast.parse((root / "tools/dayz_mcp/linux_build.py").read_text(encoding="utf-8"))
+    values: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in {"DAYZMAKE_SHA256", "DAYZMAKE_VERSION"}:
+                    values[target.id] = str(node.value.value)
+    # Preserve the release archive's record (its sha256, size, url and
+    # license) already in the Linux lock: it is what a download is checked
+    # against and is not derived from the sealed sources. Only the binary
+    # pin and version are derived here, from linux_build's constants.
+    record: dict[str, object] = {}
+    try:
+        existing = json.loads(
+            (root / "tools" / "packaged-modules.linux.lock.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        existing = None
+    if type(existing) is dict and type(existing.get("dayzmake_linux")) is dict:
+        record.update(existing["dayzmake_linux"])
+    record.update(
+        {
+            "binary_sha256": values["DAYZMAKE_SHA256"].upper(),
+            "version": values["DAYZMAKE_VERSION"].removeprefix("v"),
+        }
+    )
+    return record
+
+
+def compute_linux_lock(root: Path = REPO_ROOT) -> dict[str, object]:
+    files = {relative: _sha256(root / relative) for relative in expected_linux_paths()}
+    return {"dayzmake_linux": _dayzmake_record(root), "files": files, "format_version": 1}
+
+
+def linux_problems(committed: object, current: object) -> list[str]:
+    committed_files = _files_map(committed)
+    current_files = _files_map(current)
+    lines: list[str] = []
+    for relative in sorted(set(committed_files) | set(current_files)):
+        if relative not in committed_files:
+            lines.append(f"{relative} is missing from tools/packaged-modules.linux.lock.json")
+        elif relative not in current_files:
+            lines.append(f"{relative} is unexpected in tools/packaged-modules.linux.lock.json")
+        elif committed_files[relative] != current_files[relative]:
+            lines.append(f"{relative} differs from tools/packaged-modules.linux.lock.json")
+    if type(committed) is dict and committed.get("dayzmake_linux") != (
+        current.get("dayzmake_linux") if type(current) is dict else None
+    ):
+        lines.append("dayzmake_linux differs from tools/packaged-modules.linux.lock.json")
+    return lines
 
 
 def render(lock: object) -> bytes:
@@ -138,8 +213,38 @@ def main(argv: list[str] | None = None, *, root: Path = REPO_ROOT) -> int:
     parser = argparse.ArgumentParser(
         description="Write or check the lock of sources embedded in the sealed launcher"
     )
-    parser.add_argument("--check", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--check", action="store_true")
+    modes.add_argument("--linux", action="store_true", help="write the Linux lock instead")
+    modes.add_argument("--check-linux", action="store_true", help="check the Linux lock instead")
     options = parser.parse_args(argv)
+    if options.linux or options.check_linux:
+        linux_path = root / "tools" / "packaged-modules.linux.lock.json"
+        linux_relative = "tools/packaged-modules.linux.lock.json"
+        try:
+            current_linux = compute_linux_lock(root=root)
+        except Exception as exc:
+            print(f"{linux_relative} could not be read ({type(exc).__name__})")
+            if options.check_linux:
+                print(LINUX_DRIFT_RECIPE)
+            return 1
+        if options.check_linux:
+            committed_linux, lock_errors = _load_lock(linux_path, linux_relative)
+            if lock_errors:
+                for line in lock_errors:
+                    print(line)
+                print(LINUX_DRIFT_RECIPE)
+                return 1
+            format_lines = _format_issues(committed_linux, linux_relative)
+            lines = linux_problems(committed_linux, current_linux)
+            if not format_lines and not lines and render(committed_linux) == render(current_linux):
+                print("packaged modules linux lock ok")
+                return 0
+            for line in format_lines + lines:
+                print(line)
+            print(LINUX_DRIFT_RECIPE)
+            return 1
+        return _write_lock_atomically(linux_path, render(current_linux), linux_relative)
     lock_path = root / "tools" / "packaged-modules.lock.json"
     lock_relative = lock_path.relative_to(root).as_posix()
     try:

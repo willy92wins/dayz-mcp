@@ -5,7 +5,9 @@ from __future__ import annotations
 import ctypes
 import ntpath
 import os
+import posixpath
 import re
+import stat
 import unicodedata
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -50,6 +52,14 @@ class _FILE_ID_INFO(ctypes.Structure):
 
 _kernel32 = bind_common_kernel32()
 
+# Windows pins every directory through a CreateFileW handle and compares
+# GetFinalPathNameByHandleW and FILE_ID_INFO. Elsewhere the same walk uses an
+# O_PATH descriptor per component: /proc/self/fd/<fd> is the final path,
+# (st_dev, st_ino) the identity, and a symbolic link stands where Windows
+# would find a junction (the only reparse point a sealed root may be).
+_WINDOWS = os.name == "nt"
+_paths = ntpath if _WINDOWS else posixpath
+
 
 @dataclass(frozen=True)
 class PathIdentity:
@@ -87,7 +97,10 @@ class _PinnedDirectory:
 
     def close(self) -> None:
         if self.handle:
-            _kernel32.CloseHandle(self.handle)
+            if _WINDOWS:
+                _kernel32.CloseHandle(self.handle)
+            else:
+                os.close(self.handle)
             self.handle = 0
 
 
@@ -124,7 +137,7 @@ def _invalid() -> None:
 
 
 def _normal_path(value: str) -> str:
-    return ntpath.normcase(ntpath.normpath(value))
+    return _paths.normcase(_paths.normpath(value))
 
 
 def _same_path(first: str, second: str) -> bool:
@@ -132,6 +145,8 @@ def _same_path(first: str, second: str) -> bool:
 
 
 def _local_canonical_path(value: object) -> str:
+    if not _WINDOWS:
+        return _posix_canonical_path(value)
     if (
         not isinstance(value, str)
         or not 3 <= len(value) <= 520
@@ -155,7 +170,28 @@ def _local_canonical_path(value: object) -> str:
     return value
 
 
+def _posix_canonical_path(value: object) -> str:
+    """Same text rules as the drive-letter path: an absolute, normalized POSIX path."""
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 520
+        or "\0" in value
+        or not unicodedata.is_normalized("NFC", value)
+        or any(0xD800 <= ord(char) <= 0xDFFF for char in value)
+        or not value.startswith("/")
+        or value.startswith("//")
+        or posixpath.normpath(value) != value
+    ):
+        _invalid()
+    return value
+
+
 def _final_handle_path(handle: int) -> str:
+    if not _WINDOWS:
+        try:
+            return _posix_canonical_path(os.readlink(f"/proc/self/fd/{handle}"))
+        except OSError:
+            _invalid()
     buffer = ctypes.create_unicode_buffer(32768)
     length = int(
         _kernel32.GetFinalPathNameByHandleW(handle, buffer, len(buffer), 0)
@@ -171,6 +207,12 @@ def _final_handle_path(handle: int) -> str:
 
 
 def _file_identity(handle: int) -> PathIdentity:
+    if not _WINDOWS:
+        info = os.fstat(handle)
+        return PathIdentity(
+            volume_serial_number=int(info.st_dev),
+            file_id=f"{int(info.st_ino):032X}",
+        )
     info = _FILE_ID_INFO()
     if not _kernel32.GetFileInformationByHandleEx(
         handle,
@@ -185,7 +227,46 @@ def _file_identity(handle: int) -> PathIdentity:
     )
 
 
+def _open_posix_directory(path: str, *, follow_root_reparse: bool) -> _PinnedDirectory:
+    """CreateFileW(FILE_FLAG_OPEN_REPARSE_POINT) on POSIX: an O_PATH descriptor.
+
+    Without ``follow_root_reparse`` a symbolic link at ``path`` is opened as
+    itself and reported with the junction tag; with it the link is followed.
+    Anything else that is not a directory is refused.
+    """
+    canonical = _local_canonical_path(path)
+    flags = os.O_PATH | os.O_CLOEXEC
+    if not follow_root_reparse:
+        flags |= os.O_NOFOLLOW
+    try:
+        handle = os.open(canonical, flags)
+    except OSError:
+        _invalid()
+    try:
+        info = os.fstat(handle)
+        if stat.S_ISLNK(info.st_mode):
+            reparse_tag = _IO_REPARSE_TAG_MOUNT_POINT
+            final_path = canonical
+        elif stat.S_ISDIR(info.st_mode):
+            reparse_tag = 0
+            final_path = _final_handle_path(handle)
+        else:
+            _invalid()
+        return _PinnedDirectory(
+            path=canonical,
+            final_path=final_path,
+            identity=_file_identity(handle),
+            reparse_tag=reparse_tag,
+            handle=handle,
+        )
+    except BaseException:
+        os.close(handle)
+        raise
+
+
 def _open_directory(path: str, *, follow_root_reparse: bool) -> _PinnedDirectory:
+    if not _WINDOWS:
+        return _open_posix_directory(path, follow_root_reparse=follow_root_reparse)
     canonical = _local_canonical_path(path)
     flags = _FILE_FLAG_BACKUP_SEMANTICS
     if not follow_root_reparse:
@@ -239,11 +320,11 @@ def _open_directory(path: str, *, follow_root_reparse: bool) -> _PinnedDirectory
 
 
 def _prefixes(path: str) -> tuple[str, ...]:
-    drive, tail = ntpath.splitdrive(path)
-    current = drive + "\\"
+    drive, tail = _paths.splitdrive(path)
+    current = drive + _paths.sep
     values: list[str] = []
-    for part in (item for item in tail.split("\\") if item):
-        current = ntpath.join(current, part)
+    for part in (item for item in tail.split(_paths.sep) if item):
+        current = _paths.join(current, part)
         values.append(current)
     if not values:
         _invalid()
@@ -406,7 +487,7 @@ def _validate_sealed_policy(value: object) -> SealedRequestProjectPolicy:
 
 def _contains(path: str, root: str) -> bool:
     try:
-        return ntpath.commonpath((_normal_path(path), _normal_path(root))) == _normal_path(root)
+        return _paths.commonpath((_normal_path(path), _normal_path(root))) == _normal_path(root)
     except ValueError:
         return False
 
@@ -418,21 +499,21 @@ def _open_descendant(
     canonical = _local_canonical_path(path)
     if not _contains(canonical, root.path):
         _invalid()
-    relative = ntpath.relpath(canonical, root.path)
+    relative = _paths.relpath(canonical, root.path)
     if relative == ".":
         return root.resolved_identity, []
-    if relative.startswith("..\\") or relative == "..":
+    if relative.startswith(".." + _paths.sep) or relative == "..":
         _invalid()
     opened: list[_PinnedDirectory] = []
     current = root.path
     expected = root.resolved_path
     try:
-        parts = relative.split("\\")
+        parts = relative.split(_paths.sep)
         for index, part in enumerate(parts):
             if part in {"", ".", ".."}:
                 _invalid()
-            current = ntpath.join(current, part)
-            expected = ntpath.join(expected, part)
+            current = _paths.join(current, part)
+            expected = _paths.join(expected, part)
             item = _open_directory(current, follow_root_reparse=False)
             opened.append(item)
             is_leaf = index == len(parts) - 1
@@ -478,12 +559,12 @@ def _accredit_mod(
     value: str,
     roots: tuple[SealedPathRoot, ...],
 ) -> tuple[PathIdentity, list[_PinnedDirectory]]:
-    if ntpath.isabs(value):
+    if _paths.isabs(value):
         return _accredit_absolute(value, roots)
     matches: list[tuple[PathIdentity, list[_PinnedDirectory]]] = []
     for root in roots:
         try:
-            matches.append(_open_descendant(ntpath.join(root.path, value), root))
+            matches.append(_open_descendant(_paths.join(root.path, value), root))
         except ValueError:
             continue
     if len(matches) != 1:
@@ -541,7 +622,7 @@ def _pin_sealed_roots(
 def _single_sealed_root(
     path: str, roots: tuple[SealedPathRoot, ...]
 ) -> SealedPathRoot:
-    if type(path) is not str or not ntpath.isabs(path):
+    if type(path) is not str or not _paths.isabs(path):
         _invalid()
     candidates = _root_candidates(path, roots)
     if len(candidates) != 1:
@@ -696,7 +777,7 @@ def accredit_request_paths(
         if server_only and parsed.payload.get("project_mod_override") is not True:
             project_mod = "@" + policy.policy.mod
             for root in policy.mod_roots:
-                original = ntpath.join(root.path, project_mod)
+                original = _paths.join(root.path, project_mod)
                 try:
                     os.stat(original)
                 except FileNotFoundError:
@@ -709,7 +790,7 @@ def accredit_request_paths(
                 ):
                     if identity != exclusive_identity:
                         continue
-                    declared = value if ntpath.isabs(value) else ntpath.join(root.path, value)
+                    declared = value if _paths.isabs(value) else _paths.join(root.path, value)
                     # The worker routes the implicit project by path. A physical
                     # alias with another spelling would leave it on client -mod.
                     if not _same_path(original, declared):

@@ -25,6 +25,7 @@ from contextlib import contextmanager
 import sys
 import threading
 import time
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -282,6 +283,8 @@ class DaemonGateRegistryViewTests(unittest.TestCase):
             startup="observed",
         )
 
+    @unittest.skipIf(os.name != "nt", "Windows Steam registry provider defaults: off Windows the default provider is steam_linux's")
+
     def test_final_check_default_provider_reads_the_inherited_view(self) -> None:
         view = _InheritedRegistryView(_LIVE_STEAM, 7)
         with patch.dict(sys.modules, {"winreg": view}), _host_with_live_steam():
@@ -290,6 +293,8 @@ class DaemonGateRegistryViewTests(unittest.TestCase):
         self.assertTrue(admitted)
         self.assertIn("pid", view.queried)
         self.assertIn("ActiveUser", view.queried)
+
+    @unittest.skipIf(os.name != "nt", "Windows Steam registry provider defaults: off Windows the default provider is steam_linux's")
 
     def test_final_check_refuses_when_the_inherited_copy_does_not_name_steam(self) -> None:
         # 01:04 UTC shape: steam.exe alive and registered in some other copy, while

@@ -158,6 +158,7 @@ CLIENT_COMMANDS = {
     "input_trigger",
     "player_move",
     "player_respawn",
+    "player_respawn_survivor",
     "player_trace",
     "vehicle_get_in_client",
     "engine_set",
@@ -921,6 +922,52 @@ def is_printable_input_name(value: object) -> bool:
     return all(32 <= ord(character) <= 126 for character in value)
 
 
+# player_respawn_survivor: the 31 vanilla survivor classes. Source: the public
+# unbinarized config dump ravmustang/DayZ_SA_ClassName_Dump, commit b5daa78856
+# (2026-05-26), CurrentConfigs/characters_data/config.cpp lines 8724-10066
+# (CfgPatches DZ_Characters): every class with scope=2 deriving from
+# SurvivorMale_Base/SurvivorFemale_Base. The runtime ListAvailableCharacters()
+# is not enough for this allowlist: it also lists survivor classes a mod adds,
+# and a mod's class must be refused before the bridge.
+VANILLA_SURVIVOR_TYPES: tuple[str, ...] = (
+    "SurvivorM_Mirek",
+    "SurvivorM_Boris",
+    "SurvivorM_Cyril",
+    "SurvivorM_Denis",
+    "SurvivorM_Elias",
+    "SurvivorM_Francis",
+    "SurvivorM_Guo",
+    "SurvivorM_Hassan",
+    "SurvivorM_Indar",
+    "SurvivorM_Jose",
+    "SurvivorM_Kaito",
+    "SurvivorM_Lewis",
+    "SurvivorM_Manua",
+    "SurvivorM_Niki",
+    "SurvivorM_Oliver",
+    "SurvivorM_Peter",
+    "SurvivorM_Quinn",
+    "SurvivorM_Rolf",
+    "SurvivorM_Seth",
+    "SurvivorM_Taiki",
+    "SurvivorF_Eva",
+    "SurvivorF_Frida",
+    "SurvivorF_Gabi",
+    "SurvivorF_Helga",
+    "SurvivorF_Irena",
+    "SurvivorF_Judy",
+    "SurvivorF_Keiko",
+    "SurvivorF_Linda",
+    "SurvivorF_Maria",
+    "SurvivorF_Naomi",
+    "SurvivorF_Baty",
+)
+
+
+def is_vanilla_survivor_type(value: object) -> bool:
+    return isinstance(value, str) and value in VANILLA_SURVIVOR_TYPES
+
+
 # input_trigger bounds. Mirror MCPInputTriggerControl (DIK_MAX, HOLD_MAX_S,
 # PRESS_MAX_TTL_S) in addon/scripts/5_Mission/MCPClientBridge.c; a test keeps
 # the copies equal. hold_s and the press TTL are refused outside (0, max].
@@ -1571,6 +1618,7 @@ _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "chat_read": "bridge_capability_missing",
     "gameplay_state": "bridge_capability_missing",
     "hud_set": "bridge_capability_missing",
+    "player_respawn_survivor": "bridge_capability_missing",
     "player_view_set": "bridge_capability_missing",
     "ui_map_set": "bridge_capability_missing",
     "ui_menu_set": "bridge_capability_missing",
@@ -1651,6 +1699,12 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     ),
     "restore_gameplay": _command_schema(_schema_variant()),
     "player_respawn": _command_schema(_schema_variant()),
+    "player_respawn_survivor": _command_schema(
+        _schema_variant(
+            required=("survivor_type",),
+            validators={"survivor_type": is_vanilla_survivor_type},
+        )
+    ),
     "key_press": _command_schema(
         _schema_variant(
             required=("dik",),
@@ -4773,6 +4827,34 @@ class ServerState:
                 f"{binding.creation_time_utc}"
             )
 
+    def process_polled(
+        self, run_id: str, pid: int, creation_time_utc: str
+    ) -> bool | None:
+        """Whether the bound process for this identity has polled, or None."""
+        if (
+            not isinstance(run_id, str)
+            or not run_id
+            or not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid <= 0
+        ):
+            return None
+        wanted = normalize_creation_time_utc(creation_time_utc)
+        if wanted is None:
+            return None
+        with self._lock:
+            for binding in self._bindings.values():
+                if _binding_run_id(binding) != run_id:
+                    continue
+                if getattr(binding, "pid", None) != pid:
+                    continue
+                if normalize_creation_time_utc(
+                    getattr(binding, "creation_time_utc", None)
+                ) != wanted:
+                    continue
+                return binding.last_poll_at is not None
+            return None
+
     def run_has_bound_binding(self, run_id: str) -> bool:
         """True iff a present binding for this run is BOUND. STARTING does not dispatch."""
 
@@ -7423,6 +7505,7 @@ class ServerState:
                     self._peer_last_class[peer] = bind_label
                     if bind_label == BINDING_BOUND:
                         accredited = True
+                        binding.last_poll_at = now
                         self._bound_last_poll_at[peer] = now
                         run_id = _binding_run_id(binding)
                         if self._poll_should_hold_commands(run_id):
@@ -10923,7 +11006,11 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
     # second process LISTEN on an already-bound port, which defeats the exclusive
     # instance lock (two loopbacks would silently split bridge polls). Exclusive
     # bind makes the second bind fail with EADDRINUSE.
-    allow_reuse_address = False
+    # Linux differs: SO_REUSEADDR never admits a second listener there (that is
+    # SO_REUSEPORT), it only lets a restarted daemon bind while the game's last
+    # polls sit in TIME_WAIT. Without it the restart fails with EADDRINUSE for up
+    # to a minute, so it is on outside Windows.
+    allow_reuse_address = os.name != "nt"
 
     def __init__(self, *args, **kwargs):
         self._http_workers = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
@@ -11045,8 +11132,9 @@ def _bind_exclusive(port: int, log_sink: LogSink, reclaim_orphans: bool) -> "Exc
         ):
             raise
         # A confirmed-dead-parent dayz_mcp orphan was terminated and the port came
-        # free; retry the exclusive bind exactly once. The exclusive lock stays intact — the bind is
-        # still ExclusiveThreadingHTTPServer with allow_reuse_address False.
+        # free; retry the exclusive bind exactly once. The exclusive lock stays intact: the bind is
+        # still ExclusiveThreadingHTTPServer (exclusive bind on Windows, where
+        # allow_reuse_address is False; it is True only off Windows).
         return ExclusiveThreadingHTTPServer(("127.0.0.1", port), Handler)
 
 

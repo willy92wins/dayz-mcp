@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
-import msvcrt
 import os
 import re
 import stat
@@ -527,7 +526,7 @@ def _exclusive_prepare_lock(lock_path: Path) -> Iterator[None]:
             if os.fstat(descriptor).st_size < 1:
                 raise OSError("short_lock_write")
         os.lseek(descriptor, 0, os.SEEK_SET)
-        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        _lock_first_byte(descriptor)
         acquired = True
         _regular_lock_identity(lock_path, descriptor)
     except KnowledgePrepareConflict:
@@ -544,9 +543,22 @@ def _exclusive_prepare_lock(lock_path: Path) -> Iterator[None]:
         try:
             if acquired:
                 os.lseek(descriptor, 0, os.SEEK_SET)
-                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                _unlock_first_byte(descriptor)
         finally:
             os.close(descriptor)
+
+
+def _lock_first_byte(descriptor: int) -> None:
+    """Non-blocking exclusive lock on byte 0; OSError when another holder has it."""
+    from dayz_mcp import byte_lock
+
+    byte_lock.try_lock(descriptor, 0)
+
+
+def _unlock_first_byte(descriptor: int) -> None:
+    from dayz_mcp import byte_lock
+
+    byte_lock.unlock(descriptor, 0)
 
 
 def _index_state(path: Path) -> tuple[str, str]:

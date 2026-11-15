@@ -196,7 +196,7 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "user_id": frozenset({"ui_click"}),
     "delivered": frozenset({"key_press"}),
     "dik": frozenset({"key_press"}),
-    "requested": frozenset({"player_respawn"}),
+    "requested": frozenset({"player_respawn", "player_respawn_survivor"}),
     "action": frozenset({
         "action_use",
         "action_use_door",
