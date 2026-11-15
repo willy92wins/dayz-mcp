@@ -8153,8 +8153,12 @@ class ServerState:
                             "origin_epoch": self._station_epoch,
                         },
                     )
+            kept_row = self._broker_rows.get(command_id)
             if retry and (
                 command_id in self._results
+                # A spawn row kept for an unread answer: that answer was
+                # stored once already, even if the cache has evicted it since.
+                or (isinstance(kept_row, dict) and kept_row.get("answered") is True)
                 or not (
                     command_id in self._enqueued_at
                     or command_id in self._fire_and_forget_ids
@@ -8422,9 +8426,12 @@ class ServerState:
             if result is not None:
                 owner = self._command_owner.get(command_id)
                 if delivers:
-                    # Its caller has the answer now (the harness's /await
-                    # without remove=1): a spawn kept for an unread answer has
-                    # been read and has nothing left to release.
+                    # The answer is taken out for its caller (the harness's
+                    # /await without remove=1): a spawn kept for an unread
+                    # answer counts as read and has nothing left to release.
+                    # This is the daemon's read, not proof the HTTP reply
+                    # arrived; a reply lost after it leaves the group to the
+                    # lease end, as with remove=1.
                     row = self._broker_rows.get(command_id)
                     if isinstance(row, dict) and row.get("answered") is True:
                         self._broker_rows.pop(command_id, None)

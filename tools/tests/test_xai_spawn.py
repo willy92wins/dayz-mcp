@@ -849,6 +849,33 @@ class AIGroupSpawnLateAnswerTest(unittest.TestCase):
                 self.assertEqual(self._releases(state), [(RELEASE, {"spawn_token": TOKEN})])
                 self.assertEqual(self._releases(state), [])
 
+    def test_a_retried_answer_after_its_eviction_stays_a_duplicate(self) -> None:
+        # Mutant killed: the retry check missing a kept answered row whose
+        # answer the cache evicted (the answer came back to the cache and its
+        # operation was finished a second time; main answers duplicate).
+        state, now, command_id = self._delivered_spawn(timeout_s=30.0)
+        coordination = state.coordination
+        assert coordination is not None
+        with patch.object(
+            coordination,
+            "finish_operation_exact",
+            wraps=coordination.finish_operation_exact,
+        ) as finish:
+            now[0] += 0.1
+            self._answer(state, command_id)
+            with state._lock:
+                for index in range(loopback.MAX_RESULTS):
+                    filler = 100_000 + index
+                    state._remember_result_locked(filler, {"id": filler, "ok": 1})
+            retried = self._answer(state, command_id, retry=True)
+        self.assertTrue(retried.get("duplicate"), retried)
+        finished = [c for c in finish.call_args_list if c.args[2] == command_id]
+        self.assertEqual(len(finished), 1, finish.call_args_list)
+        self.assertIsNone(state.take_result(command_id))
+        abandoned = state.abandon_command(command_id, "tool_timeout")
+        self.assertEqual(abandoned.get("status"), "release_queued", abandoned)
+        self.assertEqual(self._releases(state), [(RELEASE, {"spawn_token": TOKEN})])
+
     def test_a_spawn_without_a_deadline_keeps_mains_answered_path(self) -> None:
         # Mutant killed: the row kept for a spawn enqueued without an operation
         # deadline (operation_timeout_s=0), where main's abandon is a noop.
