@@ -291,10 +291,15 @@ clones Expansion makes of loadout items — is a member of the group.
 That covers a weapon dropped on death (vanilla
 `DayZPlayerImplement.DeathDropHandEntity`, called from `OnSimulationEnd`,
 `scripts/4_world/entities/dayzplayerimplement.c:17` and `:635`) or
-cloned to the ground when the member went unconscious. A container (an
-item whose inventory has a cargo) is never deleted: members drop only
-cargo-less items, so one lying in the world got there through a
-player. The sweep also leaves an item a player is taking (an
+cloned to the ground when the member went unconscious. Its magazine
+and attachments go with it: they left the member together with it, so
+they carry the same last holder. The same holds for an item Expansion's
+own drop state takes out of a member's inventory, for example a ruined
+item with no cargo. An item that holds a cargo, in itself or in one of
+its attachments (pouches on a vest), is never deleted and counts as
+kept: a container lying in the world got there through a player, or
+hangs on a ruined item Expansion dropped because that item itself had
+no cargo. The sweep also leaves an item a player is taking (an
 inventory juncture, on it or inside it) or that holds something not
 from the group, and it leaves and counts the group's items players
 hold, once per top item (no ancestor between it and the player is

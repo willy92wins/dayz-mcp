@@ -7,7 +7,8 @@ LeaseCloseExtensionStop) with tests/enforce_subset_helpers.py and
 running them on fakes, plus source pins where translation cannot
 reach. No Expansion or vanilla scripts are needed: the fakes reproduce
 only the cited surface (m_Expansion_PreviousOwner,
-m_Expansion_IsOwnerPlayer, hierarchy, inventory LEVELORDER, juncture,
+m_Expansion_IsOwnerPlayer, hierarchy, inventory LEVELORDER and its null
+entries, juncture and the notnull parameter of HasInventoryJunctureItem,
 GetObjectsAtPosition3D, GetPlayers, ObjectDelete, m_LeaseCloseDeletion).
 """
 
@@ -16,6 +17,7 @@ from __future__ import annotations
 import re
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -79,6 +81,8 @@ class _FakeCargo:
 class _FakeInventory:
     """LEVELORDER enumeration: the holder, then breadth-first contents."""
 
+    yield_nulls = False
+
     def __init__(self, holder) -> None:
         self._holder = holder
 
@@ -87,11 +91,15 @@ class _FakeInventory:
 
     def EnumerateInventory(self, traversal, out) -> None:
         del out[:]
-        queue = [self._holder]
-        while queue:
-            node = queue.pop(0)
-            out.Insert(node)
-            queue.extend(node.children)
+        level = [self._holder]
+        while level:
+            next_level = []
+            for node in level:
+                out.Insert(node)
+                next_level.extend(node.children)
+            if _FakeInventory.yield_nulls:
+                out.Insert(None)
+            level = next_level
 
 
 class _FakeItem(_Entity):
@@ -175,6 +183,8 @@ class _FakeGame:
             players.Insert(player)
 
     def HasInventoryJunctureItem(self, entity) -> bool:
+        if entity is None:
+            raise AssertionError("HasInventoryJunctureItem(null): notnull parameter (3_game/global/game.c:757)")
         return entity in self.juncture
 
     def ObjectDelete(self, obj) -> None:
@@ -411,6 +421,106 @@ class KnownLimitCloneTest(unittest.TestCase):
         self.assertEqual(record2.dropped_deleted, 1)
         self.assertEqual(record2.dropped_kept, 0)
         self.assertEqual(game2.deleted, [clone_rifle])
+
+
+class NullEntryTest(unittest.TestCase):
+    """Round 2 of PR #410: null entries of the LEVELORDER enumeration and cargo in attachments."""
+
+    def test_null_entry_in_a_dropped_items_enumeration_is_skipped(self) -> None:
+        calls: list = []
+        game = _FakeGame(calls)
+        namespace = _namespace(calls, game)
+        member = _FakeMemberEnt("A", (0.0, 0.0, 0.0), calls)
+        item = _FakeItem(member)
+        game.world[(0.0, 0.0, 0.0)] = [item]
+        record = _record([_member_record(11, member)])
+        enumerated = EnforceArray()
+        with unittest.mock.patch.object(_FakeInventory, "yield_nulls", True):
+            item.GetInventory().EnumerateInventory(0, enumerated)
+            self.assertEqual(list(enumerated), [item, None])
+            self.assertIn(None, enumerated)
+            namespace["AISweepDroppedItems"](record)
+        self.assertEqual(record.dropped_deleted, 1)
+        self.assertEqual(record.dropped_kept, 0)
+        self.assertEqual(game.deleted, [item])
+        self.assertEqual(list(namespace["m_LeaseCloseDeletion"]), [item])
+        logs = namespace["_logs"]
+        self.assertEqual(len(logs), 1)
+        self.assertIn("dropped_deleted=1", logs[0])
+        self.assertIn("dropped_kept=0", logs[0])
+
+    def test_dropped_weapon_goes_with_its_magazine_and_attachment(self) -> None:
+        calls: list = []
+        game = _FakeGame(calls)
+        namespace = _namespace(calls, game)
+        member = _FakeMemberEnt("A", (0.0, 0.0, 0.0), calls)
+        weapon = _FakeItem(member)
+        magazine = _FakeItem(member)
+        optic = _FakeItem(member)
+        _attach(weapon, magazine)
+        _attach(weapon, optic)
+        game.world[(0.0, 0.0, 0.0)] = [weapon]
+        record = _record([_member_record(11, member)])
+        enumerated = EnforceArray()
+        with unittest.mock.patch.object(_FakeInventory, "yield_nulls", True):
+            weapon.GetInventory().EnumerateInventory(0, enumerated)
+            self.assertEqual(list(enumerated), [weapon, None, magazine, optic, None])
+            namespace["AISweepDroppedItems"](record)
+        self.assertEqual(record.dropped_deleted, 1)
+        self.assertEqual(record.dropped_kept, 0)
+        self.assertEqual(game.deleted, [weapon])
+        self.assertEqual(list(namespace["m_LeaseCloseDeletion"]), [weapon])
+
+    def test_b_keep_cases_hold_with_null_entries(self) -> None:
+        namespace, game, _calls, record, items = _sweep_fixture()
+        with unittest.mock.patch.object(_FakeInventory, "yield_nulls", True):
+            namespace["AISweepDroppedItems"](record)
+        self.assertEqual(record.dropped_deleted, 1)
+        self.assertEqual(record.dropped_kept, 8)
+        self.assertEqual(game.deleted, [items.weapon_b])
+        self.assertEqual(list(namespace["m_LeaseCloseDeletion"]), [items.weapon_b])
+        logs = namespace["_logs"]
+        self.assertEqual(len(logs), 1)
+        self.assertIn("group_id=123", logs[0])
+        self.assertIn("dropped_deleted=1", logs[0])
+        self.assertIn("dropped_kept=8", logs[0])
+        self.assertNotIn(TOKEN, logs[0])
+        self.assertEqual(len(game.queries), 2)
+        for _pos, radius in game.queries:
+            self.assertEqual(radius, 30.0)
+
+    def test_dropped_item_with_a_cargo_in_an_attachment_is_kept(self) -> None:
+        calls: list = []
+        game = _FakeGame(calls)
+        namespace = _namespace(calls, game)
+        member = _FakeMemberEnt("A", (0.0, 0.0, 0.0), calls)
+        vest = _FakeItem(member)
+        pouch = _FakeItem(member, cargo=_FakeCargo())
+        _attach(vest, pouch)
+        game.world[(0.0, 0.0, 0.0)] = [vest]
+        record = _record([_member_record(11, member)])
+        self.assertFalse(_FakeInventory.yield_nulls)
+        namespace["AISweepDroppedItems"](record)
+        self.assertEqual(record.dropped_deleted, 0)
+        self.assertEqual(record.dropped_kept, 1)
+        self.assertEqual(game.deleted, [])
+        self.assertEqual(list(namespace["m_LeaseCloseDeletion"]), [])
+
+        calls2: list = []
+        game2 = _FakeGame(calls2)
+        namespace2 = _namespace(calls2, game2)
+        member2 = _FakeMemberEnt("A", (0.0, 0.0, 0.0), calls2)
+        vest2 = _FakeItem(member2)
+        pouch2 = _FakeItem(member2, cargo=_FakeCargo())
+        _attach(vest2, pouch2)
+        game2.world[(0.0, 0.0, 0.0)] = [vest2]
+        record2 = _record([_member_record(11, member2)])
+        with unittest.mock.patch.object(_FakeInventory, "yield_nulls", True):
+            namespace2["AISweepDroppedItems"](record2)
+        self.assertEqual(record2.dropped_deleted, 0)
+        self.assertEqual(record2.dropped_kept, 1)
+        self.assertEqual(game2.deleted, [])
+        self.assertEqual(list(namespace2["m_LeaseCloseDeletion"]), [])
 
 
 class ReleaseSweepTest(unittest.TestCase):

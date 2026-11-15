@@ -414,12 +414,13 @@ modded class MCPBridge
 	// Delete the items this group's members dropped, and only those, once
 	// per group on its active -> releasing change (9867). A candidate lies
 	// in the world within AI_DROPPED_RADIUS_M of a member entity that still
-	// exists and its last holder is a member. A container (an inventory
-	// with a cargo) is never deleted: members drop only cargo-less items,
-	// so one lying in the world got there through a player. Otherwise a
-	// candidate is kept when a player is taking it or anything inside it
-	// (an inventory juncture), or when anything inside it is not from the
-	// group. An item whose own m_Expansion_IsOwnerPlayer flag is set is
+	// exists and its last holder is a member. An item holding a cargo, in
+	// itself or in an attachment (pouches on a vest), is never deleted: a
+	// container lying in the world got there through a player, or hangs on
+	// a ruined item Expansion dropped because that item itself had no cargo.
+	// Otherwise a candidate is kept when a player is taking it or anything
+	// inside it (an inventory juncture), or when anything inside it is not from
+	// the group. An item whose own m_Expansion_IsOwnerPlayer flag is set is
 	// never a candidate, and inside a candidate it counts as not from the
 	// group, so the root is kept. The flag is per entity, so an entity
 	// created inside a group's item from a player's item (cloned along
@@ -444,6 +445,7 @@ modded class MCPBridge
 		EntityAI ancestor;
 		Man player;
 		GameInventory inventory;
+		GameInventory entryInventory;
 		array<Object> objects = new array<Object>();
 		array<CargoBase> proxyCargos = new array<CargoBase>();
 		array<EntityAI> candidates = new array<EntityAI>();
@@ -503,7 +505,12 @@ modded class MCPBridge
 			while (entryIndex < entries.Count())
 			{
 				entry = entries.Get(entryIndex);
-				if (entry != candidate)
+				// A LEVELORDER enumeration can hold null entries; vanilla's own
+				// LEVELORDER loops skip them (4_world/static/miscgameplayfunctions.c:136).
+				// A null entry is not an item: it neither keeps the candidate nor
+				// reaches HasInventoryJunctureItem, whose parameter is notnull
+				// (3_game/global/game.c:757).
+				if (entry && entry != candidate)
 				{
 					if (GetGame().HasInventoryJunctureItem(entry))
 					{
@@ -511,6 +518,13 @@ modded class MCPBridge
 					}
 
 					if (!AIDroppedFromGroup(record, entry))
+					{
+						shouldKeep = true;
+					}
+
+					// A cargo anywhere in the candidate keeps it, like its own cargo above.
+					entryInventory = entry.GetInventory();
+					if (entryInventory && entryInventory.GetCargo())
 					{
 						shouldKeep = true;
 					}
