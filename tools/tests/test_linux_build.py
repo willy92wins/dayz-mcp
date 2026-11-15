@@ -341,6 +341,34 @@ class WorkerBuildPathTest(unittest.TestCase):
             dayz_test_worker._read_pbo_namespace("/nonexistent/source", "M", None)
         self.assertIn("build_source_unavailable", str(vars(caught.exception)) + str(caught.exception))
 
+    def test_a_fifo_marker_is_refused_without_blocking(self) -> None:
+        # Sol #411 [P2]: a $PBOPREFIX$ FIFO with no writer blocked the open before
+        # the S_ISREG check, on the worker's event loop where a cancel cannot run.
+        import threading
+
+        with tempfile.TemporaryDirectory() as source:
+            fifo = Path(source, linux_build.MARKER)
+            os.mkfifo(fifo)
+            outcome: dict[str, object] = {}
+
+            def read() -> None:
+                try:
+                    outcome["namespace"] = dayz_test_worker._read_pbo_namespace(source, "M", None)
+                except Exception as error:
+                    outcome["error"] = error
+
+            reader = threading.Thread(target=read, daemon=True)
+            reader.start()
+            reader.join(timeout=5.0)
+            if reader.is_alive():
+                # Release the blocked open (a writer appears) so the thread ends.
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+                reader.join(timeout=5.0)
+                self.fail("reading a FIFO $PBOPREFIX$ blocked")
+        self.assertNotIn("namespace", outcome)
+        error = outcome["error"]
+        self.assertIn("build_source_unavailable", str(vars(error)) + str(error))
+
     def test_the_binarize_gate_sees_the_posix_leaf(self) -> None:
         self.assertTrue(dayz_test_worker._binarize_namespace_matches("MyMod", "/a/b/mymod"))
         self.assertFalse(dayz_test_worker._binarize_namespace_matches("MyMod", "/a/b/other"))

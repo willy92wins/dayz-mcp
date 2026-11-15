@@ -47,6 +47,9 @@ from dayz_mcp import (
     dayz_test_worker,
     loopback,
     native_broker_protocol,
+    podman_server,
+    process_lifecycle,
+    proton_client,
 )
 from dayz_mcp.instance_fence import format_creation_time_utc
 from dayz_mcp.native_process_guard import identity_hashes
@@ -1112,6 +1115,95 @@ class LaunchIntentActivationTest(unittest.TestCase):
             self.assertEqual((row.state, row.processes), ("EXITED", []))
             self.assertEqual(box.host.terminate_calls, [orphan])
             self.assertNotIn(7001, box.host.images)
+
+
+def _backend_rewrite(argv: list[str]) -> list[str]:
+    """A Linux backend's view of the launched process: not the request's argv."""
+    return ["Z:\\game\\DayZDiag_x64.exe", "-nolauncher", *argv[1:], "-dologs"]
+
+
+class LinuxEffectiveArgvRecoveryTest(unittest.TestCase):
+    """Sol #411 [P2]: the intent hashes the argv the launched process shows.
+
+    The Linux launchers (Proton, podman) start the game with another argv than
+    the request's. The intent written before the spawn must carry the hash of
+    that one, or a daemon that dies between the spawn and the ProcessRecord
+    leaves the game outside the lifecycle (_match_launch_intent: argv mismatch).
+    """
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.box = _Box(Path(self.temporary.name))
+        self.paths = self.box.paths("runtime")
+        self.lifecycle = self.box.daemon_on(self.paths, bound=True)
+        self.token, self.lease_id = self.box.lease(self.lifecycle)
+        self.profiles = self.box.profiles("client")
+        self.box.server_run(self.lifecycle, self.lease_id)
+        launch = self.box.launch
+        self.seen: list[list[str]] = []
+
+        def rewriting(argv: list[str], cwd: str, window_style: str) -> Handle:
+            self.seen.append(list(argv))
+            # The crash image is taken inside launch, after the spawn; the host
+            # table is live, so the process then reads with the backend's argv.
+            handle = launch(argv, cwd, window_style)
+            self.box.host.spawn(handle.pid, _backend_rewrite(list(argv)), self.box.clock + 0.25)
+            return handle
+
+        self.lifecycle.launcher = rewriting
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _crash_and_recover(self, effective) -> dict[str, object]:
+        self.box.crash_at = "after_popen"
+        with patch.object(ProcessLifecycle, "_effective_launch_argv", effective):
+            self.lifecycle.start_run(
+                IDENTITY_A, self.token, self.box.client_request(self.profiles, RUN_ID)
+            )
+        self.assertIsNotNone(self.box.image, "the crash point was never reached")
+        self.box.crash_at = None
+        return self.box.daemon_on(self.box.image).recover_launch_intent()
+
+    def test_the_intent_carries_the_hash_of_the_effective_argv(self) -> None:
+        outcome = self._crash_and_recover(lambda _self, argv: _backend_rewrite(list(argv)))
+
+        self.assertEqual(outcome.get("launch_intent"), "recovered", outcome)
+        [argv] = self.seen
+        self.assertEqual(
+            self.box.host.record(7001, "client").command_line_sha256,
+            identity_hashes(argv[0], _backend_rewrite(argv))["command_line_sha256"],
+        )
+        self.assertEqual(self.box.host.terminate_calls, [])
+
+    def test_the_request_argv_hash_misses_a_rewritten_launch(self) -> None:
+        # The behaviour Sol found: hashing the request's argv cannot match.
+        outcome = self._crash_and_recover(lambda _self, argv: list(argv))
+
+        self.assertEqual(outcome.get("launch_intent"), "retired", outcome)
+        self.assertEqual(outcome.get("reason"), "process_not_found", outcome)
+
+    def test_windows_hashes_the_request_argv(self) -> None:
+        argv = ["C:\\DayZ\\DayZDiag_x64.exe", "-mod=@Mod", "-port=2302"]
+        with patch.object(process_lifecycle.os, "name", "nt"):
+            self.assertEqual(ProcessLifecycle._effective_launch_argv(self.lifecycle, argv), argv)
+
+    def test_the_podman_server_argv_is_its_container_argv(self) -> None:
+        argv = [
+            "/srv/DayZServer/DayZServer", "-server", "-config=/c/serverDZ.cfg",
+            "-profiles=/p", "-mission=/m/dayzOffline.enoch", "-mod=/b/@A", "-port=2302",
+        ]
+        with patch.object(process_lifecycle.os, "name", "posix"):
+            effective = ProcessLifecycle._effective_launch_argv(self.lifecycle, argv)
+        self.assertEqual(effective, podman_server.container_argv(argv))
+        self.assertEqual(effective[0], "./DayZServer")
+
+    @unittest.skipIf(os.name == "nt", "a POSIX game path")
+    def test_the_proton_argv_is_its_game_argv(self) -> None:
+        argv = ["/x/DayZDiag_x64.exe", "-server", "-serverMod=/s/@One", "-profiles=/p"]
+        effective = ProcessLifecycle._effective_launch_argv(self.lifecycle, argv)
+        self.assertEqual(effective, proton_client.game_argv(argv, self.lifecycle.game_path))
+        self.assertIn("-serverMod=Z:\\s\\@One", effective)
 
 
 if __name__ == "__main__":

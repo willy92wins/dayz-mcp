@@ -182,6 +182,60 @@ class LifecycleMissionTest(unittest.TestCase):
             )
 
 
+class ContainerArgvTest(unittest.TestCase):
+    """Sol #411 [P2]: the argv the daemon's launch intent hashes before the start."""
+
+    ARGV = [
+        "/srv/DayZServer/DayZServer", "-server", "-config=/c/serverDZ.cfg", "-profiles=/p",
+        "-mission=/m/dayzOffline.enoch", "-mod=/b/@A;/b/Mine", "-filePatching", "-port=2302",
+        "-serverMod=/s/@S",
+    ]
+
+    def test_the_container_argv_is_computed_without_the_file_system(self):
+        self.assertEqual(
+            ps.container_argv(self.ARGV),
+            [
+                "./DayZServer", "-config=/c/serverDZ.cfg", "-profiles=/p",
+                "-mission=mpmissions/dayzOffline.enoch", "-mod=@A;@Mine", "-port=2302",
+                "-serverMod=@S", "-dologs",
+            ],
+        )
+
+    def test_dologs_is_not_doubled(self):
+        self.assertEqual(ps.container_argv(["/x/DayZServer", "-doLogs"]), ["./DayZServer", "-doLogs"])
+
+    def test_the_container_runs_exactly_the_container_argv(self):
+        with tempfile.TemporaryDirectory() as base:
+            root = Path(base)
+            server = root / "server"
+            server.mkdir()
+            (server / ps.SERVER_BINARY).write_text("")
+            config = root / "serverDZ.cfg"
+            config.write_text("")
+            mission = root / "missions" / "dayzOffline.chernarusplus"
+            mission.mkdir(parents=True)
+            calls = []
+
+            def fake_podman(_podman, *command, check=True):
+                calls.append(command)
+                return mock.Mock(returncode=1, stderr="stop here", stdout="")
+
+            argv = [
+                str(server / ps.SERVER_BINARY), "-server", f"-config={config}",
+                f"-profiles={root / 'profiles'}", f"-mission={mission}", "-filePatching",
+                "-port=2302",
+            ]
+            with mock.patch.object(ps, "_runtime_image_id", return_value="image"), \
+                    mock.patch.object(ps, "_state_root", return_value=root / "runs"), \
+                    mock.patch.object(ps, "_remove_stale_trees"), \
+                    mock.patch.object(ps, "_podman", fake_podman), \
+                    self.assertRaises(ps.PodmanServerError):
+                ps.launch_lifecycle_process(argv, str(server))
+            run = next(command for command in calls if command[0] == "run")
+            start = run.index(f"./{ps.SERVER_BINARY}")
+            self.assertEqual(list(run[start:]), ps.container_argv(argv))
+
+
 class RemoveStaleTreesTest(unittest.TestCase):
     """Only a container podman reports absent loses its tree (``container exists`` exits 1)."""
 

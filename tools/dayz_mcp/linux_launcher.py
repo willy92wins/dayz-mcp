@@ -540,15 +540,23 @@ def _host_argv(bundle: VerifiedLinuxBundle, *, lifecycle: bool) -> list[str]:
     return argv
 
 
-def _read_exact(descriptor: int, size: int, *, deadline: float | None, stop: Callable[[], bool]) -> bytes:
+def _read_exact(
+    descriptor: int, size: int, *, deadline: Callable[[], float | None], stop: Callable[[], bool]
+) -> bytes:
+    """``size`` bytes from ``descriptor``.
+
+    ``deadline`` is asked again on every wait, after ``stop``: a cancel noted by
+    ``stop`` while this call is already waiting still bounds it.
+    """
     chunks: list[bytes] = []
     remaining = size
     while remaining:
         if stop():
             raise LinuxLauncherError("relay_stopped")
         timeout = 0.1
-        if deadline is not None:
-            left = deadline - time.monotonic()
+        limit = deadline()
+        if limit is not None:
+            left = limit - time.monotonic()
             if left <= 0:
                 raise LinuxLauncherError("relay_timeout")
             timeout = min(timeout, left)
@@ -681,23 +689,27 @@ def _supervise_worker(
         terminal: bytes | None = None
 
         def note_cancel() -> bool:
+            """Start the grace on the first cancel; True once that grace is spent."""
             nonlocal cancel_deadline, cancel_write
             if cancel_signal.is_set() and cancel_deadline is None:
                 cancel_deadline = time.monotonic() + _CANCEL_GRACE_S
                 os.close(cancel_write)
                 cancel_write = -1
-            return False
+            return cancel_deadline is not None and time.monotonic() >= cancel_deadline
+
+        def current_deadline() -> float | None:
+            return cancel_deadline
 
         while True:
             note_cancel()
             try:
                 size = struct.unpack(
                     "<I",
-                    _read_exact(from_worker, 4, deadline=cancel_deadline, stop=note_cancel),
+                    _read_exact(from_worker, 4, deadline=current_deadline, stop=note_cancel),
                 )[0]
                 if not 4 <= size <= _MAX_MESSAGE:
                     break
-                message = _read_exact(from_worker, size, deadline=cancel_deadline, stop=note_cancel)
+                message = _read_exact(from_worker, size, deadline=current_deadline, stop=note_cancel)
             except LinuxLauncherError:
                 break
             if message.startswith(_TERMINAL_MAGIC):

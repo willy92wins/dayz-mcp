@@ -452,6 +452,48 @@ def _cgroup_names_container(pid: int, container_id: str) -> bool:
     return f"libpod-{container_id}.scope" in text
 
 
+def _mod_flag_length(item: str) -> int | None:
+    lowered = item.casefold()
+    if lowered.startswith("-mod="):
+        return len("-mod=")
+    if lowered.startswith("-servermod="):
+        return len("-servermod=")
+    return None
+
+
+def _mod_link_name(value: str) -> str:
+    """The ``@name`` link a mod path becomes in the container's tree."""
+    path = Path(value)
+    return path.name if path.name.startswith("@") else "@" + path.name
+
+
+def container_argv(argv: list[str]) -> list[str]:
+    """The argv DayZServer runs with in the container (``exec "$@"``).
+
+    No file system access: ``launch_lifecycle_process`` starts the container with
+    exactly this, and the daemon's launch intent hashes it before the start, as
+    ``NativeProcessGuard`` will read it from the container's PID 1.
+    """
+    if not argv:
+        raise PodmanServerError("not_a_linux_server_launch")
+    args = [item for item in argv[1:] if item.casefold() not in {"-server", "-filepatching"}]
+    mission = _flag_value(args, "-mission")
+    mission_name = Path(mission).name if mission else None
+    rewritten: list[str] = []
+    for item in args:
+        flag_length = _mod_flag_length(item)
+        if flag_length is not None:
+            names = [_mod_link_name(value) for value in filter(None, item[flag_length:].split(";"))]
+            rewritten.append(item[:flag_length] + ";".join(names))
+        elif mission_name is not None and item.casefold().startswith("-mission="):
+            rewritten.append(f"-mission=mpmissions/{mission_name}")
+        else:
+            rewritten.append(item)
+    if not any(item.casefold() == "-dologs" for item in rewritten):
+        rewritten.append("-dologs")
+    return [f"./{SERVER_BINARY}", *rewritten]
+
+
 def launch_lifecycle_process(
     argv: list[str], cwd: str, podman: str = "podman", *, server_binary: Path | None = None
 ) -> LaunchedContainer:
@@ -530,17 +572,10 @@ def launch_lifecycle_process(
 
         mounts: list[str] = []
         key_sources = [server_dir / "keys"]
-        rewritten: list[str] = []
         for item in args:
-            lowered = item.casefold()
-            if lowered.startswith("-mod="):
-                flag_length = len("-mod=")
-            elif lowered.startswith("-servermod="):
-                flag_length = len("-servermod=")
-            else:
-                rewritten.append(item)
+            flag_length = _mod_flag_length(item)
+            if flag_length is None:
                 continue
-            names: list[str] = []
             for value in filter(None, item[flag_length:].split(";")):
                 path = Path(value)
                 if not path.is_absolute():
@@ -548,7 +583,7 @@ def launch_lifecycle_process(
                 real = path.resolve()
                 if not real.is_dir():
                     raise PodmanServerError(f"no_mod_dir:{value}")
-                mod_name = path.name if path.name.startswith("@") else "@" + path.name
+                mod_name = _mod_link_name(value)
                 if not _MOD_NAME.match(mod_name):
                     raise PodmanServerError(f"bad_mod_name:{mod_name}")
                 if (tree / mod_name).is_symlink() or (tree / mod_name).exists():
@@ -560,18 +595,13 @@ def launch_lifecycle_process(
                 # writes stays in the container's upper layer, not in the build.
                 mounts += ["-v", f"{real}:{real}:O"]
                 key_sources.append(real / "keys")
-                names.append(mod_name)
-            rewritten.append(item[:flag_length] + ";".join(names))
         # The mount point exists before the container starts; the mission's writes
         # (storage_1) still land in the policy's mission directory.
         mission_in_tree = tree / "mpmissions" / mission.name
         mission_in_tree.mkdir(parents=True)
-        rewritten = [
-            f"-mission=mpmissions/{mission.name}" if item.casefold().startswith("-mission=") else item
-            for item in rewritten
-        ]
-        if not any(item.casefold() == "-dologs" for item in rewritten):
-            rewritten.append("-dologs")
+        # Mods as their @name links, the mission relative to the tree, -dologs:
+        # the argv the daemon's launch intent hashed before this call.
+        rewritten = container_argv(argv)[1:]
 
         keys = tree / "keys"
         keys.mkdir()

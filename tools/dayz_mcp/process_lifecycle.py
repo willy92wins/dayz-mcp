@@ -3599,6 +3599,26 @@ class ProcessLifecycle:
         ]
         return runs, diagnostics
 
+    def _effective_launch_argv(self, argv: list[str]) -> list[str]:
+        """The argv the process ``_launch(argv, ...)`` starts will show its guard.
+
+        On Windows the request's own. On Linux each backend of ``_launch``
+        rewrites it: the podman server runs ``podman_server.container_argv``
+        and a Proton game ``proton_client.game_argv``. Raises ``ValueError``
+        when the backend cannot say.
+        """
+        argv = [str(item) for item in argv]
+        if os.name == "nt":
+            return argv
+        from dayz_mcp import podman_server, proton_client
+
+        try:
+            if argv and os.path.basename(argv[0]) == podman_server.SERVER_BINARY:
+                return podman_server.container_argv(argv)
+            return proton_client.game_argv(argv, self.game_path)
+        except (podman_server.PodmanServerError, proton_client.ProtonClientError) as error:
+            raise ValueError(str(error)) from error
+
     def _launch(self, argv: list[str], cwd: str, window_style: str) -> object:
         if os.name != "nt":
             # Linux. argv[0] has passed the allow rule, and the policy's binary
@@ -5595,7 +5615,12 @@ class ProcessLifecycle:
         ):
             return None
         try:
-            command_line_sha256 = identity_hashes(argv[0], argv)["command_line_sha256"]
+            # The hash of the argv the launched process will show, which on
+            # Linux is not the request's: _match_launch_intent compares it with
+            # the guard's reading of that process.
+            command_line_sha256 = identity_hashes(
+                argv[0], self._effective_launch_argv(argv)
+            )["command_line_sha256"]
             not_before_utc = format_creation_time_utc(self._launch_intent_clock())
         except (OSError, OverflowError, TypeError, ValueError):
             return None

@@ -320,12 +320,18 @@ def install_worker() -> None:
         if not source_directory_accessible(source):
             raise worker._failed("build_source_unavailable")
         try:
-            descriptor = os.open(os.path.join(source, MARKER), os.O_RDONLY | os.O_NOFOLLOW)
+            # O_NONBLOCK: a FIFO with no writer would otherwise block this open on
+            # the worker's event loop, where its cancel could not be processed.
+            descriptor = os.open(
+                os.path.join(source, MARKER), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            )
         except FileNotFoundError:
             return prefix
         except OSError:
             raise worker._failed("build_source_unavailable") from None
         with os.fdopen(descriptor, "rb") as stream:
+            # The type is checked on the open file before any read: only a
+            # regular file is read (O_NONBLOCK does not apply to one).
             info = os.fstat(stream.fileno())
             limit = worker.win32_fileinfo.PBO_PREFIX_MAX_BYTES
             data = stream.read(limit + 1) if stat.S_ISREG(info.st_mode) else None

@@ -14,8 +14,8 @@ chain (``dayz-client-headless.sh``, same author), ported:
   launch to the running Steam and its display;
 - ``DayZDiag_x64.exe``, not the retail ``DayZ_x64.exe``: the daemon treats a running
   retail client as the user's own game (retail quarantine), exactly as on Windows;
-- the worker's argv is kept; POSIX paths in ``-mod``, ``-profiles``, ``-mission`` and
-  ``-config`` become ``Z:\\...`` (measured 2026-11-05: DayZDiag 1.30.164289 under
+- the worker's argv is kept; POSIX paths in ``-mod``, ``-serverMod``, ``-profiles``,
+  ``-mission`` and ``-config`` become ``Z:\\...`` (measured 2026-11-05: DayZDiag 1.30.164289 under
   GE-Proton11-1 loads a mod from ``-mod=Z:\\...\\@Mod`` and writes its RPT and logs into
   ``-profiles=Z:\\...``), and ``-nolauncher -skipintro -nosplash`` are added;
 - one game per role: a running retail ``DayZ_x64.exe`` or ``DayZ_BE.exe`` refuses
@@ -52,7 +52,9 @@ SESSION_PREFIX = "dayz-mcp-client-"
 APPEAR_TIMEOUT_S = 120.0
 STABLE_READS = 2
 _APP_IDS = {"DayZ": "221100", "DayZ Exp": "1024020"}
-_PATH_FLAGS = ("-mod=", "-profiles=", "-mission=", "-config=")
+_PATH_FLAGS = ("-mod=", "-servermod=", "-profiles=", "-mission=", "-config=")
+# Flags whose value is a ';'-separated list of paths, each translated on its own.
+_PATH_LIST_FLAGS = frozenset({"-mod=", "-servermod="})
 _ADDED_FLAGS = ("-nolauncher", "-skipintro", "-nosplash")
 
 
@@ -90,10 +92,25 @@ def translate_args(args: list[str]) -> list[str]:
             out.append(item)
             continue
         value = item[len(flag):]
-        parts = value.split(";") if flag == "-mod=" else [value]
+        parts = value.split(";") if flag in _PATH_LIST_FLAGS else [value]
         out.append(item[: len(flag)] + ";".join(windows_path(part) for part in parts))
     present = {item.casefold() for item in out}
     return [*(flag for flag in _ADDED_FLAGS if flag not in present), *out]
+
+
+def game_argv(argv: list[str], game_path: Path | str) -> list[str]:
+    """The argv the game process reads once Wine has rewritten it.
+
+    ``launch_client`` runs ``<game_path>/DayZDiag_x64.exe`` (``resolve_chain``'s
+    ``client``) with ``translate_args(argv[1:])``; Wine then shows that image as its
+    ``Z:\\`` path in ``argv[0]`` (``linux_compat._WineArgvTrimmedProcess`` drops the
+    NUL padding). This is what ``NativeProcessGuard`` hashes for the process, so the
+    daemon's launch intent hashes it too.
+    """
+    if not argv:
+        raise ProtonClientError("empty_argv")
+    client = Path(game_path).resolve() / CLIENT_IMAGE
+    return [windows_path(str(client)), *translate_args(list(argv[1:]))]
 
 
 def _resolution(args: list[str]) -> str:
