@@ -638,7 +638,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         })()
         return manager, state
 
-    def _client_census(self, source, *, active=(), conn_gen=7, mutant_clean=False, emote_mcp=False, emote_playing=False, mutant_emote=None, emote_pending=False, emote_queued=False, emote_no_mgr=False, look_release_pending=False, look_generation=3, look_floor=None, pause_queued_mark=None, pause_menu_mark=None, pause_queued=None, open_pause_menu=None):
+    def _client_census(self, source, *, active=(), conn_gen=7, mutant_clean=False, emote_mcp=False, emote_playing=False, mutant_emote=None, emote_pending=False, emote_queued=False, emote_no_mgr=False, look_release_pending=False, look_generation=3, look_floor=None, pause_queued_mark=None, pause_menu_mark=None, pause_queued=None, open_pause_menu=None, map_menu_mark=None, open_map_menu=None):
         # Translate the real client census builder against controller doubles.
         flags = {name: (name in active) for name in (
             "vehicle_drive", "input_trigger", "player_move", "weapon", "look_at",
@@ -667,8 +667,8 @@ class LeaseCloseCensusTests(unittest.TestCase):
         mission = type("MG", (), {
             "MCP_IsPauseQueued": lambda self: pause_queued,
         })()
-        # The MENU_INGAME instance open now (FindMenu), MCP's or not.
-        ui = type("UI", (), {"FindMenu": lambda self, menu_id: open_pause_menu if menu_id == 2 else None})()
+        # The MENU_INGAME / MENU_MAP instances open now (FindMenu), MCP's or not.
+        ui = type("UI", (), {"FindMenu": lambda self, menu_id: open_pause_menu if menu_id == 2 else (open_map_menu if menu_id == 22 else None)})()
         game = type("G", (), {"GetPlayer": lambda self: player, "GetMission": lambda self: mission, "GetUIManager": lambda self: ui})()
         runner = type("R", (), {
             "CountExcluding": lambda self, kind: 1 if "jobs" in active else 0,
@@ -711,7 +711,9 @@ class LeaseCloseCensusTests(unittest.TestCase):
             "m_MCPEmoteStarted": emote_mcp,
             "m_MCPPauseQueued": pause_queued_mark,
             "m_MCPPauseMenu": pause_menu_mark,
+            "m_MCPMapMenu": map_menu_mark,
             "MENU_INGAME": 2,
+            "MENU_MAP": 22,
         }
         for sig, name in (
             ("protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)", "AddCloseEntry"),
@@ -732,7 +734,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
             translate(_wrap(sig, body), sig, ns, class_types=("MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "PlayerBase", "ActionManagerClient", "EmoteManager", "MissionGameplay", "UIManager"),
                       members=("m_CameraPath", "m_ActiveCam", "m_CameraHandoffPending", "m_PlayerSimulationDisabled",
                                "m_ControlsSuppressed", "m_Dialog", "m_UiPreviewRoot", "m_JobRunner", "m_MCPEmoteStarted",
-                               "m_MCPPauseQueued", "m_MCPPauseMenu"))
+                               "m_MCPPauseQueued", "m_MCPPauseMenu", "m_MCPMapMenu"))
         args = type("Args", (), {"close_generation": "g1", "close_lease_id": "l1"})()
         self._last_client_ns = ns
         return ns["BuildLeaseCloseCensus"](args)
@@ -773,6 +775,17 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertEqual(census_foreign.state.text, "clean")
         census_reopened = self._client_census(source, pause_menu_mark=mcp_menu, open_pause_menu=object())
         self.assertEqual(census_reopened.state.text, "clean")
+        # E3 (d4b4): the map ui_menu_set opened and still open names
+        # exactly ui_menu; a map it did not open is not counted.
+        mcp_map = object()
+        census_map = self._client_census(source, map_menu_mark=mcp_map, open_map_menu=mcp_map)
+        self.assertEqual([e.name.text for e in census_map.entries if e.state.text != "clean"], ["ui_menu"])
+        self.assertEqual(census_map.state.text, "residue")
+        self.assertFalse(self._last_client_ns["LeaseCloseCensusSettled"](census_map))
+        census_foreign_map = self._client_census(source, map_menu_mark=None, open_map_menu=object())
+        self.assertEqual(census_foreign_map.state.text, "clean")
+        census_reopened_map = self._client_census(source, map_menu_mark=mcp_map, open_map_menu=object())
+        self.assertEqual(census_reopened_map.state.text, "clean")
         # H3: process-lifetime input debt is unverified: census residue,
         # but the observer is settled and does not wait 25 s for it.
         census3 = self._client_census(source, active=("action_input_in_flight",))
@@ -986,7 +999,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
                  'MCPInputTriggerControl.ReleaseAll("shutdown")', 'MCPPlayerMoveControl.ReleaseAll("shutdown")',
                  "StopCameraPath()", "RestoreGameplay()", "ReleaseCamera()", 'MCPHoldControl.Shutdown("shutdown")',
                  'MCPVehicleTrace.Abort("shutdown")', "StopLeaseCloseEmote()", "AbortAll(this)", "StopLeaseClosePause()",
-                 "BuildLeaseCloseCensus(command.args)"]
+                 "StopLeaseCloseMap()", "BuildLeaseCloseCensus(command.args)"]
         pos = -1
         for step in steps:
             nxt = body.find(step, pos + 1)
@@ -3141,6 +3154,8 @@ class LeaseCloseDeliverable5Tests(unittest.TestCase):
                 "m_MCPEmoteStarted": False,
                 "m_MCPPauseQueued": False,
                 "m_MCPPauseMenu": None,
+                "m_MCPMapMenu": None,
+                "MENU_MAP": 22,
             }
             for sig in (
                 "protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)",
@@ -3174,6 +3189,7 @@ class LeaseCloseDeliverable5Tests(unittest.TestCase):
                         "m_MCPEmoteStarted",
                         "m_MCPPauseQueued",
                         "m_MCPPauseMenu",
+                        "m_MCPMapMenu",
                     ),
                 )
             args = _NS(close_generation=EnforceString.of("g1"), close_lease_id=EnforceString.of("l1"))

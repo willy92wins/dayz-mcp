@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import ntpath
 import os
@@ -42,6 +43,64 @@ class NativeBundleTest(unittest.TestCase):
     def test_loader_never_reads_the_private_launcher_stream_directly(self) -> None:
         source = Path(native_bundle.__file__).read_text(encoding="utf-8")
         self.assertNotIn("opened_launcher._stream", source)
+
+    def test_verify_app_accepts_main_member_set_and_refuses_linux_overlay(self) -> None:
+        # Main's 20 members, as literals: a bundle built from main must verify.
+        main_members = (
+            "__main__.py",
+            "dayz_mcp/__init__.py",
+            "dayz_mcp/accredited_daemon_transport.py",
+            "dayz_mcp/daemon_contract.py",
+            "dayz_mcp/daemon_policy_contract.py",
+            "dayz_mcp/dayz_test_attestation.py",
+            "dayz_mcp/dayz_test_modes.py",
+            "dayz_mcp/dayz_test_readiness.py",
+            "dayz_mcp/dayz_test_request.py",
+            "dayz_mcp/dayz_test_storage.py",
+            "dayz_mcp/dayz_test_worker.py",
+            "dayz_mcp/host_config.py",
+            "dayz_mcp/native_broker_protocol.py",
+            "dayz_mcp/native_process_guard.py",
+            "dayz_mcp/native_process_snapshot.py",
+            "dayz_mcp/normal_daemon_policy.py",
+            "dayz_mcp/pack_only.py",
+            "dayz_mcp/pinned_keyfile.py",
+            "dayz_mcp/server_cli.py",
+            "dayz_mcp/win32_fileinfo.py",
+        )
+        self.assertEqual(len(main_members), 20)
+        package = Path(native_bundle.__file__).resolve().parent
+        members: dict[str, bytes] = {}
+        source_bytes: dict[str, bytes] = {}
+        for name in main_members:
+            if name == "__main__.py":
+                members[name] = b"\n"
+            elif name == "dayz_mcp/__init__.py":
+                members[name] = (package / "__init__.py").read_bytes()
+            else:
+                raw = (package / name.rsplit("/", 1)[1]).read_bytes()
+                members[name] = raw
+                source_bytes[name.rsplit("/", 1)[1]] = raw
+
+        def archive_bytes(extra: dict[str, bytes] | None = None) -> io.BytesIO:
+            payload = dict(members)
+            if extra:
+                payload.update(extra)
+            stream = io.BytesIO()
+            with zipfile.ZipFile(stream, "w") as archive:
+                for name in sorted(payload):
+                    info = zipfile.ZipInfo(filename=name, date_time=(1980, 1, 1, 0, 0, 0))
+                    info.compress_type = zipfile.ZIP_STORED
+                    archive.writestr(info, payload[name])
+            stream.seek(0)
+            return stream
+
+        native_bundle._verify_app(archive_bytes(), source_bytes)
+        with self.assertRaises(ValueError):
+            native_bundle._verify_app(
+                archive_bytes({"dayz_mcp/linux_compat.py": (package / "linux_compat.py").read_bytes()}),
+                source_bytes,
+            )
 
     @requires_built_bundle
     def test_real_bundle_is_pinned_and_yields_the_sealed_policy(self) -> None:

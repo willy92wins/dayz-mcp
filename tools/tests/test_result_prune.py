@@ -410,7 +410,7 @@ GENERIC_SCALAR_OWNERS = {
     "user_id": ({"ui_click"}, 0),
     "delivered": ({"key_press"}, 0),
     "dik": ({"key_press"}, 0),
-    "requested": ({"player_respawn"}, 0),
+    "requested": ({"player_respawn", "player_respawn_survivor"}, 0),
     "action": (
         {
             "action_use",
