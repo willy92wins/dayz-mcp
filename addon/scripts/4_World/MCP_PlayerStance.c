@@ -592,7 +592,9 @@ modded class PlayerBase
 		bool wasFromIud;
 		bool releaseAfterApply;
 		int ackRequestId;
+		bool cancelWasOverdue;
 		ownerReadyToApply = false;
+		cancelWasOverdue = false;
 		if (m_MCPStanceWaitingApplyAck)
 		{
 			if (m_MCPStanceAppliedConnGen == 0 || MCPConnGenValue() != m_MCPStanceAppliedConnGen)
@@ -627,21 +629,24 @@ modded class PlayerBase
 			}
 			else
 			{
-				m_MCPStanceCancelElapsedS += pDt;
+				cancelWasOverdue = false;
 				if (m_MCPStanceCancelElapsedS > MCP_STANCE_CANCEL_TIMEOUT_S)
 				{
+					cancelWasOverdue = true;
+				}
+				m_MCPStanceCancelElapsedS += pDt;
+				if (!cancelWasOverdue && m_MCPStanceCancelElapsedS > MCP_STANCE_CANCEL_TIMEOUT_S)
+				{
 					// M-1: a missing cancel ack is NOT evidence that the owner did
-					// not apply. Only a real owner cancel IUD (or a conn-gen change)
-					// raises m_MCPStanceOwnerClosedFloor, so a late matching start
-					// IUD still reaches applied_after_close and the server applies.
-					if (m_MCPStanceCancelRequestId > m_MCPStanceOwnerAckedFloor)
-					{
-						m_MCPStanceOwnerAckedFloor = m_MCPStanceCancelRequestId;
-					}
+					// not apply, and it is not an owner ack either. Log once and
+					// keep CancelOutstanding (busy), m_MCPStanceCancelRequestId and
+					// m_MCPStanceOwnerAckedFloor untouched: only a real owner cancel
+					// IUD (OnInputUserDataProcess), identity loss (above) or a
+					// reconnect (OnReconnect, new conn gen) resolves it. Until then
+					// MCPStanceBusyNow() stays true, so no new request can replace
+					// this one and a late matching start IUD still reaches
+					// applied_after_close instead of request_mismatch.
 					Print("[DayZ_MCP] MCPStance request=" + m_MCPStanceCancelRequestId.ToString() + " reason=no_cancel_ack");
-					m_MCPStanceCancelOutstanding = false;
-					m_MCPStanceCancelRequestId = 0;
-					m_MCPStanceCancelElapsedS = 0;
 				}
 			}
 		}
