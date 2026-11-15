@@ -240,6 +240,29 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("extra_key", {"extra": None}, (False, "bad_args")),
         ("extra_mode", {"mode": "close"}, (False, "bad_args")),
     ),
+    "ui_menu_set": (
+        ("valid_open", {"menu": "map", "open": True}, (True, None)),
+        ("valid_close", {"menu": "map", "open": False}, (True, None)),
+        ("missing_menu", {"open": True}, (False, "bad_args")),
+        ("missing_open", {"menu": "map"}, (False, "bad_args")),
+        ("unknown_menu", {"menu": "inventory", "open": True}, (False, "bad_args")),
+        ("empty_menu", {"menu": "", "open": True}, (False, "bad_args")),
+        ("open_int", {"menu": "map", "open": 1}, (False, "bad_args")),
+        ("open_string", {"menu": "map", "open": "true"}, (False, "bad_args")),
+        ("extra_key", {"menu": "map", "open": True, "extra": None}, (False, "bad_args")),
+    ),
+    "ui_map_set": (
+        ("valid_scale", {"scale": 1.5}, (True, None)),
+        ("valid_center", {"center": [100.0, 200.0]}, (True, None)),
+        ("valid_both", {"scale": 0.5, "center": [100.0, 200.0]}, (True, None)),
+        ("missing_both", {}, (False, "bad_args")),
+        ("scale_zero", {"scale": 0}, (False, "bad_args")),
+        ("scale_negative", {"scale": -1.0}, (False, "bad_args")),
+        ("scale_string", {"scale": "1"}, (False, "bad_args")),
+        ("center_one", {"center": [100.0]}, (False, "bad_args")),
+        ("center_three", {"center": [1.0, 2.0, 3.0]}, (False, "bad_args")),
+        ("extra_key", {"scale": 1.0, "extra": None}, (False, "bad_args")),
+    ),
     "restore_gameplay": (
         ("valid_empty", {}, (True, None)),
         ("extra_mode", {"mode": "restore"}, (False, "bad_args")),
@@ -248,6 +271,13 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
     "player_respawn": (
         ("valid_empty", {}, (True, None)),
         ("extra_random", {"random": True}, (False, "bad_args")),
+    ),
+    "player_respawn_survivor": (
+        ("valid", {"survivor_type": "SurvivorM_Manua"}, (True, None)),
+        ("missing", {}, (False, "bad_args")),
+        ("extra_key", {"survivor_type": "SurvivorM_Manua", "extra": None}, (False, "bad_args")),
+        ("non_string", {"survivor_type": 1}, (False, "bad_args")),
+        ("mod_class", {"survivor_type": "SurvivorM_Mod"}, (False, "bad_args")),
     ),
     "key_press": (
         ("valid_esc", {"dik": 1}, (True, None)),

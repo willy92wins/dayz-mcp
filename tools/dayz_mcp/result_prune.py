@@ -144,6 +144,10 @@ PRUNABLE_FIELDS = (
     "chat_read",
     # ui_pause fills it with menu_id_before and menu_id_after, also on pause_not_opened (726c).
     "ui_pause",
+    # ui_menu_set fills it with the menu read-back, also on its errors (d4b4).
+    "ui_menu",
+    # ui_map_set fills it with the MapWidget read-back, also on its errors (d4b4).
+    "ui_map",
     # lease_close / lease_close_client fill it with the close census (§2.16).
     "lease_close",
     # dev_free_camera_set fills it with active_before and active_after, also on
@@ -194,7 +198,7 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "user_id": frozenset({"ui_click"}),
     "delivered": frozenset({"key_press"}),
     "dik": frozenset({"key_press"}),
-    "requested": frozenset({"player_respawn"}),
+    "requested": frozenset({"player_respawn", "player_respawn_survivor"}),
     "action": frozenset({
         "action_use",
         "action_use_door",

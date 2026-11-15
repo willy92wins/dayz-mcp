@@ -1218,7 +1218,7 @@ class PlayerTraceMessagesTest(unittest.TestCase):
     def test_the_reply_is_prunable_and_kept_for_its_verb(self) -> None:
         # The 165a/5a21/7f5d scene refs follow cursor_ids.
         self.assertEqual(
-            result_prune.PRUNABLE_FIELDS[-22:],
+            result_prune.PRUNABLE_FIELDS[-24:],
             (
                 FIELD,
                 "direction",
@@ -1240,6 +1240,8 @@ class PlayerTraceMessagesTest(unittest.TestCase):
                 "gameplay",
                 "chat_read",
                 "ui_pause",
+                "ui_menu",
+                "ui_map",
                 "lease_close",
                 "dev_free_camera",
             ),
