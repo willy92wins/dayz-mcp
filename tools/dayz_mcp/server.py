@@ -11450,7 +11450,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Request a local-player respawn through the "
         "same character-selection, death-screen, menu, and mission teardown sequence as "
-        "vanilla InGameMenu.GameRespawn. Without survivor_type the respawn is random as before. "
+        "vanilla InGameMenu.GameRespawn. Vanilla respawns only a dead, unconscious or restrained "
+        "player, and the server kills an unconscious or restrained one to respawn it. With or "
+        "without survivor_type, a living, conscious, unrestrained local player is refused as "
+        "player_alive_conscious and nothing changes (player_kill first for a new body); a client "
+        "bridge older than this release answers ok/requested instead and nothing happens. "
+        "Without survivor_type the respawn is random as before. "
         "survivor_type, one of the 31 vanilla survivor classes "
         f"({', '.join(VANILLA_SURVIVOR_TYPES)}), asks vanilla's custom respawn for that class. "
         "The server honours it only in respawn mode CUSTOM (cfggameplay or serverDZ.cfg "

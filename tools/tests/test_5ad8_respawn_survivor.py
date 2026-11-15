@@ -120,8 +120,19 @@ class _CharData:
 
 
 class _Player:
+    # Dead: the state vanilla respawns. A living, conscious, free player is
+    # refused before anything changes (tests/test_player_respawn_alive.py).
     def __init__(self, log: list) -> None:
         self._log = log
+
+    def IsAlive(self) -> bool:
+        return False
+
+    def IsUnconscious(self) -> bool:
+        return False
+
+    def IsRestrained(self) -> bool:
+        return False
 
     def SimulateDeath(self, flag: bool) -> None:
         self._log.append(("SimulateDeath", flag))
