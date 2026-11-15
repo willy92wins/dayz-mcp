@@ -18,6 +18,8 @@ from tests._addon_paths import addon_root
 from tests.fence_helpers import INST_SERVER, PID_SERVER, bound_queue
 
 
+REPO = _TOOLS_DIR.parent
+CHANGELOG = REPO / "CHANGELOG.md"
 BRIDGE = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 MESSAGES = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
 CARE = addon_root() / "scripts" / "4_World" / "MCP_PlayerCare.c"
@@ -212,13 +214,13 @@ class PlayerSetStanceSourceTest(unittest.TestCase):
             self.bridge, "protected bool DispatchPlayerSetStance(MCPCommand command, MCPResult result)"
         )
         self.method = _method_body(
-            self.care, "string MCPSetStanceServer(string stance, bool recover)"
+            self.stance, "string MCPSetStanceServer(string stance, bool recover)"
         )
         self.begin = _method_body(
             self.stance, "string MCPStanceBegin(string stance, bool recover)"
         )
         self.apply = _method_body(
-            self.stance, "protected void MCPStanceOnCommandHandler()"
+            self.stance, "protected void MCPStanceOnCommandHandler(float pDt)"
         )
         self.verify = _method_body(
             self.stance, "void MCPStanceVerify()"
@@ -243,6 +245,8 @@ class PlayerSetStanceSourceTest(unittest.TestCase):
         self.assertNotIn("StartCommand_Move()", self.stance)
         self.assertNotIn("StartCommand_Move()", self.dispatch)
         self.assertIn("DayZPlayerSyncJunctures.SendPlayerUnconsciousness(this, false)", self.begin)
+        self.assertNotIn("MCPSetStanceServer", re.sub(r"//[^\n]*", "", self.care))
+        self.assertNotIn("MCPStanceBegin(", re.sub(r"//[^\n]*", "", self.care))
         self.assertIn("GetMovementState(state)", self.care)
         self.assertIn("m_iStanceIdx", self.care)
         self.assertIn("DayZPlayerConstants.STANCEIDX_ERECT", self.care)
@@ -287,15 +291,15 @@ class PlayerSetStanceSourceTest(unittest.TestCase):
         self.assertIn("MCPStanceCancel(\"no_owner_ack\")", self.stance)
         self.assertIn("MCPStanceCancel(\"timeout\")", self.stance)
         self.assertIn("m_MCPStanceCancelOutstanding", self.stance)
-        self.assertIn('MCPStanceCancel("expired")', self.stance)
+        self.assertNotIn('MCPStanceCancel("expired")', self.stance)
         self.assertIn("m_MCPStanceCancelRequestId", self.stance)
-        self.assertIn("if (m_MCPStanceCancelOutstanding)", self.begin)
-        self.assertLess(self.begin.index("if (m_MCPStanceCancelOutstanding)"), self.begin.index("SendPlayerUnconsciousness"))
+        self.assertIn("if (MCPStanceBusyNow())", self.begin)
+        self.assertLess(self.begin.index("if (MCPStanceBusyNow())"), self.begin.index("SendPlayerUnconsciousness"))
         self.assertIn("if (hadUnlock)", self.stance)
         self.assertIn("if (!hadRequest)", self.stance)
         self.assertIn("override void OnReconnect()", self.stance)
-        self.assertIn("m_MCPStanceRequestId <= m_MCPStanceClosedFloor", self.stance)
-        self.assertIn("CallLater(MCPStanceVerify, 1500, false)", self.apply)
+        self.assertIn("m_MCPStanceRequestId <= m_MCPStanceOwnerClosedFloor", self.stance)
+        self.assertIn("m_MCPStanceVerifyArmed = true", self.apply)
         self.assertIn(" observed=", self.stance)
         self.assertIn("stanceReport.requested = stanceWanted", self.dispatch)
         self.assertIn("stanceReport.applied = stanceError == """, self.dispatch)
@@ -323,6 +327,188 @@ class PlayerSetStanceSourceTest(unittest.TestCase):
             result_prune.PRUNABLE_FIELDS.index("player_set_stance"),
             result_prune.PRUNABLE_FIELDS.index("player_move"),
         )
+
+
+class PlayerSetStanceM1RegressionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.stance = STANCE.read_text(encoding="utf-8")
+
+    def test_case_a_begin_busy_while_request_in_flight(self) -> None:
+        begin = _method_body(self.stance, "string MCPStanceBegin(string stance, bool recover)")
+        busy = _method_body(self.stance, "protected bool MCPStanceBusyNow()")
+        self.assertLess(begin.index('return "bad_args"'), begin.index("MCPStanceBusyNow()"))
+        self.assertLess(begin.index("MCPStanceBusyNow()"), begin.index("IsAlive()"))
+        self.assertLess(begin.index("MCPStanceBusyNow()"), begin.index("SendPlayerUnconsciousness"))
+        for token in (
+            "m_MCPStancePending",
+            "m_MCPStanceWaitingOwner",
+            "m_MCPStanceCancelOutstanding",
+            "m_MCPStanceUnlock",
+            "m_MCPStanceSendWanted",
+            "m_MCPStanceCancelWanted",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, busy)
+
+    def test_case_b_server_close_never_drops_an_owner_applied_start(self) -> None:
+        iud = _method_body(
+            self.stance,
+            "override bool OnInputUserDataProcess(int userDataType, ParamsReadContext ctx)",
+        )
+        cancel = _method_body(self.stance, "void MCPStanceCancel(string reason)")
+        close_srv = _method_body(self.stance, "bool MCPStanceCloseServer(int connGen)")
+        handler = _method_body(self.stance, "protected void MCPStanceOnCommandHandler(float pDt)")
+
+        self.assertNotIn('MCPStanceCancel("expired")', iud)
+        self.assertNotIn("GetTickTime", iud)
+        self.assertIn("reason=applied_after_close", iud)
+        self.assertIn("if (requestId <= m_MCPStanceClosedFloor)", iud)
+        self.assertLess(
+            iud.index("if (requestId <= m_MCPStanceOwnerClosedFloor)"),
+            iud.index("if (requestId != m_MCPStanceRequestId || stanceId != m_MCPStanceId)"),
+        )
+        self.assertLess(
+            iud.index("if (requestId != m_MCPStanceRequestId || stanceId != m_MCPStanceId)"),
+            iud.index("if (requestId == m_MCPStanceAcceptedId)"),
+        )
+        self.assertLess(
+            iud.index("if (requestId == m_MCPStanceAcceptedId)"),
+            iud.index("reason=applied_after_close"),
+        )
+        self.assertLess(
+            iud.index("reason=applied_after_close"),
+            iud.index("m_MCPStanceFromIud = true"),
+        )
+
+        guard = "if (GetGame() && GetGame().IsMultiplayer() && m_MCPStanceFromIud && GetIdentity())"
+        self.assertIn(guard, cancel)
+        self.assertLess(cancel.index(guard), cancel.index("m_MCPStancePending = false"))
+        self.assertIn('MCPStanceCancel("no_owner_ack")', handler)
+        self.assertIn('MCPStanceCancel("lease_close")', close_srv)
+
+    def test_case_c_owner_decides_timeouts_on_sim_time(self) -> None:
+        self.assertNotIn("GetTickTime", self.stance)
+        self.assertNotIn("CallLater", self.stance)
+        cmd = _method_body(
+            self.stance,
+            "override void CommandHandler(float pDt, int pCurrentCommandID, bool pCurrentCommandFinished)",
+        )
+        handler = _method_body(self.stance, "protected void MCPStanceOnCommandHandler(float pDt)")
+        self.assertIn("MCPStanceOnCommandHandler(pDt);", cmd)
+        self.assertIn("m_MCPStanceElapsedS += pDt;", handler)
+        self.assertIn("m_MCPStanceUnlockElapsedS += pDt;", handler)
+        self.assertIn("m_MCPStanceVerifyElapsedS += pDt;", handler)
+        pending_tail = handler[handler.index("if (!m_MCPStancePending)") :]
+        self.assertIn("IsMultiplayer()", pending_tail)
+        self.assertIn("GetIdentity()", pending_tail)
+        self.assertIn("m_MCPStanceFromIud", pending_tail)
+        self.assertIn('MCPStanceCancel("owner_gone")', pending_tail)
+        self.assertIn('MCPStanceCancel("timeout")', pending_tail)
+        self.assertNotIn("m_MCPStanceRequestId <= m_MCPStanceClosedFloor", pending_tail)
+
+
+class PlayerSetStanceShouldTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.stance = STANCE.read_text(encoding="utf-8")
+
+    def test_s1_owner_sends_and_pends_only_in_command_handler(self) -> None:
+        on_rpc = _method_body(
+            self.stance,
+            "override void OnRPC(PlayerIdentity sender, int rpc_type, ParamsReadContext ctx)",
+        )
+        send_iud = _method_body(self.stance, "protected bool MCPStanceSendOwnerIud()")
+        handler = _method_body(self.stance, "protected void MCPStanceOnCommandHandler(float pDt)")
+        cancel = _method_body(self.stance, "void MCPStanceCancel(string reason)")
+
+        self.assertNotIn("m_MCPStancePending = true", on_rpc)
+        self.assertNotIn("MCPStanceSendOwnerIud()", on_rpc)
+        self.assertIn("m_MCPStanceSendWanted = true;", on_rpc)
+        self.assertIn("m_MCPStancePending = false;", on_rpc)
+        self.assertNotIn("m_MCPStancePending", send_iud)
+        self.assertLess(send_iud.index("message.Send();"), send_iud.index("return true;"))
+        self.assertIn("else if (MCPStanceSendOwnerIud())", handler)
+        self.assertLess(
+            handler.index("else if (MCPStanceSendOwnerIud())"),
+            handler.index("m_MCPStancePending = true;"),
+        )
+        self.assertLess(
+            handler.index("m_MCPStancePending = true;"),
+            handler.index("moveCmd.ForceStance(m_MCPStanceId);"),
+        )
+        self.assertNotIn("MCPStanceSendCancelIud()", cancel)
+        self.assertIn("m_MCPStanceCancelWanted = true;", cancel)
+        self.assertIn("MCPStanceOwnerCancelStep();", handler)
+
+    def test_s2_verify_logs_only_and_cancel_has_no_force_stance(self) -> None:
+        verify = _method_body(self.stance, "void MCPStanceVerify()")
+        cancel = _method_body(self.stance, "void MCPStanceCancel(string reason)")
+        for forbidden in ("ForceStance", "TryUnlock", "CallLater"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, verify)
+        self.assertIn("GetGame().IsServer()", verify)
+        self.assertNotIn("ForceStance", cancel)
+
+    def test_s3_guards_order_and_stop_hand_event(self) -> None:
+        soft = _method_body(self.stance, "protected string MCPStanceSoftRefusal(int stanceId)")
+        apply_refusal = _method_body(self.stance, "protected string MCPStanceApplyRefusal()")
+        handler = _method_body(self.stance, "protected void MCPStanceOnCommandHandler(float pDt)")
+
+        self.assertIn("IsProcessing()", soft)
+        self.assertIn("IsRunning()", soft)
+        self.assertLess(apply_refusal.index("IsAlive()"), apply_refusal.index("IsUnconscious()"))
+        self.assertLess(
+            apply_refusal.index("IsUnconscious()"),
+            apply_refusal.index("MCPStanceHardRefusal"),
+        )
+        self.assertLess(
+            apply_refusal.index("MCPStanceHardRefusal"),
+            apply_refusal.index("MCPStanceSoftRefusal"),
+        )
+        self.assertIn("StopHandEvent();", handler)
+        self.assertLess(
+            handler.index("StopHandEvent();"),
+            handler.index("moveCmd.ForceStance(m_MCPStanceId);"),
+        )
+
+    def test_s4_try_unlock_keeps_flag_without_move_command(self) -> None:
+        try_unlock = _method_body(self.stance, "protected void MCPStanceTryUnlock()")
+        handler = _method_body(self.stance, "protected void MCPStanceOnCommandHandler(float pDt)")
+        self.assertIn("if (!moveCmd)", try_unlock)
+        self.assertLess(
+            try_unlock.index("if (!moveCmd)"),
+            try_unlock.index("moveCmd.ForceStance(-1);"),
+        )
+        self.assertLess(
+            try_unlock.index("if (!moveCmd)"),
+            try_unlock.index("m_MCPStanceUnlock = false;"),
+        )
+        self.assertEqual(
+            self.stance.count("MCPStanceTryUnlock()"),
+            handler.count("MCPStanceTryUnlock()") + 1,
+        )
+
+    def test_s5_changelog_has_no_control_bytes(self) -> None:
+        raw = CHANGELOG.read_bytes()
+        bad = [byte for byte in raw if byte < 0x20 and byte not in (0x09, 0x0A, 0x0D)]
+        self.assertEqual(bad, [])
+        text = raw.decode("utf-8")
+        self.assertIn("refused as `busy`", text)
+
+    def test_s6_tool_description_matches_two_sided_contract(self) -> None:
+        app, _runtime = server.build_app(
+            server.ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
+        )
+        tools = {tool.name: tool for tool in app._tool_manager.list_tools()}
+        desc = tools[CMD].description
+        self.assertNotIn("CallLater", desc)
+        self.assertNotIn("This is a server command", desc)
+        self.assertIn("StartCommand_Move is never called", desc)
+        self.assertIn("applied=true", desc)
+        self.assertIn("before", desc)
+        self.assertIn("observed=", desc)
+        self.assertIn("busy", desc)
+        self.assertIn("rpc_failed", desc)
+        self.assertIn(server.GODMODE_DEFAULT_LINE, desc)
 
 
 if __name__ == "__main__":

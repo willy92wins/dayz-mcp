@@ -528,12 +528,8 @@ modded class PlayerBase
 		return -1;
 	}
 
-	// player_set_stance: queues a both-sides ForceStance (MCP_PlayerStance.c)
-	// and does not write health or shock, kill, or respawn. recover=true may
-	// request DayZPlayerSyncJunctures.SendPlayerUnconsciousness(this, false).
-	// StartCommand_Move is never called from this tool.
-	string MCPSetStanceServer(string stance, bool recover)
-	{
-		return MCPStanceBegin(stance, recover);
-	}
+	// MCPSetStanceServer lives in MCP_PlayerStance.c: Enforce compiles the
+	// World module file by file (lowercased name order), and a modded
+	// PlayerBase layer here cannot call MCPStanceBegin, which a later file
+	// declares (in game @ c5408fd2: mcp_playercare.c(537) Undefined function).
 };
