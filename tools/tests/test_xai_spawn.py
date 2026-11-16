@@ -1460,6 +1460,61 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
                 self.assertEqual((lines[0].get("event"), lines[0].get("reason")), want, lines[0])
                 self.assertEqual(lines[0].get("decision"), "release_queued", lines[0])
 
+    def test_the_late_answer_line_survives_a_failure_inside_the_lock_section(self) -> None:
+        # Sol r2 finding 1: the late abandon is decided inside store_result's
+        # lock section. A step later in that same section raising must not
+        # lose the line, and the error still reaches the caller. Mutant killed:
+        # the audit guarded only around the flushes after the lock section.
+        for step in ("_note_hold_result_locked", "_publish_due_deferred_closes_locked"):
+            with self.subTest(step=step):
+                self._writers = []
+                state, now, command_id = self._delivered_spawn()
+                audit = self._real_audit(state)
+                now[0] += 0.126
+                with patch.object(state, step, side_effect=RuntimeError("injected")):
+                    with self.assertRaises(RuntimeError):
+                        state.store_result({"id": command_id, "ok": 1}, instance=INST_SERVER)
+                self.assertEqual(len(self._queued_release_ids(state)), 1)
+                lines = self._release_lines(audit, command_id)
+                self.assertEqual(
+                    [(e.get("event"), e.get("decision")) for e in lines],
+                    [("late_answer_abandon", "release_queued")],
+                    self._lines(audit),
+                )
+
+    def test_several_lines_deferred_under_one_outer_lock_are_all_written(self) -> None:
+        # Sol r2 finding 3: a batch, not one deferred line. Two spawns reach
+        # their deadline while a caller holds the broker lock; each line is
+        # written exactly once at the next lock-free point. Mutant killed: a
+        # flush that writes only the first pending line.
+        now = [1000.0]
+        state = _bound_state(clock=lambda: now[0])
+        _announce(state)
+        audit = self._real_audit(state)
+        status, first = _enqueue_spawn(state, operation_timeout_s=0.05)
+        self.assertEqual(status, 200, first)
+        status, second = state.enqueue_command(
+            SPAWN, dict(SPAWN_WIRE, spawn_token="c" * 32), peer="server",
+            identity_payload=self._identity_payload(state),
+            lease_token=state._spawn_lease["lease_token"],  # type: ignore[attr-defined]
+            operation_timeout_s=0.05,
+        )
+        self.assertEqual(status, 200, second)
+        ids = (first["id"], second["id"])
+        self.assertEqual(sorted(c["id"] for c in _delivered(state)), sorted(ids))
+        now[0] += 0.06
+        with state._lock:  # type: ignore[attr-defined]
+            state.status_snapshot()
+        state.status_snapshot()
+        self.assertEqual(len(self._queued_release_ids(state)), 2)
+        for command_id in ids:
+            lines = self._release_lines(audit, command_id)
+            self.assertEqual(
+                [(e.get("event"), e.get("reason")) for e in lines],
+                [("abandon_release", "deadline")],
+                self._lines(audit),
+            )
+
     def test_no_line_when_no_release_is_decided(self) -> None:
         # Guard (passes on main): a spawn dropped before delivery, and an
         # answer read before the abandon and the deadline, queue no release

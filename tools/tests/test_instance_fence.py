@@ -474,6 +474,34 @@ class ResultFenceAuditFileTest(unittest.TestCase):
         state.status_snapshot()
         self.assertEqual(state._pending_audits, [])
 
+    def test_a_result_leaves_nothing_pending_once_it_returns(self) -> None:
+        # Sol r2 finding 2: with a writer, late_result_same_instance (raised
+        # under the lock on every plain result of the peer bound first) was
+        # kept until the next poll, status read or audit write, so results
+        # with none of those in between (the bridge's retries, for example)
+        # grew the pending list. Mutant killed: store_result leaving what its
+        # own lock section deferred.
+        with TemporaryDirectory() as tmp:
+            state = loopback.ServerState("k")
+            root = Path(tmp)
+            paths = RuntimePaths(
+                root, root / "audit", root / "coordination.json", root / "runs.json"
+            )
+            writer = _LockCheckedWriter(state, JsonlAuditWriter(paths, "gen-fence-audit"))
+            state.audit_writer = writer
+            _bind(state, INST_S1, "server", 2002)
+            _bind(state, INST_C1, "client", 2001)
+            self.assertNotEqual(state._bindings[INST_S1].epoch, state._station_epoch)
+            status, payload = state.enqueue_command("world_time_get", {}, peer="server")
+            self.assertEqual(status, 200, payload)
+            for retry in (False, True, True, True):
+                result_status, result = state.store_result(
+                    {"id": payload["id"], "ok": 1}, instance=INST_S1, retry=retry
+                )
+                self.assertEqual(result_status, 200, result)
+                self.assertEqual(state._pending_audits, [])
+            self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+
 
 class EnforceBridgeFenceTest(unittest.TestCase):
     def test_reload_key_after_failure_does_not_assign_peer_instance(self) -> None:
