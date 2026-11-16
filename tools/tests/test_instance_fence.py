@@ -609,8 +609,9 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         command_id: int,
         epochs: tuple[object, object, object],
         decision: str,
+        instance: str = INST_C1,
     ) -> None:
-        prefix = instance_fence_mod.instance_prefix(INST_C1)
+        prefix = instance_fence_mod.instance_prefix(instance)
         self.assertEqual(line.get("command_id"), command_id, line)
         self.assertEqual(
             (line.get("expected_instance_prefix"), line.get("origin_instance_prefix")),
@@ -722,6 +723,75 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
                     lines[0], command_id, (sealed_epoch, station_epoch, binding_epoch), "accepted"
                 )
                 self.assertNotIn(INST_C1, audit_file.read_text(encoding="utf-8"))
+                self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+
+    def test_a_late_result_of_a_server_or_offline_binding_is_audited(self) -> None:
+        # The other positive tests here use a client binding (last review of
+        # PR 419, P3). The trigger does not look at the role: a server
+        # binding, and an offline instance (one process that polls for both
+        # peers), write the same line when their own binding moved on. Once
+        # the binding is BOUND again, a command sealed after the move writes
+        # nothing. Mutants killed: the trigger limited to client bindings;
+        # offline bindings left out; server bindings left out.
+        cases = (
+            ("server", INST_S1, 1001, "server", "world_time_get"),
+            ("offline", INST_OFF, 3003, "server", "world_time_get"),
+            ("offline", INST_OFF, 3003, "client", "camera_get"),
+        )
+        for role, instance, pid, peer, cmd in cases:
+            with self.subTest(role=role, peer=peer), TemporaryDirectory() as tmp:
+                clock = FakeClock()
+                state, writer, audit_file = self._state(tmp, clock)
+                _bind(state, instance, role, pid)
+                status, payload = state.enqueue_command(cmd, {}, peer=peer)
+                self.assertEqual(status, 200, payload)
+                command_id = payload["id"]
+                _status, poll = state.record_poll(peer, instance=instance, source_pid=pid)
+                self.assertEqual([c.get("id") for c in poll["commands"]], [command_id])
+                sealed_epoch = state._bindings[instance].epoch
+                self.assertEqual(state._command_fence[command_id][1], sealed_epoch)
+                state.record_poll(peer, instance=instance, source_pid=9999)
+                self.assertEqual(
+                    state._bindings[instance].state, instance_fence_mod.BINDING_AMBIGUOUS
+                )
+                if role == "server":
+                    # The client bound after it moves the station epoch only.
+                    _bind(state, INST_C1, "client", 2001)
+                binding_epoch = state._bindings[instance].epoch
+                station_epoch = state._station_epoch
+                self.assertNotEqual(binding_epoch, sealed_epoch)
+                result_status, result = state.store_result(
+                    {"id": command_id, "ok": 1, "value": 9}, instance=instance
+                )
+                self.assertEqual(
+                    (result_status, result),
+                    (200, {"ok": True, "id": command_id, "ok_value": 1}),
+                )
+                self.assertEqual((state.take_result(command_id) or {}).get("value"), 9)
+                clock.advance(loopback.PEER_RECONNECT_GAP_S + 1.0)
+                state.record_poll(peer, instance=instance, source_pid=pid)
+                self.assertEqual(
+                    state._bindings[instance].state, instance_fence_mod.BINDING_BOUND
+                )
+                status, fresh = state.enqueue_command(cmd, {}, peer=peer)
+                self.assertEqual(status, 200, fresh)
+                _status, poll = state.record_poll(peer, instance=instance, source_pid=pid)
+                self.assertEqual([c.get("id") for c in poll["commands"]], [fresh["id"]])
+                result_status, result = state.store_result(
+                    {"id": fresh["id"], "ok": 1, "value": 6}, instance=instance
+                )
+                self.assertEqual((result_status, result.get("discarded")), (200, None), result)
+                lines = self._lines(audit_file)
+                self.assertEqual(len(lines), 1, _audit_lines(audit_file))
+                self._assert_line(
+                    lines[0],
+                    command_id,
+                    (sealed_epoch, station_epoch, binding_epoch),
+                    "accepted",
+                    instance=instance,
+                )
+                self.assertEqual(writer.attempted.count(self.EVENT), 1, writer.attempted)
+                self.assertNotIn(instance, audit_file.read_text(encoding="utf-8"))
                 self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
 
     def test_a_late_result_after_the_binding_is_gone_has_no_binding_epoch(self) -> None:
