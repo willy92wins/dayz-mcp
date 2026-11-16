@@ -23,11 +23,14 @@ cursor at the press (a button seen down after it was not, or on the first poll)
 and not while the button stays down; a foreground window that is not
 one of the run's is not a steal and becomes the person window; a run window that
 takes the front is one steal, and then intent is checked first (a switch key seen
-within INTENT_S, or a mouse button seen within INTENT_S with the window read at
-the press not the person window), then a previous window to give back to, then presence (idle_s
-greater than PRESENT_S), then the attempt limit, then identity (verify), and only
-then the give-back. Intent and presence are heuristics: PRESENT_S is a presence
-heuristic, not a promise that Windows grants the foreground.
+within INTENT_S, or a mouse button seen within INTENT_S with the window under the
+cursor read when the steal is detected not the person window), then a previous
+window to give back to, then presence (idle_s greater than PRESENT_S), then the
+attempt limit, then identity (verify), and only then the give-back. The window
+at the press is recorded with its provenance, for the evidence only, and what a
+rule based on the press would have decided is logged, never applied. Intent and
+presence are heuristics: PRESENT_S is a presence heuristic, not a promise that
+Windows grants the foreground.
 
 Win32 callables are injectable so tests never touch the desktop.
 """
@@ -222,6 +225,10 @@ class FocusGuard:
         self._last_key: float | None = None
         self._press_at: float | None = None
         self._press_window: int | None = None
+        self._press_person: int | None = None
+        self._press_released = False
+        self._press_longest_gap = 0.0
+        self._prev_poll_at: float | None = None
         self._mouse_was_down = False
         self._log: list[dict] = []
         self._dropped = 0
@@ -282,7 +289,7 @@ class FocusGuard:
         now = self.clock()
         with self._lock:
             self._add_pids_locked(pids, now, foreground_before)
-            self._log_arm_locked(now, arm_delay_s)
+            self._log_arm_locked(arm_delay_s)
 
     def extend(
         self,
@@ -298,7 +305,7 @@ class FocusGuard:
                     return False
                 self._add_pids_locked(pids, now, foreground_before)
                 self._attempts = 0
-                self._log_arm_locked(now, arm_delay_s)
+                self._log_arm_locked(arm_delay_s)
                 return True
 
     def _at_s(self, now: float) -> float:
@@ -321,9 +328,7 @@ class FocusGuard:
             self._dropped += 1
         return entry
 
-    def _log_arm_locked(
-        self, now: float, arm_delay_s: float | None
-    ) -> None:
+    def _log_arm_locked(self, arm_delay_s: float | None) -> None:
         if arm_delay_s is None:
             delay: float | None = None
         else:
@@ -333,7 +338,7 @@ class FocusGuard:
                 delay = None
         entry = {
             "kind": "arm",
-            "at_s": self._at_s(now),
+            "at_s": self._at_s(self.clock()),
             "arm_delay_s": delay,
             "front_at_arm": self._category(
                 self._read_foreground(), self._person
@@ -381,12 +386,22 @@ class FocusGuard:
             if self._end is not None and now >= self._end:
                 self.disarm("window_elapsed")
                 return
+            gap = 0.0 if self._prev_poll_at is None else now - self._prev_poll_at
+            self._prev_poll_at = now
             mouse_down = bool(self.fns.mouse_down())
+            is_press = mouse_down and not self._mouse_was_down
+            if is_press:
+                self._press_at = now
+                self._press_window = self._read_cursor()
+                self._press_person = self._person
+                self._press_released = False
+                self._press_longest_gap = 0.0
+            elif self._press_at is not None:
+                self._press_longest_gap = max(self._press_longest_gap, gap)
+                if not mouse_down:
+                    self._press_released = True
             if mouse_down:
                 self._last_mouse = now
-                if not self._mouse_was_down:
-                    self._press_at = now
-                    self._press_window = self._read_cursor()
             self._mouse_was_down = mouse_down
             if self.fns.switch_keys_down():
                 self._last_key = now
@@ -414,9 +429,11 @@ class FocusGuard:
             press_window = (
                 self._press_window if self._press_window is not None else 0
             )
-            switched = key_recent or (mouse_recent and press_window != prev)
             detect = self._read_cursor()
-            old_switched = key_recent or (mouse_recent and detect != prev)
+            switched = key_recent or (mouse_recent and detect != prev)
+            press_rule_switched = key_recent or (
+                mouse_recent and press_window != prev
+            )
             if key_recent:
                 input_kind = "key"
             elif mouse_recent:
@@ -426,7 +443,7 @@ class FocusGuard:
             steal_entry: dict = {
                 "kind": "steal",
                 "at_s": self._at_s(now),
-                "outcome": "failed",
+                "outcome": "pending",
                 "input": input_kind,
                 "key_age_s": (
                     round(now - self._last_key, 2)
@@ -448,8 +465,23 @@ class FocusGuard:
                     if self._press_at is not None
                     else None
                 ),
+                "click_held": (
+                    not self._press_released
+                    if self._press_at is not None
+                    else None
+                ),
+                "click_person_changed": (
+                    prev != self._press_person
+                    if self._press_at is not None
+                    else None
+                ),
+                "poll_gap_s": (
+                    round(self._press_longest_gap, 2)
+                    if self._press_at is not None
+                    else None
+                ),
                 "detect_window": self._category(detect, prev),
-                "old_user_switched": bool(old_switched),
+                "press_rule_switched": bool(press_rule_switched),
             }
             self._append_log(steal_entry)
             if switched:

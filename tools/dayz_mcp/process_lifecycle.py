@@ -5040,6 +5040,11 @@ class ProcessLifecycle:
 
     def _remember_focus_launch(self, run_id: str) -> None:
         try:
+            with self._launch_focus_lock:
+                self._focus_launch_at.pop(run_id, None)
+        except Exception:
+            pass
+        try:
             launched_at = self.focus_clock()
         except Exception:
             return
