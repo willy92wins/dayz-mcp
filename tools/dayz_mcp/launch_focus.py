@@ -664,7 +664,11 @@ class FocusGuard:
             front = self._read_foreground()
             if front != 0 and self._read_pid(front) not in pids:
                 departed = True
-            if any(value is False for value in accepted.values()):
+            if any(
+                accepted.get(window) is False
+                for window, pid in windows
+                if self._owned(window, pid)
+            ):
                 return departed
             if not any(
                 self._unresolved(window, pid, accepted)
