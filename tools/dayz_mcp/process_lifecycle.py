@@ -2536,7 +2536,8 @@ class ProcessLifecycle:
         # inbox 5c8e: per-session launch-focus preference and the one guard a
         # run may have. Both live in daemon memory only.
         self._launch_focus_by_session: dict[str, tuple[str, float]] = {}
-        self._launch_focus_by_run: dict[str, tuple[str, float]] = {}
+        self._launch_focus_by_run: dict[str, tuple[str, float, str | None]] = {}
+        self._focus_decided: dict[str, str] = {}
         self._focus_guards: dict[str, launch_focus.FocusGuard] = {}
         self._launch_focus_lock = threading.Lock()
         self.focus_fns = focus_fns
@@ -4929,25 +4930,39 @@ class ProcessLifecycle:
             return mode
         return launch_focus.DEFAULT_FOCUS
 
-    def _launch_focus_for_run(self, client: ClientIdentity, run_id: str) -> str:
+    def _launch_focus_for_run(
+        self, client: ClientIdentity, run_id: str, lease_id: str | None = None
+    ) -> str:
         key = _steam_preparation_key(client.session_id)
+        now = self.focus_clock()
         with self._launch_focus_lock:
+            mode: str | None = None
             stored = self._launch_focus_by_session.pop(key, None)
             if stored is not None:
-                mode, stored_at = stored
-                if self.focus_clock() - stored_at <= _LAUNCH_FOCUS_TTL_S:
+                fresh_mode, stored_at = stored
+                if now - stored_at <= _LAUNCH_FOCUS_TTL_S:
+                    mode = fresh_mode
                     self._launch_focus_by_run.pop(run_id, None)
-                    self._launch_focus_by_run[run_id] = (mode, self.focus_clock())
+                    self._launch_focus_by_run[run_id] = (mode, now, lease_id)
                     while len(self._launch_focus_by_run) > _LAUNCH_FOCUS_BOUND:
                         oldest = next(iter(self._launch_focus_by_run))
                         del self._launch_focus_by_run[oldest]
-                    return mode
-            kept = self._launch_focus_by_run.get(run_id)
-            if kept is not None:
-                mode, bound_at = kept
-                if self.focus_clock() - bound_at <= _LAUNCH_FOCUS_TTL_S:
-                    return mode
-            return launch_focus.DEFAULT_FOCUS
+            if mode is None:
+                kept = self._launch_focus_by_run.get(run_id)
+                if kept is not None:
+                    kept_mode, bound_at, kept_lease = kept
+                    if (
+                        now - bound_at <= _LAUNCH_FOCUS_TTL_S
+                        and kept_lease == lease_id
+                    ):
+                        mode = kept_mode
+            if mode is None:
+                mode = launch_focus.DEFAULT_FOCUS
+            self._focus_decided[run_id] = mode
+            while len(self._focus_decided) > _LAUNCH_FOCUS_BOUND:
+                oldest = next(iter(self._focus_decided))
+                del self._focus_decided[oldest]
+            return mode
 
     def stop_launch_focus(self, reason: str = "daemon_stopping") -> None:
         try:
@@ -4986,7 +5001,15 @@ class ProcessLifecycle:
         foreground_before: int = 0,
     ) -> None:
         try:
-            if self._launch_focus_for_run(client, run_id) != "keep":
+            with self._launch_focus_lock:
+                decided = self._focus_decided.pop(run_id, None)
+            if decided is not None:
+                mode = decided
+            else:
+                mode = self._launch_focus_for_run(client, run_id)
+                with self._launch_focus_lock:
+                    self._focus_decided.pop(run_id, None)
+            if mode != "keep":
                 self._disarm_launch_focus(run_id, "take")
                 return
             fns = self._focus_fns()
@@ -4994,17 +5017,23 @@ class ProcessLifecycle:
                 return
             with self._launch_focus_lock:
                 guard = self._focus_guards.get(run_id)
-                new = guard is None or not guard.armed
+                new = True
+                if guard is not None and guard.armed:
+                    if guard.extend(
+                        {pid} | self._focus_live_pids(run_id),
+                        foreground_before=foreground_before,
+                    ):
+                        new = False
                 if new:
                     guard = launch_focus.FocusGuard(
                         fns=fns,
                         verify=lambda p, r=run_id: self._focus_pid_owned(r, p),
                     )
                     self._focus_guards[run_id] = guard
-                guard.add_pids(
-                    {pid} | self._focus_live_pids(run_id),
-                    foreground_before=foreground_before,
-                )
+                    guard.add_pids(
+                        {pid} | self._focus_live_pids(run_id),
+                        foreground_before=foreground_before,
+                    )
             if new:
                 starter = self.focus_start or _start_focus_thread
                 try:
@@ -5606,7 +5635,7 @@ class ProcessLifecycle:
                         cancel=cancel,
                     )
                 focus_before = self._focus_foreground()
-                self._launch_focus_for_run(client, run_id)
+                self._launch_focus_for_run(client, run_id, authority[1])
                 launched_at = self._server_start_clock()
                 try:
                     launched = self.launcher(

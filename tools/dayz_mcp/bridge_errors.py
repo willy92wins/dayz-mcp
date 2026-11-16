@@ -132,6 +132,8 @@ _REMOTE_ERROR_CODES = frozenset({
     "run_not_adopted",
     "window_not_found",
     "foreground_failed",
+    # 5c8e: the launch focus guard's give-back has not settled yet.
+    "focus_guard_busy",
 })
 _STALE_TICKET_ERRORS = frozenset({"ticket_expired", "ticket_invalid"})
 _STALE_LEASE_ERRORS = frozenset({"lease_expired", "lease_invalid"})

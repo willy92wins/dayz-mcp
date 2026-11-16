@@ -47,6 +47,7 @@ PRESENT_S = 200.0
 INTENT_S = 0.75
 MAX_RETURNS = 3
 SETTLE_S = 1.0
+UNRESOLVED_S = 10.0
 SW_MINIMIZE = 6
 SW_SHOWNOACTIVATE = 4
 GA_ROOT = 2
@@ -192,6 +193,7 @@ class FocusGuard:
         intent_s: float = INTENT_S,
         max_returns: int = MAX_RETURNS,
         settle_s: float = SETTLE_S,
+        unresolved_s: float = UNRESOLVED_S,
     ) -> None:
         self.fns = fns
         self.clock = clock
@@ -203,6 +205,7 @@ class FocusGuard:
         self.intent_s = intent_s
         self.max_returns = max_returns
         self.settle_s = settle_s
+        self.unresolved_s = unresolved_s
         self._lock = threading.RLock()
         self._disarm_lock = threading.RLock()
         self._idle = threading.Event()
@@ -218,6 +221,8 @@ class FocusGuard:
         self._attempts = 0
         self._first_steal_s: float | None = None
         self._reason: str | None = None
+        self._pending: dict[int, dict[str, object]] = {}
+        self._give_back_running = False
         self._counters = {
             "steals": 0,
             "returned": 0,
@@ -255,32 +260,88 @@ class FocusGuard:
     def add_pids(self, pids: Iterable[int], *, foreground_before: int = 0) -> None:
         now = self.clock()
         with self._lock:
-            for pid in pids:
+            self._add_pids_locked(pids, now, foreground_before)
+
+    def extend(self, pids: Iterable[int], *, foreground_before: int = 0) -> bool:
+        now = self.clock()
+        with self._lock:
+            with self._disarm_lock:
+                if self._reason is not None:
+                    return False
+                self._add_pids_locked(pids, now, foreground_before)
+                self._attempts = 0
+                return True
+
+    def _add_pids_locked(
+        self, pids: Iterable[int], now: float, foreground_before: int
+    ) -> None:
+        for pid in pids:
+            try:
+                value = int(pid)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                self._pids.add(value)
+                self._added_at[value] = now
+        if self._start is None:
+            self._start = now
+        self._end = now + self.watch_s
+        if (
+            self._person is not None
+            and self.fns.window_pid(self._person) in self._pids
+        ):
+            self._person = None
+        if foreground_before:
+            before = int(foreground_before)
+            if self.fns.window_pid(before) not in self._pids:
+                self._person = before
+
+    def _refresh_idle_locked(self) -> None:
+        if not self._give_back_running and not self._pending:
+            self._idle.set()
+        else:
+            self._idle.clear()
+
+    def _process_pending_locked(self, now: float) -> None:
+        for window in list(self._pending):
+            entry = self._pending.get(window)
+            if entry is None:
+                continue
+            pid = entry["pid"]
+            try:
+                owned = (
+                    self.fns.is_window(window)
+                    and self.fns.window_pid(window) == pid
+                )
+            except Exception:
+                owned = False
+            if not owned:
+                del self._pending[window]
+                continue
+            fg = int(self.fns.foreground() or 0)
+            if fg != 0 and fg != window:
+                entry["departed"] = True
+            if entry["departed"] and entry["accepted"] is True:
                 try:
-                    value = int(pid)
-                except (TypeError, ValueError):
+                    iconic = self.fns.is_iconic(window)
+                except Exception:
+                    iconic = False
+                if not iconic:
+                    del self._pending[window]
                     continue
-                if value > 0:
-                    self._pids.add(value)
-                    self._added_at[value] = now
-            if self._start is None:
-                self._start = now
-            self._end = now + self.watch_s
-            if (
-                self._person is not None
-                and self.fns.window_pid(self._person) in self._pids
-            ):
-                self._person = None
-            if foreground_before:
-                before = int(foreground_before)
-                if self.fns.window_pid(before) not in self._pids:
-                    self._person = before
+            if now - entry["time"] >= self.unresolved_s:
+                del self._pending[window]
+                if not entry["restore_failed"]:
+                    self._counters["restore_failed"] += 1
+                    self.disarm("restore_failed")
+        self._refresh_idle_locked()
 
     def step(self) -> None:
         with self._lock:
+            now = self.clock()
+            self._process_pending_locked(now)
             if not self.armed:
                 return
-            now = self.clock()
             if self._end is not None and now >= self._end:
                 self.disarm("window_elapsed")
                 return
@@ -339,6 +400,7 @@ class FocusGuard:
             if not restored:
                 self._counters["restore_failed"] += 1
                 self.disarm("restore_failed")
+            self._refresh_idle_locked()
 
     def run(
         self,
@@ -349,7 +411,9 @@ class FocusGuard:
         last = self.clock()
         while True:
             self.step()
-            if not self.armed:
+            with self._lock:
+                pending = bool(self._pending)
+            if not self.armed and not pending:
                 return self.summary()
             if live_pids is not None and self.clock() - last >= check_every_s:
                 last = self.clock()
@@ -358,28 +422,30 @@ class FocusGuard:
                     live = {int(pid) for pid in live_pids()}
                 except Exception:
                     self.disarm("alive_unknown")
-                    return self.summary()
-                with self._lock:
-                    keep = {
-                        pid
-                        for pid in self._pids
-                        if pid in live or self._added_at.get(pid, 0.0) >= read_at
-                    }
-                    self._pids = keep
-                    for pid in list(self._added_at):
-                        if pid not in keep:
-                            del self._added_at[pid]
-                    if not self._pids:
-                        self.disarm("run_ended")
-                        return self.summary()
+                else:
+                    with self._lock:
+                        keep = {
+                            pid
+                            for pid in self._pids
+                            if pid in live or self._added_at.get(pid, 0.0) >= read_at
+                        }
+                        self._pids = keep
+                        for pid in list(self._added_at):
+                            if pid not in keep:
+                                del self._added_at[pid]
+                        if not self._pids:
+                            self.disarm("run_ended")
             self.sleep(self.poll_s)
 
     def give_back(
         self, fg: int, prev: int, pids: set[int], verified_pid: int
     ) -> tuple[str, bool, bool]:
-        self._idle.clear()
-        minimized: list[tuple[int, int]] = []
+        with self._lock:
+            self._give_back_running = True
+            self._refresh_idle_locked()
+        minimized: list[tuple[int, int, float]] = []
         departed = False
+        departed_windows: set[int] = set()
         outcome = "failed"
         restored = False
         try:
@@ -391,19 +457,27 @@ class FocusGuard:
                 with self._disarm_lock:
                     if self._reason is not None:
                         break
-                    if not any(window == target for window, _ in minimized):
+                    if not any(
+                        window == target for window, _pid, _at in minimized
+                    ):
                         if current_pid != target_pid or target_pid not in pids:
                             break
                         try:
                             self.fns.minimize(target)
                         except Exception:
                             break
-                        minimized.append((target, target_pid))
+                        minimized.append((target, target_pid, self.clock()))
                 cur = int(self.fns.foreground() or 0)
+                if cur != 0:
+                    for window, _pid, _at in minimized:
+                        if cur != window:
+                            departed_windows.add(window)
                 if cur != 0 and self.fns.window_pid(cur) not in pids:
                     departed = True
                     break
-                cur_minimized = any(window == cur for window, _ in minimized)
+                cur_minimized = any(
+                    window == cur for window, _pid, _at in minimized
+                )
                 if cur != 0 and not cur_minimized and self.clock() < deadline:
                     cur_pid = self.fns.window_pid(cur)
                     if self._verified(cur_pid):
@@ -416,18 +490,22 @@ class FocusGuard:
                 self.sleep(min(self.poll_s, left))
         finally:
             accepted: dict[int, bool | None] = {}
-            for window, pid in minimized:
+            for window, pid, _at in minimized:
                 accepted[window] = self._show_if_owned(window, pid)
             if not any(value is False for value in accepted.values()):
-                self._observe(minimized, accepted)
-            for window, pid in minimized:
+                self._observe(
+                    [(window, pid) for window, pid, _at in minimized], accepted
+                )
+            for window, pid, _at in minimized:
                 if self._window_resolved(window, pid, accepted.get(window)):
                     continue
                 accepted[window] = self._show_if_owned(window, pid)
-            self._observe(minimized, accepted)
+            self._observe(
+                [(window, pid) for window, pid, _at in minimized], accepted
+            )
             restored = all(
                 self._window_resolved(window, pid, accepted.get(window))
-                for window, pid in minimized
+                for window, pid, _at in minimized
             )
             front = int(self.fns.foreground() or 0)
             if front == prev:
@@ -436,7 +514,33 @@ class FocusGuard:
                 outcome = "elsewhere"
             else:
                 outcome = "failed"
-            self._idle.set()
+            with self._lock:
+                self._give_back_running = False
+                for window, pid, requested_at in minimized:
+                    try:
+                        owned = (
+                            self.fns.is_window(window)
+                            and self.fns.window_pid(window) == pid
+                        )
+                    except Exception:
+                        owned = False
+                    if not owned:
+                        self._pending.pop(window, None)
+                        continue
+                    if window in departed_windows:
+                        self._pending.pop(window, None)
+                        continue
+                    counted = not self._window_resolved(
+                        window, pid, accepted.get(window)
+                    )
+                    self._pending[window] = {
+                        "pid": pid,
+                        "time": requested_at,
+                        "departed": False,
+                        "accepted": accepted.get(window),
+                        "restore_failed": counted,
+                    }
+                self._refresh_idle_locked()
         return outcome, restored, departed
 
     def _show_if_owned(self, window: int, pid: int) -> bool | None:
