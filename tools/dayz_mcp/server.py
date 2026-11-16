@@ -37,6 +37,7 @@ from dayz_mcp import (
     dayz_test_tool,
     host_config,
     inbox,
+    launch_focus,
     native_launcher_transaction,
     orphan_guard,
     playbook_tool as playbook_tool_mod,
@@ -2820,6 +2821,11 @@ class ClientRuntime:
             result.pop("lease_id", None)
         return result
 
+    async def lifecycle_focus(self, mode: str) -> dict[str, Any]:
+        return await self._control_with_lazy_spawn(
+            self._control.lifecycle_focus, mode
+        )
+
     async def lifecycle_reap(self, run_id: str) -> dict[str, Any]:
         result = await self._control_with_lazy_spawn(
             self._control.lifecycle_reap, run_id
@@ -3718,6 +3724,21 @@ CLIENT_START_BUDGET_DESCRIPTION = (
     "covers the slowest startup MEASURED - itself a lower bound, since the "
     "process starts before its log header and polls after the mission exists."
 )
+FOCUS_DESCRIPTION = (
+    'focus="keep" (default) or focus="take". DayZ brings its own window to '
+    "the front a few seconds after it starts. With focus=\"keep\", for 300 s "
+    "after each launch of the run the daemon takes the foreground away from "
+    "a DayZ window that grabbed it while a person was using the PC (input in "
+    "the last 200 s) and did not switch to DayZ themselves (Alt, a Windows "
+    "key, or a click on the DayZ window just before): it minimizes that "
+    "window, so Windows activates the next window (best effort the one the "
+    "person had), then shows it again without activating it; at most 3 times "
+    "per launch. A DayZ window without the foreground can give "
+    "capture_screenshot a frozen frame and stream textures for minutes; "
+    "dayz_test_foreground asks Windows to bring the client forward and ends "
+    'this for the run. focus="take" leaves the foreground to DayZ, as '
+    "before. The answer reports focus: {mode, set}."
+)
 
 
 def _describe_run_parameters(app: FastMCP, tool_name: str) -> None:
@@ -3748,6 +3769,7 @@ def _describe_run_parameters(app: FastMCP, tool_name: str) -> None:
         ("server_adminlog", SERVER_ADMINLOG_DESCRIPTION),
         ("client_start_budget_s", CLIENT_START_BUDGET_DESCRIPTION),
         ("takeover", TAKEOVER_DESCRIPTION),
+        ("focus", FOCUS_DESCRIPTION),
     ):
         prop = props.get(field)
         if not isinstance(prop, dict):
@@ -6667,7 +6689,23 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Cycle: session_release (if holding) -> dayz_test_run -> "
-            "session_acquire_wait. Queue and run an approved DayZ test "
+            "session_acquire_wait. "
+            'focus="keep" (default) or focus="take". DayZ brings its own '
+            "window to the front a few seconds after it starts. With "
+            'focus="keep", for 300 s after each launch of the run the daemon '
+            "takes the foreground away from a DayZ window that grabbed it "
+            "while a person was using the PC (input in the last 200 s) and "
+            "did not switch to DayZ themselves (Alt, a Windows key, or a "
+            "click on the DayZ window just before): it minimizes that "
+            "window, so Windows activates the next window (best effort the "
+            "one the person had), then shows it again without activating it; "
+            "at most 3 times per launch. A DayZ window without the "
+            "foreground can give capture_screenshot a frozen frame and "
+            "stream textures for minutes; dayz_test_foreground asks Windows "
+            "to bring the client forward and ends this for the run. "
+            'focus="take" leaves the foreground to DayZ, as before. The '
+            "answer reports focus: {mode, set}. "
+            "Queue and run an approved DayZ test "
             "project; lease ownership and heartbeat remain internal to the "
             "tool. Release any held session lease before calling. The run it "
             "leaves has no owner (RUNNING_IDLE). session_acquire_wait adopts "
@@ -6839,6 +6877,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         mod_dir: StrictStr | None = None,
         client_start_budget_s: StrictFloat | StrictInt | None = None,
         on_busy: StrictStr = "fail",
+        focus: StrictStr = "keep",
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         caller_stale = await _observe_caller_tool_registry_stale(
@@ -6866,6 +6905,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(
                 "bad_dayz_test_request:server_adminlog_requires_server"
             )
+        if focus not in launch_focus.FOCUS_MODES:
+            raise ToolError("bad_dayz_test_request:invalid_focus")
         client = _client_runtime()
         # The runtime's monotonic clock (ClientRuntime(time_fn=...)), the one
         # its own call deadlines use; it holds the box wait budget below.
@@ -6942,6 +6983,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         progress_cb=report,
                         auto_remediate_steam=auto_remediate_steam,
                         client_start_budget_s=budget_s,
+                        focus=focus,
                         project_mod_override=project_mod_override,
                         connect_host=connect_host,
                         mod_dir=mod_dir,

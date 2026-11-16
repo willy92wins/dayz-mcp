@@ -204,6 +204,7 @@ class _Runtime(Protocol):
     async def bridge_status_payload(self) -> dict[str, object]: ...
     async def lifecycle_close(self, run_id: str) -> dict[str, object]: ...
     async def lifecycle_reap(self, run_id: str) -> dict[str, object]: ...
+    async def lifecycle_focus(self, mode: str) -> dict[str, object]: ...
 
 
 _ProgressCallback = Callable[[str, str | None], Awaitable[None]]
@@ -232,6 +233,20 @@ async def _open_client_dumps(
         return None
     token = response.get("token") if isinstance(response, dict) else None
     return token if isinstance(token, str) and token else None
+
+
+async def _set_launch_focus(runtime: object, mode: str) -> bool:
+    """Tell the daemon this session's launch-focus mode (inbox 5c8e).
+
+    A separate call, never a sealed request key. The runtime method is called
+    directly, not through getattr; a runtime without it raises AttributeError,
+    caught below. Any failure only costs the guard: the launch goes on.
+    """
+    try:
+        response = await runtime.lifecycle_focus(mode)  # type: ignore[attr-defined]
+    except Exception:
+        return False
+    return isinstance(response, dict) and response.get("ok") is True
 
 
 async def _bind_client_dumps(runtime: object, token: str | None, run_id: object) -> None:
@@ -2336,6 +2351,7 @@ async def _execute_request(
     vpp: object | None = None,
     client_dump_roots: list[str] | None = None,
     server_wait_s: int | None = None,
+    focus: str = "keep",
 ) -> dict[str, object]:
     stdout = bytearray()
     stderr = bytearray()
@@ -2343,6 +2359,8 @@ async def _execute_request(
     client_dump_baseline: ClientDumpBaseline | None = None
     client_dump_token: str | None = None
     server_boot_floor_s: float | None = None
+    focus_reached = False
+    focus_set = False
 
     async def report(stage: str, message: str | None = None) -> None:
         if progress_cb is not None:
@@ -2373,6 +2391,15 @@ async def _execute_request(
             )
         await report("executing", None)
 
+    async def execution_started() -> None:
+        # inbox 5c8e: the launch leaves the queue here, before the worker's
+        # /lifecycle/start reaches the daemon. The mode travels on its own
+        # route, so the sealed request keeps no focus key.
+        nonlocal focus_reached, focus_set
+        focus_reached = True
+        focus_set = await _set_launch_focus(runtime, focus)
+        await report_executing()
+
     def capture(channel: str, chunk: bytes) -> None:
         if channel not in {"stdout", "stderr"} or type(chunk) is not bytes:
             _fail("terminal_invalid")
@@ -2393,7 +2420,7 @@ async def _execute_request(
         output_sink=capture,
         max_wait_s=None,
         queue_progress_cb=report_queued,
-        execution_started_cb=report_executing,
+        execution_started_cb=execution_started,
     )
     await report("finalizing", None)
     terminal = parse_worker_terminal(bytes(stdout), bytes(stderr), exit_code)
@@ -2600,6 +2627,8 @@ async def _execute_request(
     )
     if public_mode == "stop":
         result.pop("client_exit", None)
+    if focus_reached:
+        result["focus"] = {"mode": focus, "set": focus_set}
     if not terminal.ok and terminal.error_code == WORKER_INTERNAL_FAILURE:
         # 4fdf: the stage is known here, the exception class is not (see above).
         result["reason"] = WORKER_INTERNAL_FAILURE_REASON
@@ -3211,6 +3240,7 @@ async def execute_dayz_test_run(
     navmesh_data_server: bool = False,
     server_adminlog: bool = False,
     client_start_budget_s: float | None = None,
+    focus: str = "keep",
     project_mod_override: bool = False,
     connect_host: str | None = None,
     mod_dir: str | None = None,
@@ -3563,6 +3593,7 @@ async def execute_dayz_test_run(
                 vpp=vpp,
                 client_dump_roots=client_dump_roots,
                 server_wait_s=server_wait_s,
+                focus=focus,
             )
             if display is not None and result.get("status") == "succeeded":
                 result["session_idle_s"] = display.session_idle_s

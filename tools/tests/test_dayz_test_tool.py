@@ -1271,9 +1271,11 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "display_timeout_s",
                 "server_boot",
                 "client_exit",
+                "focus",
             },
         )
         self.assertIsNone(result["storage_recovery_reason"])
+        self.assertEqual(result["focus"], {"mode": "keep", "set": False})
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["phase"], "completed")
         self.assertEqual(result["run_id"], RUN_ID)
@@ -1430,9 +1432,11 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "display_timeout_s",
                 "server_boot",
                 "client_exit",
+                "focus",
             },
         )
         self.assertIsNone(result["storage_recovery_reason"])
+        self.assertEqual(result["focus"], {"mode": "keep", "set": False})
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error_code"], readiness_code)
 

@@ -30,7 +30,7 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, Callable
 
-from dayz_mcp import core, input_activity, orphan_guard, wmi_host
+from dayz_mcp import core, input_activity, launch_focus, orphan_guard, wmi_host
 from dayz_mcp.daemon_contract import build_daemon_argv, daemon_runtime_cwd
 from dayz_mcp.identity_migration import (
     RunsBackupGateError,
@@ -257,6 +257,15 @@ def validated_startup_budget_s(value: float | None = None) -> float:
     if value is None and budget <= required:
         raise RuntimeError("daemon_startup_budget_too_small")
     return budget
+
+
+def _launch_focus_fns() -> launch_focus.FocusFns | None:
+    if os.name != "nt":
+        return None
+    try:
+        return launch_focus.real_win32()
+    except (AttributeError, OSError):
+        return None
 
 
 def _noop(_message: str) -> None:
@@ -758,6 +767,7 @@ def _activate_server_coordination(
         # client replacement against the bridge at the instant of the kill.
         bridge_probe=getattr(state, "status_snapshot", None),
         daemon_generation=daemon_generation,
+        focus_fns=_launch_focus_fns(),
     )
     if recovered_lifecycle_fault is None:
         # fb-20260904-200821-dae1 part 2 (A1-F7): first, so a process the
@@ -1878,6 +1888,12 @@ def _run_daemon_body(
             if stop_declared[0]:
                 return
             stop_declared[0] = True
+        lifecycle = getattr(state, "lifecycle", None)
+        if lifecycle is not None:
+            try:
+                lifecycle.stop_launch_focus("daemon_stopping")
+            except Exception:
+                pass
         _record_daemon_stopping(
             state=state,
             daemon_generation=daemon_generation,
