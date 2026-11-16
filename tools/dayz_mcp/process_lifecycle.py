@@ -2536,7 +2536,7 @@ class ProcessLifecycle:
         # inbox 5c8e: per-session launch-focus preference and the one guard a
         # run may have. Both live in daemon memory only.
         self._launch_focus_by_session: dict[str, tuple[str, float]] = {}
-        self._launch_focus_by_run: dict[str, str] = {}
+        self._launch_focus_by_run: dict[str, tuple[str, float]] = {}
         self._focus_guards: dict[str, launch_focus.FocusGuard] = {}
         self._launch_focus_lock = threading.Lock()
         self.focus_fns = focus_fns
@@ -4937,14 +4937,17 @@ class ProcessLifecycle:
                 mode, stored_at = stored
                 if self.focus_clock() - stored_at <= _LAUNCH_FOCUS_TTL_S:
                     self._launch_focus_by_run.pop(run_id, None)
-                    self._launch_focus_by_run[run_id] = mode
+                    self._launch_focus_by_run[run_id] = (mode, self.focus_clock())
                     while len(self._launch_focus_by_run) > _LAUNCH_FOCUS_BOUND:
                         oldest = next(iter(self._launch_focus_by_run))
                         del self._launch_focus_by_run[oldest]
                     return mode
-            return self._launch_focus_by_run.get(
-                run_id, launch_focus.DEFAULT_FOCUS
-            )
+            kept = self._launch_focus_by_run.get(run_id)
+            if kept is not None:
+                mode, bound_at = kept
+                if self.focus_clock() - bound_at <= _LAUNCH_FOCUS_TTL_S:
+                    return mode
+            return launch_focus.DEFAULT_FOCUS
 
     def stop_launch_focus(self, reason: str = "daemon_stopping") -> None:
         try:
@@ -4998,7 +5001,10 @@ class ProcessLifecycle:
                         verify=lambda p, r=run_id: self._focus_pid_owned(r, p),
                     )
                     self._focus_guards[run_id] = guard
-                guard.add_pids([pid], foreground_before=foreground_before)
+                guard.add_pids(
+                    {pid} | self._focus_live_pids(run_id),
+                    foreground_before=foreground_before,
+                )
             if new:
                 starter = self.focus_start or _start_focus_thread
                 try:
@@ -5048,14 +5054,15 @@ class ProcessLifecycle:
 
     def _disarm_launch_focus(
         self, run_id: str, reason: str, wait_s: float = 0.0
-    ) -> None:
+    ) -> bool:
         with self._launch_focus_lock:
             guard = self._focus_guards.get(run_id)
         if guard is None:
-            return
+            return True
         guard.disarm(reason)
-        if wait_s > 0:
-            guard.wait_idle(wait_s)
+        if wait_s <= 0:
+            return True
+        return guard.wait_idle(wait_s)
 
     def _steam_mutation_allowed(self) -> bool | str:
         """Probe outside the lifecycle lock, then compare the captured run state."""
@@ -5599,6 +5606,7 @@ class ProcessLifecycle:
                         cancel=cancel,
                     )
                 focus_before = self._focus_foreground()
+                self._launch_focus_for_run(client, run_id)
                 launched_at = self._server_start_clock()
                 try:
                     launched = self.launcher(
@@ -8158,9 +8166,12 @@ class ProcessLifecycle:
                         )
                 if player is None:
                     return self._reject_reserved(authority, command, "client_process_gone")
-                self._disarm_launch_focus(
+                if not self._disarm_launch_focus(
                     run_id, "foreground_verb", wait_s=3.0
-                )
+                ):
+                    return self._reject_reserved(
+                        authority, command, "focus_guard_busy"
+                    )
                 windows = getattr(self, "window_fns", None)
                 fns = getattr(self, "foreground_fns", None)
                 hwnd = window_foreground.client_window(

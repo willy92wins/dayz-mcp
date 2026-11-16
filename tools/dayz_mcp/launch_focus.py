@@ -204,7 +204,7 @@ class FocusGuard:
         self.max_returns = max_returns
         self.settle_s = settle_s
         self._lock = threading.RLock()
-        self._disarm_lock = threading.Lock()
+        self._disarm_lock = threading.RLock()
         self._idle = threading.Event()
         self._idle.set()
         self._pids: set[int] = set()
@@ -387,17 +387,18 @@ class FocusGuard:
             target_pid = verified_pid
             deadline = self.clock() + self.settle_s
             while True:
-                if not self.armed:
-                    break
-                if not any(window == target for window, _ in minimized):
-                    current_pid = self.fns.window_pid(target)
-                    if current_pid != target_pid or target_pid not in pids:
+                current_pid = self.fns.window_pid(target)
+                with self._disarm_lock:
+                    if self._reason is not None:
                         break
-                    try:
-                        self.fns.minimize(target)
-                    except Exception:
-                        break
-                    minimized.append((target, target_pid))
+                    if not any(window == target for window, _ in minimized):
+                        if current_pid != target_pid or target_pid not in pids:
+                            break
+                        try:
+                            self.fns.minimize(target)
+                        except Exception:
+                            break
+                        minimized.append((target, target_pid))
                 cur = int(self.fns.foreground() or 0)
                 if cur != 0 and self.fns.window_pid(cur) not in pids:
                     departed = True
