@@ -331,6 +331,10 @@ _LATE_ANSWER_ABANDON_SOURCES = frozenset({"ai_group_spawn"})
 # unread answer. Evicting the answer from the result cache keeps the row. A
 # spawn without a deadline keeps main's path. Only ai_group_spawn.
 _UNREAD_ANSWER_RELEASE_SOURCES = frozenset({"ai_group_spawn"})
+# Releases decided for an abandoned spawn are audited as abandon_release
+# (the late answer keeps its own late_answer_abandon event). Only
+# ai_group_spawn: the other release sources keep their paths.
+_ABANDON_RELEASE_AUDIT_SOURCES = frozenset({"ai_group_spawn"})
 _FENCE_PEER_NAMES = frozenset({"server", "client"})
 _BROKER_FENCE_ERRORS = frozenset(
     {
@@ -3587,6 +3591,7 @@ class ServerState:
         self._deferred_server_closes: dict[tuple[int, str], dict[str, object]] = {}
         self._version_blocked_instances: set[str] = set()
         self._lease_close_outcomes: list[dict[str, object]] = []
+        self._pending_audits: list[dict[str, object]] = []
         self._lease_close_ignored = 0
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -5333,10 +5338,6 @@ class ServerState:
         origin: str | None,
         extra: dict[str, object] | None = None,
     ) -> None:
-        writer = self.audit_writer
-        write = getattr(writer, "write", None)
-        if not callable(write):
-            return
         payload: dict[str, object] = {
             "event": event,
             "command_id": command_id,
@@ -5345,10 +5346,76 @@ class ServerState:
         }
         if extra:
             payload.update(extra)
+        self._write_audit_payload(payload)
+
+    def _flush_pending_audits(self) -> None:
+        if not self._pending_audits:
+            return
+        writer = self.audit_writer
+        write = getattr(writer, "write", None)
+        if not callable(write):
+            if self._lock._is_owned():
+                self._pending_audits = []
+                return
+            with self._lock:
+                self._pending_audits = []
+            return
+        if self._lock._is_owned():
+            return
+        with self._lock:
+            if not self._pending_audits:
+                return
+            pending = self._pending_audits
+            self._pending_audits = []
+        for payload in pending:
+            try:
+                write(payload)
+            except Exception:
+                pass
+
+    def _write_audit_payload(self, payload: dict[str, object]) -> None:
+        writer = self.audit_writer
+        write = getattr(writer, "write", None)
+        if not callable(write):
+            return
+        if self._lock._is_owned():
+            self._pending_audits.append(payload)
+            return
+        self._flush_pending_audits()
+        writer = self.audit_writer
+        write = getattr(writer, "write", None)
+        if not callable(write):
+            return
         try:
             write(payload)
         except Exception:
             pass
+
+    def _audit_abandon_release(self, outcome: dict, reason: str) -> None:
+        info = outcome.get("release_audit") if isinstance(outcome, dict) else None
+        if not isinstance(info, dict):
+            return
+        body = info.get("body")
+        if not isinstance(body, dict):
+            return
+        status = body.get("status")
+        if status not in ("release_queued", "cleanup_degraded"):
+            return
+        payload: dict[str, object] = {
+            "event": "abandon_release",
+            "command_id": info.get("command_id"),
+            "reason": reason,
+            "answered": info.get("answered") is True,
+            "duration_s": 0.0,
+            "expected_instance_prefix": instance_prefix(
+                info.get("expected_instance")
+                if isinstance(info.get("expected_instance"), str)
+                else None
+            ),
+        }
+        payload.update(body)
+        payload["decision"] = status
+        self._write_audit_payload(payload)
 
     def touch_client(self) -> None:
         """Mark session-side (client) HTTP activity for the daemon idle watchdog."""
@@ -6544,7 +6611,10 @@ class ServerState:
             if not self._abandon_authorized_locked(row, client, presented):
                 return 403, {"error": "abandon_forbidden"}
             outcome = self._abandon_row_locked(command_id, reason, quarantine)
-        self._flush_abandon_outcome(outcome)
+        try:
+            self._flush_abandon_outcome(outcome)
+        finally:
+            self._audit_abandon_release(outcome, reason)
         return int(outcome["http_status"]), dict(outcome["body"])
 
     def _abandon_authorized_locked(
@@ -6585,6 +6655,7 @@ class ServerState:
         body: dict = {"status": "noop"}
         http_status = 200
         finish_exact: list[tuple[str, str, int]] = []
+        release_audit: dict | None = None
         if row is None:
             return {
                 "http_status": http_status,
@@ -6593,7 +6664,13 @@ class ServerState:
                 "finished_operations": finished_operations,
                 "finish_exact": finish_exact,
                 "existed": False,
+                "release_audit": None,
             }
+        # Read the fence before _forget_command_tracking_locked drops it.
+        fence_entry = self._command_fence.get(command_id)
+        fence_instance = fence_entry[0] if fence_entry is not None else None
+        answered = row.get("answered") is True
+        audited_spawn = row.get("cmd") in _ABANDON_RELEASE_AUDIT_SOURCES
         # A row kept for an unread answer: store_result already finished its
         # operation when it stored that answer.
         exact = (
@@ -6627,6 +6704,13 @@ class ServerState:
                     body = {"status": "release_queued", "release_id": release_id}
                 else:
                     body = {"status": "cleanup_degraded", "cause": cause}
+                if audited_spawn:
+                    release_audit = {
+                        "command_id": command_id,
+                        "answered": answered,
+                        "expected_instance": fence_instance,
+                        "body": dict(body),
+                    }
         else:
             body = {"status": "noop"}
         return {
@@ -6636,6 +6720,7 @@ class ServerState:
             "finished_operations": finished_operations,
             "finish_exact": finish_exact,
             "existed": True,
+            "release_audit": release_audit,
         }
 
     def _exact_operation_locked(
@@ -7218,7 +7303,7 @@ class ServerState:
             )
 
     def abandon_command(
-        self, command_id: int, reason: str = "tool_timeout"
+        self, command_id: int, reason: str = "tool_timeout", *, deadline: bool = False
     ) -> dict:
         quarantine = self._retail_quarantine_reason()
         with self._lock:
@@ -7229,7 +7314,10 @@ class ServerState:
                 else None
             )
         if outcome is not None:
-            self._flush_abandon_outcome(outcome)
+            try:
+                self._flush_abandon_outcome(outcome)
+            finally:
+                self._audit_abandon_release(outcome, "deadline" if deadline else reason)
             return dict(outcome["body"])
         # No active row. A terminal result stays where it is. A queued id that
         # never grew a row is removed without inventing a retained result.
@@ -7271,7 +7359,7 @@ class ServerState:
             ]
         abandoned = 0
         for command_id in expired:
-            body = self.abandon_command(command_id, "tool_timeout")
+            body = self.abandon_command(command_id, "tool_timeout", deadline=True)
             if isinstance(body, dict) and body.get("status") != "noop":
                 abandoned += 1
         return abandoned
@@ -7443,6 +7531,7 @@ class ServerState:
     ) -> tuple[int, dict]:
         if peer not in VALID_PEERS:
             return 400, {"error": "bad_peer"}
+        self._flush_pending_audits()
 
         # One GET, one record of this poll. The wait does not touch liveness,
         # attribution, caps, the reaper or the load counters; the body below
@@ -8080,6 +8169,26 @@ class ServerState:
     def store_result(
         self, body: dict, instance: str | None = None, *, retry: bool = False
     ) -> tuple[int, dict]:
+        pending_fence_audits: list[dict[str, object]] = []
+        try:
+            return self._store_result_impl(
+                body, instance, retry=retry, pending_fence_audits=pending_fence_audits
+            )
+        finally:
+            for payload in pending_fence_audits:
+                self._write_audit_payload(payload)
+            self._flush_pending_audits()
+
+    def _store_result_impl(
+        self,
+        body: dict,
+        instance: str | None = None,
+        *,
+        retry: bool = False,
+        pending_fence_audits: list[dict[str, object]] | None = None,
+    ) -> tuple[int, dict]:
+        if pending_fence_audits is None:
+            pending_fence_audits = []
         try:
             command_id = int(body.get("id"))
         except (TypeError, ValueError):
@@ -8122,15 +8231,18 @@ class ServerState:
                         return 409, {"error": "binding_retired"}
                 presented = instance or ""
                 if target_instance and presented != target_instance:
-                    self._audit_fence(
-                        "late_result_fenced",
-                        command_id,
-                        target_instance,
-                        instance,
-                        extra={
+                    pending_fence_audits.append(
+                        {
+                            "event": "late_result_fenced",
+                            "command_id": command_id,
+                            "expected_instance_prefix": instance_prefix(target_instance),
+                            "origin_instance_prefix": instance_prefix(instance),
                             "expected_epoch": target_epoch,
                             "origin_epoch": self._station_epoch,
-                        },
+                            "reason": "instance_mismatch",
+                            "decision": "discarded",
+                            "duration_s": 0.0,
+                        }
                     )
                     return 200, {
                         "ok": True,
@@ -8185,6 +8297,22 @@ class ServerState:
                 late_outcome = self._abandon_row_locked(
                     command_id, "tool_timeout", late_quarantine
                 )
+                if late_outcome is not None:
+                    outcome_body = dict(late_outcome["body"])
+                    pending_fence_audits.append(
+                        {
+                            "event": "late_answer_abandon",
+                            "command_id": command_id,
+                            "expected_instance_prefix": instance_prefix(
+                                late_expected
+                            ),
+                            "origin_instance_prefix": instance_prefix(instance),
+                            **outcome_body,
+                            "reason": "late_answer",
+                            "decision": str(outcome_body.get("status") or ""),
+                            "duration_s": 0.0,
+                        }
+                    )
             close_row = self._lease_closes.get(command_id)
             if close_row is not None:
                 close_handled = True
@@ -8258,23 +8386,6 @@ class ServerState:
         self._flush_close_outcomes(close_outcomes)
         if late_outcome is not None:
             self._flush_abandon_outcome(late_outcome)
-            # The abandon has no caller to report to: a release that could not
-            # be queued (cleanup_degraded and its cause) is audited here, and
-            # the lease close stays the group's backstop. The audit file takes
-            # an event only with a reason and a duration_s (JsonlAuditWriter).
-            outcome_body = dict(late_outcome["body"])
-            self._audit_fence(
-                "late_answer_abandon",
-                command_id,
-                late_expected,
-                instance,
-                extra={
-                    **outcome_body,
-                    "reason": "late_answer",
-                    "decision": str(outcome_body.get("status") or ""),
-                    "duration_s": 0.0,
-                },
-            )
 
         if owner_operation is not None and self.coordination is not None:
             ok_value = stored.get("ok")
@@ -8971,6 +9082,7 @@ class ServerState:
         return 200, {"ok": True, "ms": delay_ms}
 
     def status_snapshot(self, now: float | None = None) -> dict:
+        self._flush_pending_audits()
         if now is None:
             now = self._now()
         self.reap_expired_commands(now)

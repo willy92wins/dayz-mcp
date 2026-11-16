@@ -27,6 +27,7 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import loopback, server
 from dayz_mcp.bridge_readiness import EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
+from dayz_mcp.instance_fence import instance_prefix
 from dayz_mcp.runtime_state import JsonlAuditWriter, RuntimePaths
 from tests._addon_paths import addon_root
 from tests.enforce_subset_helpers import (
@@ -1110,6 +1111,433 @@ class AIGroupSpawnLateAnswerTest(unittest.TestCase):
         stored = state.take_result(command_id)
         self.assertIsNotNone(stored)
         self.assertEqual(stored.get("ok"), 1)
+
+
+class _LockCheckedWriter:
+    """The daemon's JsonlAuditWriter, noting each write made under the broker lock."""
+
+    def __init__(self, state: loopback.ServerState, inner: JsonlAuditWriter) -> None:
+        self._state = state
+        self._inner = inner
+        self.under_lock: list[object] = []
+
+    def write(self, event: dict) -> bool:
+        if self._state._lock._is_owned():  # type: ignore[attr-defined]
+            self.under_lock.append(event.get("event"))
+        return self._inner.write(event)
+
+
+class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
+    """Every release decided for an abandoned spawn leaves one line in the real audit file.
+
+    In game (run c3edf9a1, 2026-11-16) 8 of 11 spawns were released by the
+    caller's abandon or at the operation deadline and wrote no audit line
+    under any event name; only the 3 late answers wrote late_answer_abandon.
+    The late answer keeps that event. Every other release decision writes
+    abandon_release: reason "deadline" when the reaper abandons the spawn at
+    its operation deadline, otherwise the reason the abandoner gave (the
+    caller's /abandon, or abandon_command in process), and answered true when
+    the release drops an on-time answer nobody read. Each line goes through
+    the daemon's JsonlAuditWriter, which refuses an event without reason and
+    duration_s, and is written after the broker lock is released.
+    """
+
+    RELEASE_EVENTS = ("late_answer_abandon", "abandon_release")
+
+    def setUp(self) -> None:
+        self._writers: list[_LockCheckedWriter] = []
+
+    def _delivered_spawn(
+        self, timeout_s: float = 0.05
+    ) -> tuple[loopback.ServerState, list[float], int]:
+        now = [1000.0]
+        state = _bound_state(clock=lambda: now[0])
+        _announce(state)
+        status, spawn = _enqueue_spawn(state, operation_timeout_s=timeout_s)
+        self.assertEqual(status, 200, spawn)
+        self.assertEqual([c["id"] for c in _delivered(state)], [spawn["id"]])
+        return state, now, spawn["id"]
+
+    def _real_audit(self, state: loopback.ServerState) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        paths = RuntimePaths(root, root / "audit", root / "coordination.json", root / "runs.json")
+        writer = _LockCheckedWriter(state, JsonlAuditWriter(paths, "gen-release-audit"))
+        self._writers.append(writer)
+        state.audit_writer = writer
+        return root / "audit" / "events.jsonl"
+
+    def _lines(self, audit_file: Path) -> list[dict]:
+        for writer in self._writers:
+            self.assertEqual(
+                writer.under_lock, [], "an audit line was written under the broker lock"
+            )
+        if not audit_file.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in audit_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def _release_lines(self, audit_file: Path, command_id: int) -> list[dict]:
+        return [
+            e
+            for e in self._lines(audit_file)
+            if e.get("event") in self.RELEASE_EVENTS and e.get("command_id") == command_id
+        ]
+
+    def _answer(self, state: loopback.ServerState, command_id: int, *, retry: bool = False) -> dict:
+        status, stored = state.store_result(
+            {"id": command_id, "ok": 1}, instance=INST_SERVER, retry=retry
+        )
+        self.assertEqual(status, 200, stored)
+        return stored
+
+    def _queued_release_ids(self, state: loopback.ServerState) -> list[int]:
+        return [c["id"] for c in bound_queue(state, "server") if c.get("cmd") == RELEASE]
+
+    def _identity_payload(self, state: loopback.ServerState) -> dict:
+        client = state._spawn_client  # type: ignore[attr-defined]
+        return {
+            "platform": client.platform, "pid": client.pid, "ppid": client.ppid,
+            "started_at_utc": client.started_at_utc,
+            "session_id": client.session_id, "task_label": client.task_label,
+        }
+
+    def _request_abandon(
+        self, state: loopback.ServerState, command_id: int, reason: str
+    ) -> tuple[int, dict]:
+        return state.request_abandon(
+            identity_payload=self._identity_payload(state),
+            generation=state.daemon_generation,
+            command_id=command_id,
+            reason=reason,
+            lease_token=state._spawn_lease["lease_token"],  # type: ignore[attr-defined]
+            lease_token_supplied=True,
+        )
+
+    def _enqueue_leased(self, state: loopback.ServerState, cmd: str, args: dict):
+        return state.enqueue_command(
+            cmd, args, peer="server", identity_payload=self._identity_payload(state),
+            lease_token=state._spawn_lease["lease_token"],  # type: ignore[attr-defined]
+            operation_timeout_s=30.0,
+        )
+
+    def _assert_release_line(
+        self,
+        line: dict,
+        *,
+        command_id: int,
+        reason: str,
+        answered: bool,
+        decision: str,
+        release_id: int | None = None,
+        cause: str | None = None,
+    ) -> None:
+        self.assertEqual(line.get("event"), "abandon_release", line)
+        self.assertEqual(line.get("command_id"), command_id, line)
+        self.assertEqual(line.get("reason"), reason, line)
+        self.assertIs(line.get("answered"), answered, line)
+        self.assertEqual((line.get("decision"), line.get("status")), (decision, decision), line)
+        self.assertEqual(line.get("duration_s"), 0.0, line)
+        self.assertEqual(line.get("expected_instance_prefix"), instance_prefix(INST_SERVER), line)
+        self.assertEqual(line.get("daemon_generation"), "gen-release-audit", line)
+        if decision == "release_queued":
+            self.assertIsInstance(release_id, int)
+            self.assertEqual(line.get("release_id"), release_id, line)
+            self.assertNotIn("cause", line)
+        else:
+            self.assertEqual(line.get("cause"), cause, line)
+            self.assertNotIn("release_id", line)
+
+    def test_the_deadline_release_of_an_unanswered_spawn_is_audited(self) -> None:
+        # The reaper at the deadline, before any answer. Mutant killed: no
+        # audit on the reaper's abandon (main: no line at all).
+        state, now, command_id = self._delivered_spawn()
+        audit = self._real_audit(state)
+        now[0] += 0.06
+        state.status_snapshot()
+        release_ids = self._queued_release_ids(state)
+        self.assertEqual(len(release_ids), 1)
+        lines = self._release_lines(audit, command_id)
+        self.assertEqual(len(lines), 1, self._lines(audit))
+        self._assert_release_line(
+            lines[0], command_id=command_id, reason="deadline", answered=False,
+            decision="release_queued", release_id=release_ids[0],
+        )
+        # The answer that lands afterwards and the next reap add nothing.
+        now[0] += 0.066
+        self.assertTrue(self._answer(state, command_id).get("discarded"))
+        state.status_snapshot()
+        self.assertEqual(len(self._release_lines(audit, command_id)), 1, self._lines(audit))
+
+    def test_the_deadline_release_of_an_unread_on_time_answer_is_audited(self) -> None:
+        # An answer stored on time and never read, released at the deadline.
+        # Mutant killed: no audit on the reaper's abandon of a kept row.
+        state, now, command_id = self._delivered_spawn(timeout_s=0.3)
+        audit = self._real_audit(state)
+        now[0] += 0.171
+        self.assertNotIn("discarded", self._answer(state, command_id))
+        self.assertEqual(self._release_lines(audit, command_id), [])
+        now[0] += 0.2
+        state.status_snapshot()
+        release_ids = self._queued_release_ids(state)
+        self.assertEqual(len(release_ids), 1)
+        lines = self._release_lines(audit, command_id)
+        self.assertEqual(len(lines), 1, self._lines(audit))
+        self._assert_release_line(
+            lines[0], command_id=command_id, reason="deadline", answered=True,
+            decision="release_queued", release_id=release_ids[0],
+        )
+
+    def test_the_callers_abandon_of_an_unread_answer_is_audited_once(self) -> None:
+        # The 0.3 s control (run 0af5ea21): the caller's /abandon after an
+        # on-time answer it never read. Mutant killed: no audit on the
+        # caller's abandon (main: no line at all).
+        state, now, command_id = self._delivered_spawn(timeout_s=0.3)
+        audit = self._real_audit(state)
+        now[0] += 0.171
+        self.assertNotIn("discarded", self._answer(state, command_id))
+        status, body = self._request_abandon(state, command_id, "tool_timeout")
+        self.assertEqual((status, body.get("status")), (200, "release_queued"), body)
+        lines = self._release_lines(audit, command_id)
+        self.assertEqual(len(lines), 1, self._lines(audit))
+        self._assert_release_line(
+            lines[0], command_id=command_id, reason="tool_timeout", answered=True,
+            decision="release_queued", release_id=body.get("release_id"),
+        )
+        # A second abandon, the bridge's retried answer and a reap past the
+        # deadline add nothing.
+        self.assertEqual(
+            self._request_abandon(state, command_id, "tool_timeout"), (200, {"status": "noop"})
+        )
+        self._answer(state, command_id, retry=True)
+        now[0] += 0.2
+        state.status_snapshot()
+        self.assertEqual(len(self._release_lines(audit, command_id)), 1, self._lines(audit))
+
+    def test_the_callers_abandon_before_any_answer_is_audited(self) -> None:
+        # Mutant killed: auditing only the release of an answered row.
+        state, now, command_id = self._delivered_spawn(timeout_s=0.3)
+        audit = self._real_audit(state)
+        now[0] += 0.1
+        status, body = self._request_abandon(state, command_id, "cancelled")
+        self.assertEqual((status, body.get("status")), (200, "release_queued"), body)
+        lines = self._release_lines(audit, command_id)
+        self.assertEqual(len(lines), 1, self._lines(audit))
+        self._assert_release_line(
+            lines[0], command_id=command_id, reason="cancelled", answered=False,
+            decision="release_queued", release_id=body.get("release_id"),
+        )
+        # The answer that lands after the abandon is unknown and adds nothing.
+        now[0] += 0.4
+        self.assertTrue(self._answer(state, command_id).get("discarded"))
+        state.status_snapshot()
+        self.assertEqual(len(self._release_lines(audit, command_id)), 1, self._lines(audit))
+
+    def test_an_in_process_abandon_is_audited_with_its_reason(self) -> None:
+        # abandon_command without HTTP: the embedded server's cancelled tool
+        # and the idle warden. Mutant killed: auditing only request_abandon.
+        for reason in ("tool_cancelled", "idle_warden_timeout"):
+            with self.subTest(reason=reason):
+                state, _now, command_id = self._delivered_spawn(timeout_s=0.3)
+                audit = self._real_audit(state)
+                body = state.abandon_command(command_id, reason)
+                self.assertEqual(body.get("status"), "release_queued", body)
+                lines = self._release_lines(audit, command_id)
+                self.assertEqual(len(lines), 1, self._lines(audit))
+                self._assert_release_line(
+                    lines[0], command_id=command_id, reason=reason, answered=False,
+                    decision="release_queued", release_id=body.get("release_id"),
+                )
+
+    def test_a_deadline_release_that_cannot_be_queued_is_audited_with_its_cause(self) -> None:
+        # With the server queue full no release is queued; the line says why
+        # (the lease close stays the backstop). Mutant killed: auditing only a
+        # queued release.
+        state, now, command_id = self._delivered_spawn()
+        audit = self._real_audit(state)
+        for _ in range(loopback.MAX_QUEUE):
+            status, body = self._enqueue_leased(state, "world_time_get", {})
+            self.assertEqual(status, 200, body)
+        now[0] += 0.06
+        state.status_snapshot()
+        self.assertEqual(self._queued_release_ids(state), [])
+        lines = self._release_lines(audit, command_id)
+        self.assertEqual(len(lines), 1, self._lines(audit))
+        self._assert_release_line(
+            lines[0], command_id=command_id, reason="deadline", answered=False,
+            decision="cleanup_degraded", cause="queue_full",
+        )
+
+    def test_the_late_answer_keeps_its_one_late_answer_abandon_line(self) -> None:
+        # Guard (passes on main): the late answer is audited once, as
+        # late_answer_abandon, and the retry, the caller's abandon and the
+        # reap that follow add no abandon_release. Mutant killed: an audit in
+        # a path store_result shares, which writes two lines for one release.
+        state, now, command_id = self._delivered_spawn()
+        audit = self._real_audit(state)
+        now[0] += 0.126
+        self.assertTrue(self._answer(state, command_id).get("discarded"))
+        self._answer(state, command_id, retry=True)
+        self.assertEqual(
+            self._request_abandon(state, command_id, "tool_timeout"), (200, {"status": "noop"})
+        )
+        state.status_snapshot()
+        lines = self._release_lines(audit, command_id)
+        self.assertEqual([e.get("event") for e in lines], ["late_answer_abandon"], self._lines(audit))
+        self.assertEqual(
+            (lines[0].get("reason"), lines[0].get("decision"), lines[0].get("duration_s")),
+            ("late_answer", "release_queued", 0.0),
+        )
+
+    def test_a_caller_holding_the_broker_lock_gets_no_audit_write_under_it(self) -> None:
+        # Sol r1 finding 1: the broker lock is an RLock, so a caller that
+        # already holds it (re-entrant) still holds it after the method's own
+        # section. The line must not be written while it is held, and it is
+        # written at the next lock-free point (status_snapshot). Mutant
+        # killed: writing right after the method's own lock section.
+        for shape in ("deadline", "request_abandon", "late_answer"):
+            with self.subTest(shape=shape):
+                self._writers = []
+                state, now, command_id = self._delivered_spawn()
+                audit = self._real_audit(state)
+                if shape == "deadline":
+                    now[0] += 0.06
+                    with state._lock:  # type: ignore[attr-defined]
+                        state.status_snapshot()
+                    event, reason = "abandon_release", "deadline"
+                elif shape == "request_abandon":
+                    with state._lock:  # type: ignore[attr-defined]
+                        status, body = self._request_abandon(state, command_id, "cancelled")
+                    self.assertEqual((status, body.get("status")), (200, "release_queued"), body)
+                    event, reason = "abandon_release", "cancelled"
+                else:
+                    now[0] += 0.126
+                    with state._lock:  # type: ignore[attr-defined]
+                        self.assertTrue(self._answer(state, command_id).get("discarded"))
+                    event, reason = "late_answer_abandon", "late_answer"
+                state.status_snapshot()
+                lines = self._release_lines(audit, command_id)
+                self.assertEqual(
+                    [(e.get("event"), e.get("reason")) for e in lines], [(event, reason)], self._lines(audit)
+                )
+                self.assertEqual(len(self._queued_release_ids(state)), 1)
+
+    def test_the_line_is_written_when_a_step_after_the_decision_fails(self) -> None:
+        # Sol r1 finding 2: once the release is queued under the lock, a later
+        # failure (finish_operation_exact raising) must not lose its line, and
+        # the error still reaches the caller. Mutant killed: the audit written
+        # only after a flush that returned normally.
+        for shape in ("abandon_command", "request_abandon", "late_answer"):
+            with self.subTest(shape=shape):
+                self._writers = []
+                state, now, command_id = self._delivered_spawn()
+                audit = self._real_audit(state)
+                coordination = state.coordination
+                self.assertIsNotNone(coordination)
+                with patch.object(
+                    coordination, "finish_operation_exact", side_effect=RuntimeError("injected")
+                ):
+                    with self.assertRaises(RuntimeError):
+                        if shape == "abandon_command":
+                            state.abandon_command(command_id, "tool_cancelled")
+                        elif shape == "request_abandon":
+                            self._request_abandon(state, command_id, "cancelled")
+                        else:
+                            now[0] += 0.126
+                            state.store_result({"id": command_id, "ok": 1}, instance=INST_SERVER)
+                self.assertEqual(len(self._queued_release_ids(state)), 1)
+                lines = self._release_lines(audit, command_id)
+                self.assertEqual(len(lines), 1, self._lines(audit))
+                want = {
+                    "abandon_command": ("abandon_release", "tool_cancelled"),
+                    "request_abandon": ("abandon_release", "cancelled"),
+                    "late_answer": ("late_answer_abandon", "late_answer"),
+                }[shape]
+                self.assertEqual((lines[0].get("event"), lines[0].get("reason")), want, lines[0])
+                self.assertEqual(lines[0].get("decision"), "release_queued", lines[0])
+
+    def test_the_late_answer_line_survives_a_failure_inside_the_lock_section(self) -> None:
+        # Sol r2 finding 1: the late abandon is decided inside store_result's
+        # lock section. A step later in that same section raising must not
+        # lose the line, and the error still reaches the caller. Mutant killed:
+        # the audit guarded only around the flushes after the lock section.
+        for step in ("_note_hold_result_locked", "_publish_due_deferred_closes_locked"):
+            with self.subTest(step=step):
+                self._writers = []
+                state, now, command_id = self._delivered_spawn()
+                audit = self._real_audit(state)
+                now[0] += 0.126
+                with patch.object(state, step, side_effect=RuntimeError("injected")):
+                    with self.assertRaises(RuntimeError):
+                        state.store_result({"id": command_id, "ok": 1}, instance=INST_SERVER)
+                self.assertEqual(len(self._queued_release_ids(state)), 1)
+                lines = self._release_lines(audit, command_id)
+                self.assertEqual(
+                    [(e.get("event"), e.get("decision")) for e in lines],
+                    [("late_answer_abandon", "release_queued")],
+                    self._lines(audit),
+                )
+
+    def test_several_lines_deferred_under_one_outer_lock_are_all_written(self) -> None:
+        # Sol r2 finding 3: a batch, not one deferred line. Two spawns reach
+        # their deadline while a caller holds the broker lock; each line is
+        # written exactly once at the next lock-free point. Mutant killed: a
+        # flush that writes only the first pending line.
+        now = [1000.0]
+        state = _bound_state(clock=lambda: now[0])
+        _announce(state)
+        audit = self._real_audit(state)
+        status, first = _enqueue_spawn(state, operation_timeout_s=0.05)
+        self.assertEqual(status, 200, first)
+        status, second = state.enqueue_command(
+            SPAWN, dict(SPAWN_WIRE, spawn_token="c" * 32), peer="server",
+            identity_payload=self._identity_payload(state),
+            lease_token=state._spawn_lease["lease_token"],  # type: ignore[attr-defined]
+            operation_timeout_s=0.05,
+        )
+        self.assertEqual(status, 200, second)
+        ids = (first["id"], second["id"])
+        self.assertEqual(sorted(c["id"] for c in _delivered(state)), sorted(ids))
+        now[0] += 0.06
+        with state._lock:  # type: ignore[attr-defined]
+            state.status_snapshot()
+        state.status_snapshot()
+        self.assertEqual(len(self._queued_release_ids(state)), 2)
+        for command_id in ids:
+            lines = self._release_lines(audit, command_id)
+            self.assertEqual(
+                [(e.get("event"), e.get("reason")) for e in lines],
+                [("abandon_release", "deadline")],
+                self._lines(audit),
+            )
+
+    def test_no_line_when_no_release_is_decided(self) -> None:
+        # Guard (passes on main): a spawn dropped before delivery, and an
+        # answer read before the abandon and the deadline, queue no release
+        # and write no line. Mutant killed: auditing every abandon of a spawn.
+        now = [1000.0]
+        queued_state = _bound_state(clock=lambda: now[0])
+        _announce(queued_state)
+        queued_audit = self._real_audit(queued_state)
+        status, queued = _enqueue_spawn(queued_state, operation_timeout_s=0.3)
+        self.assertEqual(status, 200, queued)
+        self.assertEqual(queued_state.abandon_command(queued["id"], "cancelled"), {"status": "dropped"})
+        state, later, command_id = self._delivered_spawn(timeout_s=0.3)
+        audit = self._real_audit(state)
+        later[0] += 0.171
+        self._answer(state, command_id)
+        self.assertIsNotNone(state.take_result(command_id, remove=True))
+        self.assertEqual(state.abandon_command(command_id, "tool_timeout"), {"status": "noop"})
+        later[0] += 0.2
+        state.status_snapshot()
+        for audit_file in (queued_audit, audit):
+            self.assertEqual(
+                [e for e in self._lines(audit_file) if e.get("event") in self.RELEASE_EVENTS], []
+            )
 
 
 # --- E1-E5: translated Enforce dispatch -----------------------------------
