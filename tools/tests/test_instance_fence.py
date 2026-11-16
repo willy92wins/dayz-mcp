@@ -453,6 +453,27 @@ class ResultFenceAuditFileTest(unittest.TestCase):
             self.assertEqual(len(fenced), 1, lines)
             self.assertEqual(fenced[0].get("command_id"), payload["id"], fenced[0])
 
+    def test_without_an_audit_writer_nothing_is_kept_for_later(self) -> None:
+        # The embedded server never sets an audit writer. An event raised
+        # while the broker lock is held (late_result_same_instance fires on
+        # every plain result of the peer bound first) must not be kept for a
+        # later write that can never happen. Mutant killed: deferring payloads
+        # with no writer, so the pending list grows with every such result.
+        state = loopback.ServerState("k")
+        self.assertIsNone(state.audit_writer)
+        _bind(state, INST_S1, "server", 2002)
+        _bind(state, INST_C1, "client", 2001)
+        self.assertNotEqual(state._bindings[INST_S1].epoch, state._station_epoch)
+        for _ in range(3):
+            status, payload = state.enqueue_command("world_time_get", {}, peer="server")
+            self.assertEqual(status, 200, payload)
+            result_status, result = state.store_result(
+                {"id": payload["id"], "ok": 1}, instance=INST_S1
+            )
+            self.assertEqual(result_status, 200, result)
+        state.status_snapshot()
+        self.assertEqual(state._pending_audits, [])
+
 
 class EnforceBridgeFenceTest(unittest.TestCase):
     def test_reload_key_after_failure_does_not_assign_peer_instance(self) -> None:
