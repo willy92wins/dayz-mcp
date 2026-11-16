@@ -527,8 +527,12 @@ class ResultFenceAuditFileTest(unittest.TestCase):
         # or audit write, so results with none of those in between (the
         # bridge's retries, for example) grew the pending list. Re-targeted
         # with the trigger fix: late results of the same instance, since plain
-        # results raise nothing now. Mutant killed: store_result leaving what
-        # its own lock section deferred.
+        # results raise nothing now. A late result stored by a caller holding
+        # the lock waits in the pending list; the next result handled without
+        # the lock (here its retried copy, which raises no line of its own)
+        # writes it before returning, with no poll or status read in between
+        # (review r2 of PR 419). Mutant killed: store_result leaving the
+        # pending list for a later poll or status read.
         with TemporaryDirectory() as tmp:
             state = loopback.ServerState("k", time_fn=FakeClock())
             root = Path(tmp)
@@ -537,13 +541,29 @@ class ResultFenceAuditFileTest(unittest.TestCase):
             )
             writer = _LockCheckedWriter(state, JsonlAuditWriter(paths, "gen-fence-audit"))
             state.audit_writer = writer
+            audit_file = root / "audit" / "events.jsonl"
             command_id, _sealed = _late_same_instance_command(self, state)
-            for retry in (False, True, True, True):
+
+            def same_instance_lines() -> list[tuple[object, object]]:
+                return [
+                    (e.get("command_id"), e.get("decision"))
+                    for e in _audit_lines(audit_file)
+                    if e.get("event") == "late_result_same_instance"
+                ]
+
+            with state._lock:  # type: ignore[attr-defined]
                 result_status, result = state.store_result(
-                    {"id": command_id, "ok": 1}, instance=INST_C1, retry=retry
+                    {"id": command_id, "ok": 1}, instance=INST_C1
                 )
                 self.assertEqual(result_status, 200, result)
+            self.assertEqual(same_instance_lines(), [])
+            for _ in range(3):
+                result_status, result = state.store_result(
+                    {"id": command_id, "ok": 1}, instance=INST_C1, retry=True
+                )
+                self.assertEqual((result_status, result.get("duplicate")), (200, True), result)
                 self.assertEqual(state._pending_audits, [])
+                self.assertEqual(same_instance_lines(), [(command_id, "accepted")])
             self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
 
 
@@ -786,6 +806,74 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
             for line, decision in zip(lines, ("accepted", "accepted", "discarded")):
                 self._assert_line(line, command_id, epochs, decision)
             self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+
+    def test_a_first_result_sent_as_a_retry_is_audited(self) -> None:
+        # The bridge marks a resend with retry even when the first POST never
+        # reached the daemon: then that copy is the first result the daemon
+        # handles. It is stored and accepted, as on main, and writes the line.
+        # Mutant killed: skipping every result sent with retry (review r2).
+        with TemporaryDirectory() as tmp:
+            state, writer, audit_file = self._state(tmp)
+            command_id, sealed_epoch = _late_same_instance_command(self, state)
+            self.assertEqual(
+                state.store_result(
+                    {"id": command_id, "ok": 1, "value": 9}, instance=INST_C1, retry=True
+                ),
+                (200, {"ok": True, "id": command_id, "ok_value": 1}),
+            )
+            self.assertEqual((state.take_result(command_id) or {}).get("value"), 9)
+            lines = self._lines(audit_file)
+            self.assertEqual(len(lines), 1, _audit_lines(audit_file))
+            epochs = (sealed_epoch, state._station_epoch, state._bindings[INST_C1].epoch)
+            self._assert_line(lines[0], command_id, epochs, "accepted")
+            self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+
+    def test_an_unreadable_binding_is_judged_by_its_epoch(self) -> None:
+        # A poll from the bound pid whose creation time cannot be read leaves
+        # the binding UNREADABLE without moving its epoch
+        # (_note_poll_pid_locked). After an AMBIGUOUS transition the epoch has
+        # moved, and the old command's answer writes its line; with no
+        # AMBIGUOUS before, the epoch is still the sealed one and nothing is
+        # raised. Mutant killed: no event while the binding is UNREADABLE
+        # (review r2).
+        for moved in (True, False):
+            with self.subTest(moved=moved), TemporaryDirectory() as tmp:
+                state, writer, audit_file = self._state(tmp)
+                if moved:
+                    command_id, sealed_epoch = _late_same_instance_command(self, state)
+                else:
+                    _bind(state, INST_C1, "client", 2001)
+                    status, payload = state.enqueue_command("camera_get", {}, peer="client")
+                    self.assertEqual(status, 200, payload)
+                    _status, poll = state.record_poll(
+                        "client", instance=INST_C1, source_pid=2001
+                    )
+                    self.assertEqual([c.get("id") for c in poll["commands"]], [payload["id"]])
+                    command_id = payload["id"]
+                    sealed_epoch = state._bindings[INST_C1].epoch
+                epoch_before = state._bindings[INST_C1].epoch
+                with patch.object(state, "_lookup_creation_time", return_value=None):
+                    state.record_poll("client", instance=INST_C1, source_pid=2001)
+                binding = state._bindings[INST_C1]
+                self.assertEqual(binding.state, instance_fence_mod.BINDING_UNREADABLE)
+                self.assertEqual(binding.epoch, epoch_before)
+                self.assertEqual(binding.epoch != sealed_epoch, moved)
+                self.assertEqual(
+                    state.store_result(
+                        {"id": command_id, "ok": 1, "value": 9}, instance=INST_C1
+                    ),
+                    (200, {"ok": True, "id": command_id, "ok_value": 1}),
+                )
+                self.assertEqual((state.take_result(command_id) or {}).get("value"), 9)
+                lines = self._lines(audit_file)
+                if moved:
+                    self.assertEqual(len(lines), 1, _audit_lines(audit_file))
+                    epochs = (sealed_epoch, state._station_epoch, binding.epoch)
+                    self._assert_line(lines[0], command_id, epochs, "accepted")
+                else:
+                    self.assertEqual(lines, [])
+                    self.assertNotIn(self.EVENT, writer.attempted, writer.attempted)
+                self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
 
     def test_a_caller_holding_the_broker_lock_gets_no_audit_write_under_it(self) -> None:
         # The broker lock is an RLock: a caller that already holds it still
