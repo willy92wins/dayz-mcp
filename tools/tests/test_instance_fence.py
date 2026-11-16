@@ -377,6 +377,12 @@ class ResultFenceAuditFileTest(unittest.TestCase):
                 _bind(state, INST_C1, "client", 2001)
                 status, payload = state.enqueue_command("camera_get", {}, peer="client")
                 self.assertEqual(status, 200, payload)
+                # A later binding moves the station epoch past the one the
+                # command was sealed with, so the two epochs differ.
+                _bind(state, INST_S1, "server", 2002)
+                sealed_epoch = state._bindings[INST_C1].epoch
+                station_epoch = state._station_epoch
+                self.assertNotEqual(sealed_epoch, station_epoch)
                 result_status, result = state.store_result(
                     {"id": payload["id"], "ok": 1, "value": 9}, instance=presented
                 )
@@ -403,13 +409,49 @@ class ResultFenceAuditFileTest(unittest.TestCase):
                     instance_fence_mod.instance_prefix(presented),
                     line,
                 )
-                self.assertIn("expected_epoch", line)
-                self.assertIn("origin_epoch", line)
+                # Sol r1 finding 3: the values, not only the keys. Mutant
+                # killed: a wrong expected_epoch or origin_epoch.
+                self.assertEqual(
+                    (line.get("expected_epoch"), line.get("origin_epoch")),
+                    (sealed_epoch, station_epoch),
+                    line,
+                )
                 self.assertEqual(line.get("daemon_generation"), "gen-fence-audit", line)
                 self.assertNotIn(INST_C1, text)
                 if presented is not None:
                     self.assertNotIn(presented, text)
                 self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+
+    def test_a_caller_holding_the_broker_lock_gets_no_fence_audit_under_it(self) -> None:
+        # Sol r1 finding 1: the broker lock is an RLock; a caller that already
+        # holds it still holds it after store_result's own section. The line
+        # is written at the next lock-free point (status_snapshot). Mutant
+        # killed: writing right after store_result's own lock section.
+        with TemporaryDirectory() as tmp:
+            state = loopback.ServerState("k")
+            root = Path(tmp)
+            paths = RuntimePaths(
+                root, root / "audit", root / "coordination.json", root / "runs.json"
+            )
+            writer = _LockCheckedWriter(state, JsonlAuditWriter(paths, "gen-fence-audit"))
+            state.audit_writer = writer
+            _bind(state, INST_C1, "client", 2001)
+            status, payload = state.enqueue_command("camera_get", {}, peer="client")
+            self.assertEqual(status, 200, payload)
+            with state._lock:  # type: ignore[attr-defined]
+                result_status, result = state.store_result(
+                    {"id": payload["id"], "ok": 1, "value": 9}, instance=INST_C2
+                )
+            self.assertEqual((result_status, result.get("discarded")), (200, True), result)
+            self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+            state.status_snapshot()
+            self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+            audit_file = root / "audit" / "events.jsonl"
+            text = audit_file.read_text(encoding="utf-8") if audit_file.exists() else ""
+            lines = [json.loads(line) for line in text.splitlines() if line.strip()]
+            fenced = [e for e in lines if e.get("event") == "late_result_fenced"]
+            self.assertEqual(len(fenced), 1, lines)
+            self.assertEqual(fenced[0].get("command_id"), payload["id"], fenced[0])
 
 
 class EnforceBridgeFenceTest(unittest.TestCase):

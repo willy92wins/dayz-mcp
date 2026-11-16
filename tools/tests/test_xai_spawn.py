@@ -1393,6 +1393,73 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
             ("late_answer", "release_queued", 0.0),
         )
 
+    def test_a_caller_holding_the_broker_lock_gets_no_audit_write_under_it(self) -> None:
+        # Sol r1 finding 1: the broker lock is an RLock, so a caller that
+        # already holds it (re-entrant) still holds it after the method's own
+        # section. The line must not be written while it is held, and it is
+        # written at the next lock-free point (status_snapshot). Mutant
+        # killed: writing right after the method's own lock section.
+        for shape in ("deadline", "request_abandon", "late_answer"):
+            with self.subTest(shape=shape):
+                self._writers = []
+                state, now, command_id = self._delivered_spawn()
+                audit = self._real_audit(state)
+                if shape == "deadline":
+                    now[0] += 0.06
+                    with state._lock:  # type: ignore[attr-defined]
+                        state.status_snapshot()
+                    event, reason = "abandon_release", "deadline"
+                elif shape == "request_abandon":
+                    with state._lock:  # type: ignore[attr-defined]
+                        status, body = self._request_abandon(state, command_id, "cancelled")
+                    self.assertEqual((status, body.get("status")), (200, "release_queued"), body)
+                    event, reason = "abandon_release", "cancelled"
+                else:
+                    now[0] += 0.126
+                    with state._lock:  # type: ignore[attr-defined]
+                        self.assertTrue(self._answer(state, command_id).get("discarded"))
+                    event, reason = "late_answer_abandon", "late_answer"
+                state.status_snapshot()
+                lines = self._release_lines(audit, command_id)
+                self.assertEqual(
+                    [(e.get("event"), e.get("reason")) for e in lines], [(event, reason)], self._lines(audit)
+                )
+                self.assertEqual(len(self._queued_release_ids(state)), 1)
+
+    def test_the_line_is_written_when_a_step_after_the_decision_fails(self) -> None:
+        # Sol r1 finding 2: once the release is queued under the lock, a later
+        # failure (finish_operation_exact raising) must not lose its line, and
+        # the error still reaches the caller. Mutant killed: the audit written
+        # only after a flush that returned normally.
+        for shape in ("abandon_command", "request_abandon", "late_answer"):
+            with self.subTest(shape=shape):
+                self._writers = []
+                state, now, command_id = self._delivered_spawn()
+                audit = self._real_audit(state)
+                coordination = state.coordination
+                self.assertIsNotNone(coordination)
+                with patch.object(
+                    coordination, "finish_operation_exact", side_effect=RuntimeError("injected")
+                ):
+                    with self.assertRaises(RuntimeError):
+                        if shape == "abandon_command":
+                            state.abandon_command(command_id, "tool_cancelled")
+                        elif shape == "request_abandon":
+                            self._request_abandon(state, command_id, "cancelled")
+                        else:
+                            now[0] += 0.126
+                            state.store_result({"id": command_id, "ok": 1}, instance=INST_SERVER)
+                self.assertEqual(len(self._queued_release_ids(state)), 1)
+                lines = self._release_lines(audit, command_id)
+                self.assertEqual(len(lines), 1, self._lines(audit))
+                want = {
+                    "abandon_command": ("abandon_release", "tool_cancelled"),
+                    "request_abandon": ("abandon_release", "cancelled"),
+                    "late_answer": ("late_answer_abandon", "late_answer"),
+                }[shape]
+                self.assertEqual((lines[0].get("event"), lines[0].get("reason")), want, lines[0])
+                self.assertEqual(lines[0].get("decision"), "release_queued", lines[0])
+
     def test_no_line_when_no_release_is_decided(self) -> None:
         # Guard (passes on main): a spawn dropped before delivery, and an
         # answer read before the abandon and the deadline, queue no release
