@@ -780,29 +780,56 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         # also when the station epoch moved before its answer. In every setup
         # the sealed, binding and station epochs are three values. The second
         # pid presents the offline instance through the poll that delivered
-        # the command, or through its other poll, after which the delivering
-        # poll still reads BOUND while the binding is AMBIGUOUS (last review
-        # of PR 421, P3). Mutants killed: the trigger limited to client
-        # bindings; offline bindings left out; server bindings left out; the
-        # other roles audited only while AMBIGUOUS (PR 421 review r1); for
-        # offline, the station epoch deciding, or the station and binding
-        # epochs swapped in the line (PR 421 review r2); for an AMBIGUOUS
-        # offline binding, no line while a poll still reads BOUND (any poll,
-        # the server poll or the client poll; PR 421 review r3).
-        # (role, instance, pid, peer of the command, command, peer of pid 9999)
+        # the command, or through its other poll (last review of PR 421, P3).
+        # Each of the offline instance's two polls reads BOUND, AMBIGUOUS or
+        # nothing yet when the old answer comes; across the setups the answer
+        # comes in every combination an offline binding that moved on can be
+        # in, and the test checks it visited each one (review of PR 423: both
+        # polls BOUND was missing). Mutants killed: the trigger limited to
+        # client bindings; offline bindings left out; server bindings left
+        # out; the other roles audited only while AMBIGUOUS (PR 421 review
+        # r1); for offline, the station epoch deciding, or the station and
+        # binding epochs swapped in the line (PR 421 review r2); for offline,
+        # no line in any one combination of what its polls read.
+        # (role, instance, pid, peer of the command, command, peer of pid
+        # 9999, follow: the process keeps polling, so within the gap its next
+        # poll of the delivering peer reads AMBIGUOUS too, and once the
+        # binding is BOUND again its next poll of the other peer reads BOUND)
         cases = (
-            ("server", INST_S1, 1001, "server", "world_time_get", "server"),
-            ("offline", INST_OFF, 3003, "server", "world_time_get", "server"),
-            ("offline", INST_OFF, 3003, "client", "camera_get", "client"),
-            ("offline", INST_OFF, 3003, "server", "world_time_get", "client"),
-            ("offline", INST_OFF, 3003, "client", "camera_get", "server"),
+            ("server", INST_S1, 1001, "server", "world_time_get", "server", False),
+            ("offline", INST_OFF, 3003, "server", "world_time_get", "server", False),
+            ("offline", INST_OFF, 3003, "client", "camera_get", "client", False),
+            ("offline", INST_OFF, 3003, "server", "world_time_get", "client", False),
+            ("offline", INST_OFF, 3003, "client", "camera_get", "server", False),
+            ("offline", INST_OFF, 3003, "server", "world_time_get", "client", True),
+            ("offline", INST_OFF, 3003, "client", "camera_get", "server", True),
         )
+        bound = instance_fence_mod.BINDING_BOUND
+        ambiguous = instance_fence_mod.BINDING_AMBIGUOUS
+        # (server poll reads, client poll reads, binding state); None: not
+        # polled yet. Only a poll moves a binding between AMBIGUOUS and BOUND
+        # (_note_poll_pid_locked), so while it is AMBIGUOUS one poll reads
+        # AMBIGUOUS, and once it is BOUND again one reads BOUND.
+        reachable = {
+            (ambiguous, None, ambiguous),
+            (None, ambiguous, ambiguous),
+            (bound, ambiguous, ambiguous),
+            (ambiguous, bound, ambiguous),
+            (ambiguous, ambiguous, ambiguous),
+            (bound, None, bound),
+            (None, bound, bound),
+            (bound, ambiguous, bound),
+            (ambiguous, bound, bound),
+            (bound, bound, bound),
+        }
+        visited = set()
         setups = [case + (when,) for case in cases for when in ("ambiguous", "bound_again")]
-        for role, instance, pid, peer, cmd, conflict_peer, answered_while in setups:
+        for role, instance, pid, peer, cmd, conflict_peer, follow, answered_while in setups:
             with self.subTest(
                 role=role,
                 peer=peer,
                 conflict_peer=conflict_peer,
+                follow=follow,
                 answered_while=answered_while,
             ), TemporaryDirectory() as tmp:
                 clock = FakeClock()
@@ -837,6 +864,11 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
                     self.assertEqual(
                         state._peer_last_class[peer], instance_fence_mod.BINDING_BOUND
                     )
+                    if follow:
+                        _status, again = state.record_poll(
+                            peer, instance=instance, source_pid=pid
+                        )
+                        self.assertEqual((again["bind"], again["commands"]), (ambiguous, []))
                 if role == "server":
                     # The client bound after it moves the station epoch only.
                     _bind(state, INST_C1, "client", 2001)
@@ -848,7 +880,20 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
                     self._bound_again_with_a_fresh_command(
                         state, clock, instance, pid, peer, cmd
                     )
+                    if follow:
+                        _status, other = state.record_poll(
+                            conflict_peer, instance=instance, source_pid=pid
+                        )
+                        self.assertEqual((other["bind"], other["commands"]), (bound, []))
                     self.assertEqual(self._lines(audit_file), [])
+                if role == "offline":
+                    visited.add(
+                        (
+                            state._peer_last_class.get("server"),
+                            state._peer_last_class.get("client"),
+                            state._bindings[instance].state,
+                        )
+                    )
                 binding_epoch = state._bindings[instance].epoch
                 station_epoch = state._station_epoch
                 self.assertEqual(len({sealed_epoch, binding_epoch, station_epoch}), 3)
@@ -877,6 +922,7 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
                 self.assertEqual(writer.attempted.count(self.EVENT), 1, writer.attempted)
                 self.assertNotIn(instance, audit_file.read_text(encoding="utf-8"))
                 self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+        self.assertEqual(visited, reachable)
 
     def test_a_late_result_after_the_binding_is_gone_has_no_binding_epoch(self) -> None:
         # The binding was retired, then RETIRED_INSTANCE_LIMIT later
