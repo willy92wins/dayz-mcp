@@ -10518,6 +10518,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		AddCloseEntry(census, "look_at", lookActive, "look_at");
+		bool stanceActive = false;
+		if (player && player.MCPStanceActiveNow())
+		{
+			stanceActive = true;
+		}
+
+		AddCloseEntry(census, "player_stance", stanceActive, "player_stance");
 		bool cameraActive = false;
 		if (m_ActiveCam || m_CameraHandoffPending)
 		{
@@ -10960,6 +10967,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// E3 (d4b4): alongside it, close the map ui_menu_set opened,
 		// before the census reads it.
 		StopLeaseCloseMap();
+		PlayerBase stanceClosePlayer = PlayerBase.Cast(GetGame().GetPlayer());
+		if (stanceClosePlayer)
+		{
+			stanceClosePlayer.MCPStanceCancel("lease_close");
+		}
 		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(command.args);
 		if (LeaseCloseCensusSettled(census))
 		{

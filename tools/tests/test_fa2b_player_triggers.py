@@ -51,12 +51,14 @@ RECORD_ENTER_TRIGGER = "void MCPRecordEnterTrigger(ScriptedEntity trigger)"
 RECORD_LEAVE_TRIGGER = "void MCPRecordLeaveTrigger(ScriptedEntity trigger)"
 FILL = "protected void FillPlayerTriggers(PlayerBase body, MCPPlayerState state)"
 
-# Both censuses as they are on the main this branch last merged (60587ac): this change adds no name to either.
+# Both censuses as they are in the merged tree: main's census plus this
+# branch's player_set_stance (#413, sorted between player_kill and
+# player_teleport). The fa2b change itself adds no name to either census.
 EXPECTED_SERVER_CAPS = (
     "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,"
     "infected_drive,inventory_attach,inventory_give,inventory_move,lease_close,loadout_apply,"
     "loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,"
-    "object_inspect,object_resolve,object_set_health,player_godmode,player_heal,player_kill,"
+    "object_inspect,object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_set_stance,"
     "player_teleport,players_visibility,query_all_players,query_get_in_condition,query_player_state,"
     "scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,"
     "survivor_drive_release,telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,"

@@ -484,4 +484,52 @@ modded class PlayerBase
 		}
 		return count;
 	}
+
+	// Closed stance name for the current movement stance (human.c
+	// Human.GetMovementState / HumanMovementState.m_iStanceIdx,
+	// dayzplayer.c STANCEIDX_*). Raised variants collapse to the body
+	// stance. An unknown index is "unknown".
+	string MCPStanceName()
+	{
+		HumanMovementState state;
+		int stanceId;
+		state = new HumanMovementState();
+		GetMovementState(state);
+		stanceId = state.m_iStanceIdx;
+		if (stanceId == DayZPlayerConstants.STANCEIDX_ERECT || stanceId == DayZPlayerConstants.STANCEIDX_RAISEDERECT)
+		{
+			return "erect";
+		}
+		if (stanceId == DayZPlayerConstants.STANCEIDX_CROUCH || stanceId == DayZPlayerConstants.STANCEIDX_RAISEDCROUCH)
+		{
+			return "crouch";
+		}
+		if (stanceId == DayZPlayerConstants.STANCEIDX_PRONE || stanceId == DayZPlayerConstants.STANCEIDX_RAISEDPRONE)
+		{
+			return "prone";
+		}
+		return "unknown";
+	}
+
+	int MCPStanceIdFromName(string stance)
+	{
+		if (stance == "erect")
+		{
+			return DayZPlayerConstants.STANCEIDX_ERECT;
+		}
+		if (stance == "crouch")
+		{
+			return DayZPlayerConstants.STANCEIDX_CROUCH;
+		}
+		if (stance == "prone")
+		{
+			return DayZPlayerConstants.STANCEIDX_PRONE;
+		}
+		return -1;
+	}
+
+	// MCPSetStanceServer lives in MCP_PlayerStance.c: Enforce compiles the
+	// World module file by file (lowercased name order), and a modded
+	// PlayerBase layer here cannot call MCPStanceBegin, which a later file
+	// declares (in game @ c5408fd2: mcp_playercare.c(537) Undefined function).
 };

@@ -105,6 +105,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "player_godmode",
     "player_heal",
     "player_kill",
+    "player_set_stance",
     "player_teleport",
     "players_visibility",
     "query_all_players",
