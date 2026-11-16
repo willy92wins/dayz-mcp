@@ -43,7 +43,7 @@ server. It ships in `addon_expansion_ai/` and packs as
   delivered spawn's answer arrives, from the instance it was sent to, at or
   after its deadline before any reap (for example after
   `daemon_response_ambiguous`, when the caller never learned the id; the
-  broker audits that case as `late_answer_abandon`). A spawn with an
+  broker audits only that case, as `late_answer_abandon`). A spawn with an
   operation deadline whose answer was stored on time but not yet taken out
   for a caller (by the `/await` handler, with or without `remove=1`)
   counts as delivered: until then, the caller's abandon or the deadline
