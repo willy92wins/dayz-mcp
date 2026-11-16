@@ -5331,24 +5331,6 @@ class ServerState:
         except Exception:
             return None
 
-    def _audit_fence(
-        self,
-        event: str,
-        command_id: int,
-        expected: str | None,
-        origin: str | None,
-        extra: dict[str, object] | None = None,
-    ) -> None:
-        payload: dict[str, object] = {
-            "event": event,
-            "command_id": command_id,
-            "expected_instance_prefix": instance_prefix(expected),
-            "origin_instance_prefix": instance_prefix(origin),
-        }
-        if extra:
-            payload.update(extra)
-        self._write_audit_payload(payload)
-
     def _flush_pending_audits(self) -> None:
         if not self._pending_audits:
             return
@@ -8208,6 +8190,7 @@ class ServerState:
 
         owner_operation: tuple[ClientIdentity, str, int] | None = None
         discarded = False
+        same_instance_audit: dict[str, object] | None = None
         close_handled = False
         coordination = self.coordination
         deferred_quarantine = self._deferred_close_quarantine(any_close=True)
@@ -8251,21 +8234,26 @@ class ServerState:
                         "ok_value": None,
                         "discarded": True,
                     }
+                binding = self._bindings.get(target_instance)
                 if (
                     target_instance
                     and presented == target_instance
-                    and target_epoch != self._station_epoch
+                    and (binding is None or binding.epoch != target_epoch)
                 ):
-                    self._audit_fence(
-                        "late_result_same_instance",
-                        command_id,
-                        target_instance,
-                        instance,
-                        extra={
-                            "expected_epoch": target_epoch,
-                            "origin_epoch": self._station_epoch,
-                        },
-                    )
+                    same_instance_audit = {
+                        "event": "late_result_same_instance",
+                        "command_id": command_id,
+                        "expected_instance_prefix": instance_prefix(target_instance),
+                        "origin_instance_prefix": instance_prefix(instance),
+                        "expected_epoch": target_epoch,
+                        "origin_epoch": self._station_epoch,
+                        "binding_epoch": (
+                            binding.epoch if binding is not None else None
+                        ),
+                        "reason": "binding_epoch_changed",
+                        "decision": "accepted",
+                        "duration_s": 0.0,
+                    }
             kept_row = self._broker_rows.get(command_id)
             if retry and (
                 command_id in self._results
@@ -8288,6 +8276,8 @@ class ServerState:
                     "ok_value": None,
                     "duplicate": True,
                 }
+            if same_instance_audit is not None:
+                pending_fence_audits.append(same_instance_audit)
             # Past the fence and the retry check: the reaper's abandon for a
             # late-answered spawn. Its row leaves here, so the answer below is
             # discarded as unknown and its release is published at most once.
@@ -8320,6 +8310,8 @@ class ServerState:
                 if close_row.get("state") != "delivered":
                     # No poll delivered it, so the game did not run it.
                     discarded = True
+                    if same_instance_audit is not None:
+                        same_instance_audit["decision"] = "discarded"
                     self._lease_close_ignored += 1
                 else:
                     self._lease_closes.pop(command_id, None)
@@ -8335,6 +8327,8 @@ class ServerState:
                 )
                 if not known or (deadline is not None and t_result >= deadline):
                     discarded = True
+                    if same_instance_audit is not None:
+                        same_instance_audit["decision"] = "discarded"
                     self._fire_and_forget_ids.discard(command_id)
                     self._results.pop(command_id, None)
                     self._enqueued_at.pop(command_id, None)
