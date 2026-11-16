@@ -99,63 +99,107 @@ class CompletionBarrierTest(unittest.TestCase):
         self.assertEqual(param.default, launch_focus.UNRESOLVED_S)
         self.assertEqual(param.kind, inspect.Parameter.KEYWORD_ONLY)
 
-    def test_a_give_back_whose_requests_are_still_queued_keeps_the_guard_busy(self) -> None:
-        guard = self.guard()
+    # Re-frozen after the review of 1d07355: the give-back runs in phases. The restore is
+    # posted only once the minimize is SEEN (the window is iconic), and the guard is busy
+    # until the restore is seen too. The three tests below replace the ones that assumed
+    # both requests could be queued before the minimize took effect.
+
+    def drain_on_sleep(self, guard_box: list, react_after_show: bool = False):
+        record: dict[str, list] = {"queues": [], "busy": []}
+
+        def sleep(seconds: float) -> None:
+            self.clock.sleep(seconds)
+            if self.desk.queue:
+                record["queues"].append(list(self.desk.queue))
+                record["busy"].append(not guard_box[0].wait_idle(0))
+                had_show = any(name == "show" for name, _ in self.desk.queue)
+                self.desk.drain()  # the DayZ thread runs what was posted, in order
+                if react_after_show and had_show:
+                    self.desk.steal(CLIENT)  # DayZ activates itself again
+
+        return sleep, record
+
+    def test_the_restore_is_posted_only_once_the_minimize_is_seen(self) -> None:
+        box: list = []
+        sleep, record = self.drain_on_sleep(box)
+        guard = self.guard(sleep=sleep)
+        box.append(guard)
         guard.add_pids([CLIENT_PID])
         self.tick(guard)
         self.desk.queued = True
         self.desk.steal(CLIENT)
         self.tick(guard)
-        self.assertEqual(self.desk.queue, [("minimize", CLIENT), ("show", CLIENT)])
-        self.assertFalse(guard.wait_idle(0))
-        self.assertEqual(guard.summary()["restore_failed"], 0)
-        self.desk.drain()  # the DayZ thread finally runs both requests, in order
-        self.tick(guard)
+        self.assertEqual(
+            record["queues"], [[("minimize", CLIENT)], [("show", CLIENT)]]
+        )
+        self.assertEqual(record["busy"], [True, True])
+        self.assertEqual(self.desk.queue, [])
+        self.assertEqual(self.desk.minimized, set())
         self.assertEqual(self.desk.front, PERSON)
         self.assertTrue(guard.wait_idle(0))
-        self.assertEqual(guard.summary()["restore_failed"], 0)
+        summary = guard.summary()
+        self.assertEqual((summary["returned"], summary["restore_failed"]), (1, 0))
 
-    def test_a_give_back_that_never_completes_stops_blocking_after_unresolved_s(
+    def test_a_minimize_never_seen_gets_its_restore_after_unresolved_s_and_is_reported(
         self,
     ) -> None:
         guard = self.guard(unresolved_s=10.0)
         guard.add_pids([CLIENT_PID])
         self.tick(guard)
-        self.desk.queued = True
+        self.desk.queued = True  # the DayZ thread never runs during this give-back
         self.desk.steal(CLIENT)
+        start = self.clock.now + 0.025
         self.tick(guard)
-        self.assertFalse(guard.wait_idle(0))
-        self.tick(guard, 5.0)
-        self.assertFalse(guard.wait_idle(0))
-        self.tick(guard, 5.5)
-        self.assertTrue(guard.wait_idle(0))
+        self.assertGreaterEqual(self.clock.now - start, 10.0 - 1e-6)
+        # The restore is posted after the bound, so a late minimize is undone in order.
+        self.assertEqual(self.desk.queue, [("minimize", CLIENT), ("show", CLIENT)])
         summary = guard.summary()
         self.assertEqual(summary["restore_failed"], 1)
         self.assertEqual(summary["disarmed"], "restore_failed")
+        self.assertTrue(guard.wait_idle(0))
 
-    def test_run_keeps_watching_after_a_disarm_until_the_give_back_completes(self) -> None:
-        state = {"drained": False}
+    def test_a_disarm_during_the_phases_still_restores_what_was_minimized(self) -> None:
+        box: list = []
+        record: dict[str, list] = {"queues": []}
 
         def sleep(seconds: float) -> None:
             self.clock.sleep(seconds)
-            count = len(self.clock.slept)
-            if count == 2:
-                self.desk.queued = True
-                self.desk.steal(CLIENT)
-            elif count == 100:
-                guard.disarm("foreground_verb")
-            elif count == 140:
+            if self.desk.queue:
+                record["queues"].append(list(self.desk.queue))
+                box[0].disarm("foreground_verb")  # the verb arrives mid give-back
                 self.desk.drain()
-                state["drained"] = True
 
         guard = self.guard(sleep=sleep)
+        box.append(guard)
         guard.add_pids([CLIENT_PID])
-        summary = guard.run()
-        self.assertTrue(state["drained"])
-        self.assertEqual(summary["disarmed"], "foreground_verb")
-        self.assertTrue(guard.wait_idle(0))
+        self.tick(guard)
+        self.desk.queued = True
+        self.desk.steal(CLIENT)
+        self.tick(guard)
+        self.assertEqual(self.desk.minimizes(), [CLIENT])
+        self.assertEqual(self.desk.shows(), [CLIENT])
         self.assertEqual(self.desk.minimized, set())
-        self.assertLess(len(self.clock.slept), 200)
+        self.assertEqual(self.desk.queue, [])
+        self.assertEqual(guard.summary()["disarmed"], "foreground_verb")
+        self.assertTrue(guard.wait_idle(0))
+
+    def test_a_reactivation_after_the_restore_is_a_new_steal_up_to_the_cap(self) -> None:
+        box: list = []
+        sleep, _record = self.drain_on_sleep(box, react_after_show=True)
+        guard = self.guard(sleep=sleep, max_returns=3)
+        box.append(guard)
+        guard.add_pids([CLIENT_PID])
+        self.tick(guard)
+        self.desk.queued = True
+        self.desk.steal(CLIENT)
+        for _ in range(6):
+            self.tick(guard)
+        self.assertEqual(self.desk.minimizes(), [CLIENT, CLIENT, CLIENT])
+        summary = guard.summary()
+        self.assertEqual(summary["failed"], 3)
+        self.assertEqual(summary["restore_failed"], 0)
+        self.assertEqual(summary["disarmed"], "max_returns")
+        self.assertTrue(guard.wait_idle(0))
 
     def test_extend_adds_pids_and_restarts_the_watch_while_armed(self) -> None:
         guard = self.guard(watch_s=10.0)
@@ -270,8 +314,13 @@ class RearmTest(_LifecycleCase):
 
 
 class LeaseScopeTest(_LifecycleCase):
+    # Re-frozen after the review of 1d07355: the mode is bound to the launch lease when it is
+    # SET (/lifecycle/focus carries the lease token, start_run binds the token to its lease id),
+    # so a start with a lease never sees a mode another launch set.
+
     def test_a_run_mode_is_reused_only_by_starts_of_the_same_lease(self) -> None:
-        self.lifecycle.set_launch_focus(IDENTITY_A, "take")
+        self.lifecycle.set_launch_focus(IDENTITY_A, "take", "token-1")
+        self.lifecycle._focus_bind_lease("token-1", "lease-1")
         self.assertEqual(self.lifecycle._launch_focus_for_run(IDENTITY_A, RUN_ID, "lease-1"), "take")
         # The client start of the same launch (same lease) keeps it.
         self.assertEqual(self.lifecycle._launch_focus_for_run(IDENTITY_A, RUN_ID, "lease-1"), "take")
@@ -279,13 +328,31 @@ class LeaseScopeTest(_LifecycleCase):
         self.assertEqual(self.lifecycle._launch_focus_for_run(IDENTITY_A, RUN_ID, "lease-2"), "keep")
 
     def test_arming_uses_the_mode_decided_at_the_start_attempt(self) -> None:
-        self.lifecycle.set_launch_focus(IDENTITY_A, "take")
+        self.lifecycle.set_launch_focus(IDENTITY_A, "take", "token-1")
+        self.lifecycle._focus_bind_lease("token-1", "lease-1")
         self.lifecycle._launch_focus_for_run(IDENTITY_A, RUN_ID, "lease-1")
         self.lifecycle._arm_launch_focus(IDENTITY_A, RUN_ID, SERVER_PID)
         self.assertNotIn(RUN_ID, self.lifecycle._focus_guards)
         self.lifecycle._launch_focus_for_run(IDENTITY_A, RUN_ID, "lease-2")
         self.lifecycle._arm_launch_focus(IDENTITY_A, RUN_ID, CLIENT_PID)
         self.assertIn(RUN_ID, self.lifecycle._focus_guards)
+
+    def test_a_mode_set_without_a_lease_never_reaches_a_start_with_a_lease(self) -> None:
+        self.lifecycle.set_launch_focus(IDENTITY_A, "take")
+        self.assertEqual(self.lifecycle._launch_focus_for_run(IDENTITY_A, RUN_ID, "lease-1"), "keep")
+
+    def test_a_mode_whose_launch_never_started_does_not_reach_a_later_launch(self) -> None:
+        # Launch 1 set take with its token but was refused before any start bound it;
+        # launch 2's update failed: its start binds only its own token.
+        self.lifecycle.set_launch_focus(IDENTITY_A, "take", "token-1")
+        self.lifecycle._focus_bind_lease("token-2", "lease-2")
+        self.assertEqual(self.lifecycle._launch_focus_for_run(IDENTITY_A, RUN_ID, "lease-2"), "keep")
+
+    def test_start_run_binds_the_callers_lease_token_to_its_lease_before_starting(self) -> None:
+        source = inspect.getsource(ProcessLifecycle.start_run)
+        bind = source.index("self._focus_bind_lease(token, authority[1])")
+        reserved = source.index("self._start_run_reserved(")
+        self.assertLess(bind, reserved)
 
 
 class BusyCodeTest(unittest.IsolatedAsyncioTestCase):

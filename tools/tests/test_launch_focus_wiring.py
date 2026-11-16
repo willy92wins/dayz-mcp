@@ -432,21 +432,28 @@ class LaunchFocusRouteTest(SessionLoopback, unittest.TestCase):
             {"error": "invalid_focus", "_http_status": 400},
         ]
 
+        # Re-frozen after the review of 1d07355: the route also hands over the lease token,
+        # which binds the mode to the launch's lease.
         class Lifecycle:
-            def set_launch_focus(self, client, mode):
-                seen.append((client.session_id, mode))
+            def set_launch_focus(self, client, mode, token=None):
+                seen.append((client.session_id, mode, token))
                 return answers.pop(0)
 
         self.state.lifecycle = Lifecycle()
         self.assertEqual(
-            self.request("/lifecycle/focus", {"identity": IDENTITY_PAYLOAD, "mode": "take"}),
+            self.request(
+                "/lifecycle/focus",
+                {"identity": IDENTITY_PAYLOAD, "mode": "take", "lease_token": "token-1"},
+            ),
             (200, {"ok": True, "focus": "take"}),
         )
         status, body = self.request(
             "/lifecycle/focus", {"identity": IDENTITY_PAYLOAD, "mode": "steal"}
         )
         self.assertEqual((status, body["error"]), (400, "invalid_focus"))
-        self.assertEqual(seen, [("same-session", "take"), ("same-session", "steal")])
+        self.assertEqual(
+            seen, [("same-session", "take", "token-1"), ("same-session", "steal", None)]
+        )
 
 
 class LaunchFocusClientTest(unittest.IsolatedAsyncioTestCase):
@@ -462,8 +469,9 @@ class LaunchFocusClientTest(unittest.IsolatedAsyncioTestCase):
         self.runtime = _fixture_client_runtime(self.config)
         self.control = self.runtime._control
 
-    async def test_the_client_posts_the_mode_without_a_lease(self) -> None:
-        self.control.active_lease_token = "token-1"
+    async def test_the_client_posts_the_mode_with_the_launch_lease_it_holds(self) -> None:
+        # Re-frozen after the review of 1d07355: when the launch leaves the queue the client
+        # holds the launch lease (_remember_acquire_or_wait), and the mode is bound to it.
         seen: list[tuple[object, ...]] = []
 
         async def session_call(path, payload, *, timeout_s=None):
@@ -471,9 +479,18 @@ class LaunchFocusClientTest(unittest.IsolatedAsyncioTestCase):
             return {"ok": True, "focus": "take"}
 
         with patch.object(self.control, "_session_call", new=session_call):
+            self.control.active_lease_token = "token-1"
             result = await self.control.lifecycle_focus("take")
+            self.control.active_lease_token = None
+            await self.control.lifecycle_focus("keep")
         self.assertEqual(result, {"ok": True, "focus": "take"})
-        self.assertEqual(seen, [("/lifecycle/focus", {"mode": "take"})])
+        self.assertEqual(
+            seen,
+            [
+                ("/lifecycle/focus", {"mode": "take", "lease_token": "token-1"}),
+                ("/lifecycle/focus", {"mode": "keep"}),
+            ],
+        )
 
     async def test_the_runtime_hands_the_mode_to_its_control_client(self) -> None:
         forwarded = AsyncMock(return_value={"ok": True, "focus": "keep"})
