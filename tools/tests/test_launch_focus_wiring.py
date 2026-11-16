@@ -72,23 +72,28 @@ class _Front:
         self.idle = 1e9
         self.pids = {PERSON: 900, SERVER_WINDOW: 41, CLIENT_WINDOW: 42}
         self.calls: list[tuple[str, int]] = []
+        # Re-frozen after the review of 39b7281: a minimize leaves the window iconic until a
+        # show restores it, so a give-back here can be seen to complete.
+        self.iconic: set[int] = set()
 
     def fns(self) -> launch_focus.FocusFns:
         def minimize(hwnd: int) -> bool:
             self.calls.append(("minimize", hwnd))
+            self.iconic.add(hwnd)
             if self.front == hwnd:
                 self.front = PERSON
             return True
 
         def show(hwnd: int) -> bool:
             self.calls.append(("show_no_activate", hwnd))
+            self.iconic.discard(hwnd)
             return True
 
         return launch_focus.FocusFns(
             foreground=lambda: self.front,
             window_pid=lambda hwnd: self.pids.get(hwnd, 0),
             is_window=lambda hwnd: hwnd in self.pids,
-            is_iconic=lambda hwnd: False,
+            is_iconic=lambda hwnd: hwnd in self.iconic,
             minimize=minimize,
             show_no_activate=show,
             idle_s=lambda: self.idle,
@@ -280,6 +285,12 @@ class LaunchFocusGuardWiringTest(_LifecycleCase):
         )
         self.assertEqual(self.front.front, PERSON)
         self.assertEqual(guard.summary()["returned"], 1)
+        # Re-frozen after the review of 39b7281: the restore was seen, so the guard keeps
+        # watching (it did not run into the unresolved bound).
+        self.assertEqual(self.front.iconic, set())
+        self.assertEqual(guard.summary()["restore_failed"], 0)
+        self.assertTrue(guard.armed)
+        self.assertTrue(guard.wait_idle(0))
 
     def test_the_guard_touches_only_a_process_the_run_still_owns(self) -> None:
         self.front.idle = 1.0

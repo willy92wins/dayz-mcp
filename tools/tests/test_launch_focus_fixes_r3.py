@@ -140,23 +140,43 @@ class CompletionBarrierTest(unittest.TestCase):
         summary = guard.summary()
         self.assertEqual((summary["returned"], summary["restore_failed"]), (1, 0))
 
-    def test_a_minimize_never_seen_gets_its_restore_after_unresolved_s_and_is_reported(
+    def test_a_minimize_never_seen_within_unresolved_s_keeps_the_guard_busy_until_it_lands(
         self,
     ) -> None:
+        # Re-frozen after the review of 39b7281 (this test replaces "a minimize never seen gets
+        # its restore after unresolved_s"): a restore posted behind a minimize that has not run
+        # cannot be seen to complete, and the queued minimize could still undo the foreground
+        # verb. So no restore is posted for it, and the guard stays busy (the verb answers
+        # focus_guard_busy) until the minimize is seen, or the window is gone. Time alone never
+        # lifts it.
         guard = self.guard(unresolved_s=10.0)
         guard.add_pids([CLIENT_PID])
         self.tick(guard)
-        self.desk.queued = True  # the DayZ thread never runs during this give-back
+        self.desk.queued = True  # the DayZ thread does not run during this give-back
         self.desk.steal(CLIENT)
         start = self.clock.now + 0.025
         self.tick(guard)
         self.assertGreaterEqual(self.clock.now - start, 10.0 - 1e-6)
-        # The restore is posted after the bound, so a late minimize is undone in order.
-        self.assertEqual(self.desk.queue, [("minimize", CLIENT), ("show", CLIENT)])
+        self.assertEqual(self.desk.queue, [("minimize", CLIENT)])
         summary = guard.summary()
         self.assertEqual(summary["restore_failed"], 1)
         self.assertEqual(summary["disarmed"], "restore_failed")
+        self.assertFalse(guard.wait_idle(0))
+        for _ in range(2):
+            self.tick(guard, 3600.0)  # an hour, twice: time alone never lifts it
+            self.assertFalse(guard.wait_idle(0))
+        self.assertEqual(self.desk.queue, [("minimize", CLIENT)])
+        self.desk.drain()  # the late minimize lands: DayZ is minimized, the person's window active
+        self.assertEqual(self.desk.front, PERSON)
+        self.tick(guard)
+        self.assertEqual(self.desk.queue, [("show", CLIENT)])
+        self.assertFalse(guard.wait_idle(0))
+        self.desk.drain()
+        self.tick(guard)
         self.assertTrue(guard.wait_idle(0))
+        self.assertEqual(self.desk.minimized, set())
+        self.assertEqual(self.desk.front, PERSON)
+        self.assertEqual(guard.summary()["restore_failed"], 1)  # counted once
 
     def test_a_disarm_during_the_phases_still_restores_what_was_minimized(self) -> None:
         box: list = []

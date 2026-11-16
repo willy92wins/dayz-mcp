@@ -151,11 +151,19 @@ class GuardFixesTest(unittest.TestCase):
         self.tick(guard)
         self.desk.steal(CLIENT)
         self.tick(guard)
-        self.assertEqual(self.desk.shows(), [CLIENT, CLIENT])
-        # Re-frozen after the review of 1d07355: the give-back runs in phases and this
-        # minimize is never seen to take effect, so after unresolved_s the restore is
-        # posted anyway and the give-back is reported as restore_failed.
+        # Re-frozen after the review of 39b7281: while the minimize has not been seen, no
+        # restore is posted at all (the minimize landing later would undo what a show had
+        # done) and the guard stays busy; once it lands, the restore follows and the rejected
+        # show is retried.
+        self.assertEqual(self.desk.shows(), [])
         self.assertEqual(guard.summary()["restore_failed"], 1)
+        self.assertFalse(guard.wait_idle(0))
+        self.desk.deliver_pending()
+        for _ in range(3):
+            self.tick(guard)
+        self.assertEqual(self.desk.shows(), [CLIENT, CLIENT])
+        self.assertEqual(self.desk.minimized, set())
+        self.assertTrue(guard.wait_idle(0))
 
     def test_two_rejected_shows_are_reported_and_disarm(self) -> None:
         self.desk.minimize_pending = True
@@ -165,14 +173,21 @@ class GuardFixesTest(unittest.TestCase):
         self.tick(guard)
         self.desk.steal(CLIENT)
         self.tick(guard)
-        self.assertEqual(self.desk.shows(), [CLIENT, CLIENT])
+        # Re-frozen after the review of 39b7281: no restore is posted while the minimize is
+        # unseen, and the guard stays busy; once it lands, two rejected shows end the wait
+        # (only a late show can remain, and a show without activation never takes the
+        # foreground away from the verb).
+        self.assertEqual(self.desk.shows(), [])
         summary = guard.summary()
         self.assertEqual(summary["restore_failed"], 1)
         self.assertEqual(summary["disarmed"], "restore_failed")
-        # Re-frozen after the review of 1d07355: the give-back is synchronous phases;
-        # it returns only after unresolved_s gave up on the unseen minimize, so the
-        # guard no longer blocks the foreground verb when step() returns.
+        self.assertFalse(guard.wait_idle(0))
+        self.desk.deliver_pending()
+        for _ in range(3):
+            self.tick(guard)
+        self.assertEqual(self.desk.shows(), [CLIENT, CLIENT])
         self.assertTrue(guard.wait_idle(0))
+        self.assertEqual(guard.summary()["restore_failed"], 1)
 
 
 class _LifecycleCase(unittest.TestCase):
