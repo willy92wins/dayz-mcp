@@ -34,7 +34,7 @@ from dayz_mcp.process_lifecycle import (
     RunManifestStore,
     RunRecord,
 )
-from dayz_mcp.runtime_state import RuntimePaths
+from dayz_mcp.runtime_state import JsonlAuditWriter, RuntimePaths
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from tests.lifecycle_helpers import stamp_launcher
 from tests._source_snapshot import source_of
@@ -336,6 +336,80 @@ class ResultFenceTest(unittest.TestCase):
         self.assertNotIn(INST_C2, blob)
         names = [event.get("event") for event in events]
         self.assertIn("late_result_fenced", names)
+
+
+class _LockCheckedWriter:
+    """The daemon's JsonlAuditWriter, noting each write made under the broker lock."""
+
+    def __init__(self, state: loopback.ServerState, inner: JsonlAuditWriter) -> None:
+        self._state = state
+        self._inner = inner
+        self.under_lock: list[object] = []
+
+    def write(self, event: dict) -> bool:
+        if self._state._lock._is_owned():  # type: ignore[attr-defined]
+            self.under_lock.append(event.get("event"))
+        return self._inner.write(event)
+
+
+class ResultFenceAuditFileTest(unittest.TestCase):
+    """late_result_fenced reaches the daemon's real audit file.
+
+    JsonlAuditWriter refuses an event without reason and duration_s, and
+    _audit_fence swallowed that refusal, so on main the event never reached
+    events.jsonl (ResultFenceTest's fake writer keeps any dict). The line is
+    written after the broker lock is released: the writer rewrites a file of
+    up to 5 MB.
+    """
+
+    def test_late_result_fenced_reaches_the_real_audit_file(self) -> None:
+        # Mutant killed: the payload without reason and duration_s (main);
+        # the write made while the broker lock is held.
+        for presented in (INST_C2, None):
+            with self.subTest(instance=presented), TemporaryDirectory() as tmp:
+                state = loopback.ServerState("k")
+                root = Path(tmp)
+                paths = RuntimePaths(
+                    root, root / "audit", root / "coordination.json", root / "runs.json"
+                )
+                writer = _LockCheckedWriter(state, JsonlAuditWriter(paths, "gen-fence-audit"))
+                state.audit_writer = writer
+                _bind(state, INST_C1, "client", 2001)
+                status, payload = state.enqueue_command("camera_get", {}, peer="client")
+                self.assertEqual(status, 200, payload)
+                result_status, result = state.store_result(
+                    {"id": payload["id"], "ok": 1, "value": 9}, instance=presented
+                )
+                self.assertEqual((result_status, result.get("discarded")), (200, True), result)
+                audit_file = root / "audit" / "events.jsonl"
+                text = audit_file.read_text(encoding="utf-8") if audit_file.exists() else ""
+                lines = [json.loads(line) for line in text.splitlines() if line.strip()]
+                fenced = [e for e in lines if e.get("event") == "late_result_fenced"]
+                self.assertEqual(len(fenced), 1, lines)
+                line = fenced[0]
+                self.assertEqual(line.get("command_id"), payload["id"], line)
+                self.assertEqual(
+                    (line.get("reason"), line.get("decision"), line.get("duration_s")),
+                    ("instance_mismatch", "discarded", 0.0),
+                    line,
+                )
+                self.assertEqual(
+                    line.get("expected_instance_prefix"),
+                    instance_fence_mod.instance_prefix(INST_C1),
+                    line,
+                )
+                self.assertEqual(
+                    line.get("origin_instance_prefix"),
+                    instance_fence_mod.instance_prefix(presented),
+                    line,
+                )
+                self.assertIn("expected_epoch", line)
+                self.assertIn("origin_epoch", line)
+                self.assertEqual(line.get("daemon_generation"), "gen-fence-audit", line)
+                self.assertNotIn(INST_C1, text)
+                if presented is not None:
+                    self.assertNotIn(presented, text)
+                self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
 
 
 class EnforceBridgeFenceTest(unittest.TestCase):
