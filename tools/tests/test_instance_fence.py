@@ -752,10 +752,13 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
     def test_a_retried_copy_writes_nothing_and_a_discarded_copy_says_so(self) -> None:
         # The bridge resends a failed result POST once with retry (d67f): a
         # copy of a result already stored changes nothing, so it writes no
-        # second line. A plain copy after the answer was read is discarded (its
-        # HTTP answer says so), and its line says discarded. Mutants killed:
-        # the line raised before the retry check; a decision that ignores the
-        # discard.
+        # second line. A plain copy (no retry) is a result the daemon handles:
+        # before the answer is read it is stored again and accepted, as on
+        # main, and writes its own line; after the answer was read it is
+        # discarded (its HTTP answer says so), and its line says discarded.
+        # Mutants killed: the line raised before the retry check; a decision
+        # that ignores the discard; no line for a result already stored
+        # (review r1).
         with TemporaryDirectory() as tmp:
             state, writer, audit_file = self._state(tmp)
             command_id, sealed_epoch = _late_same_instance_command(self, state)
@@ -766,17 +769,21 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
             )
             result_status, copy = state.store_result(dict(body), instance=INST_C1, retry=True)
             self.assertEqual((result_status, copy.get("duplicate")), (200, True), copy)
+            self.assertEqual(
+                state.store_result(dict(body), instance=INST_C1),
+                (200, {"ok": True, "id": command_id, "ok_value": 1}),
+            )
             self.assertEqual((state.take_result(command_id, remove=True) or {}).get("value"), 9)
             result_status, late_copy = state.store_result(dict(body), instance=INST_C1)
             self.assertEqual((result_status, late_copy.get("discarded")), (200, True), late_copy)
             lines = self._lines(audit_file)
             self.assertEqual(
                 [(e.get("command_id"), e.get("decision")) for e in lines],
-                [(command_id, "accepted"), (command_id, "discarded")],
+                [(command_id, "accepted"), (command_id, "accepted"), (command_id, "discarded")],
                 _audit_lines(audit_file),
             )
             epochs = (sealed_epoch, state._station_epoch, state._bindings[INST_C1].epoch)
-            for line, decision in zip(lines, ("accepted", "discarded")):
+            for line, decision in zip(lines, ("accepted", "accepted", "discarded")):
                 self._assert_line(line, command_id, epochs, decision)
             self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
 
