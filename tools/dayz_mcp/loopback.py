@@ -8177,6 +8177,7 @@ class ServerState:
         finally:
             for payload in pending_fence_audits:
                 self._write_audit_payload(payload)
+            self._flush_pending_audits()
 
     def _store_result_impl(
         self,
@@ -8296,6 +8297,22 @@ class ServerState:
                 late_outcome = self._abandon_row_locked(
                     command_id, "tool_timeout", late_quarantine
                 )
+                if late_outcome is not None:
+                    outcome_body = dict(late_outcome["body"])
+                    pending_fence_audits.append(
+                        {
+                            "event": "late_answer_abandon",
+                            "command_id": command_id,
+                            "expected_instance_prefix": instance_prefix(
+                                late_expected
+                            ),
+                            "origin_instance_prefix": instance_prefix(instance),
+                            **outcome_body,
+                            "reason": "late_answer",
+                            "decision": str(outcome_body.get("status") or ""),
+                            "duration_s": 0.0,
+                        }
+                    )
             close_row = self._lease_closes.get(command_id)
             if close_row is not None:
                 close_handled = True
@@ -8366,29 +8383,9 @@ class ServerState:
                 self._publish_due_deferred_closes_locked(deferred_quarantine)
             close_outcomes = self._drain_close_outcomes_locked()
 
-        try:
-            self._flush_close_outcomes(close_outcomes)
-            if late_outcome is not None:
-                self._flush_abandon_outcome(late_outcome)
-        finally:
-            if late_outcome is not None:
-                # The abandon has no caller to report to: a release that could not
-                # be queued (cleanup_degraded and its cause) is audited here, and
-                # the lease close stays the group's backstop. The audit file takes
-                # an event only with a reason and a duration_s (JsonlAuditWriter).
-                outcome_body = dict(late_outcome["body"])
-                self._audit_fence(
-                    "late_answer_abandon",
-                    command_id,
-                    late_expected,
-                    instance,
-                    extra={
-                        **outcome_body,
-                        "reason": "late_answer",
-                        "decision": str(outcome_body.get("status") or ""),
-                        "duration_s": 0.0,
-                    },
-                )
+        self._flush_close_outcomes(close_outcomes)
+        if late_outcome is not None:
+            self._flush_abandon_outcome(late_outcome)
 
         if owner_operation is not None and self.coordination is not None:
             ok_value = stored.get("ok")
