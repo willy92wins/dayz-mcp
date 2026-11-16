@@ -1604,7 +1604,18 @@ class HealGodmodeMessagesTest(unittest.TestCase):
         )
         self.assertEqual(
             _class_members(self.messages, "MCPPlayerState"),
-            [("string", "name"), ("ref array<float>", "pos"), ("bool", "godmode"), ("float", "water"), ("float", "energy")],
+            [
+                ("string", "name"),
+                ("ref array<float>", "pos"),
+                ("bool", "godmode"),
+                ("float", "water"),
+                ("float", "energy"),
+                ("ref array<ref MCPPlayerTriggerInside>", "triggers"),
+                ("ref array<ref MCPPlayerTriggerEvent>", "trigger_events"),
+                ("int", "trigger_run"),
+                ("int", "trigger_seq"),
+                ("int", "trigger_evicted_seq"),
+            ],
         )
 
     def test_both_reads_fill_godmode_from_the_server_body(self) -> None:

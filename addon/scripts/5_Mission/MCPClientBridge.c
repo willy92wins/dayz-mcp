@@ -2218,6 +2218,25 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			}
 		}
 
+		// Vanilla respawns only a dead, unconscious or restrained player:
+		// MissionServer.OnClientRespawnEvent kills an unconscious or
+		// restrained one and leaves any other living one alone
+		// (missionserver.c:611-624), and InGameMenu offers the respawn only
+		// to a dead or unconscious one (ingamemenu.c:321-326). On a living,
+		// conscious, free player the request would change nothing on the
+		// server while the recipe below still ran SimulateDeath and the
+		// death screen here. Refused after the argument checks, before
+		// anything changes. A null player never gets here (Dispatch answers
+		// client_not_in_game first); the null test only keeps the read safe.
+		// The recipe keeps its own read after RespawnPlayer, as vanilla does.
+		PlayerBase localPlayer = PlayerBase.Cast(GetGame().GetPlayer());
+		if (localPlayer && localPlayer.IsAlive() && !localPlayer.IsUnconscious() && !localPlayer.IsRestrained())
+		{
+			result.ok = false;
+			result.error = "player_alive_conscious";
+			return true;
+		}
+
 		UIScriptedMenu respawnMenu;
 		UIManager ui = GetGame().GetUIManager();
 		if (ui)

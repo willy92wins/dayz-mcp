@@ -147,7 +147,8 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 1 from beb3 (dev_free_camera_set timeout_s; active is a bool).
         # + 1 from player_set_stance (timeout_s; uid and stance are strings,
         # recover a bool, not in this census).
-        self.assertEqual(len(rows), 260)
+        # + 2 from fa2b (query_player_state trigger_cursor/trigger_run, both StrictInt).
+        self.assertEqual(len(rows), 262)
         self.assertIn(("player_set_stance", "timeout_s", "float"), rows)
         self.assertIn(("actor_emote", "object_id", "int"), rows)
         self.assertIn(("ai_group_order", "group_id", "int"), rows)
@@ -163,6 +164,8 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("ui_map_set", "scale", "float"), rows)
         self.assertIn(("ui_map_set", "center", "vector"), rows)
         self.assertIn(("ui_map_set", "timeout_s", "float"), rows)
+        self.assertIn(("query_player_state", "trigger_cursor", "int"), rows)
+        self.assertIn(("query_player_state", "trigger_run", "int"), rows)
         self.assertIn(("player_find", "timeout_s", "float"), rows)
         self.assertIn(("object_set_health", "health01", "float"), rows)
         self.assertIn(("object_set_health", "object_id", "int"), rows)
