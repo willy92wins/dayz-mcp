@@ -221,8 +221,6 @@ class FocusGuard:
         self._attempts = 0
         self._first_steal_s: float | None = None
         self._reason: str | None = None
-        self._pending: dict[int, dict[str, object]] = {}
-        self._give_back_running = False
         self._counters = {
             "steals": 0,
             "returned": 0,
@@ -296,50 +294,9 @@ class FocusGuard:
             if self.fns.window_pid(before) not in self._pids:
                 self._person = before
 
-    def _refresh_idle_locked(self) -> None:
-        if not self._give_back_running and not self._pending:
-            self._idle.set()
-        else:
-            self._idle.clear()
-
-    def _process_pending_locked(self, now: float) -> None:
-        for window in list(self._pending):
-            entry = self._pending.get(window)
-            if entry is None:
-                continue
-            pid = entry["pid"]
-            try:
-                owned = (
-                    self.fns.is_window(window)
-                    and self.fns.window_pid(window) == pid
-                )
-            except Exception:
-                owned = False
-            if not owned:
-                del self._pending[window]
-                continue
-            fg = int(self.fns.foreground() or 0)
-            if fg != 0 and fg != window:
-                entry["departed"] = True
-            if entry["departed"] and entry["accepted"] is True:
-                try:
-                    iconic = self.fns.is_iconic(window)
-                except Exception:
-                    iconic = False
-                if not iconic:
-                    del self._pending[window]
-                    continue
-            if now - entry["time"] >= self.unresolved_s:
-                del self._pending[window]
-                if not entry["restore_failed"]:
-                    self._counters["restore_failed"] += 1
-                    self.disarm("restore_failed")
-        self._refresh_idle_locked()
-
     def step(self) -> None:
         with self._lock:
             now = self.clock()
-            self._process_pending_locked(now)
             if not self.armed:
                 return
             if self._end is not None and now >= self._end:
@@ -392,7 +349,12 @@ class FocusGuard:
                 return
             self._attempts += 1
             pids = set(self._pids)
-        outcome, restored, departed = self.give_back(fg, prev, pids, pid)
+            self._idle.clear()
+        try:
+            outcome, restored, departed = self.give_back(fg, prev, pids, pid)
+        finally:
+            with self._lock:
+                self._idle.set()
         with self._lock:
             if departed:
                 self._in_steal = False
@@ -400,7 +362,6 @@ class FocusGuard:
             if not restored:
                 self._counters["restore_failed"] += 1
                 self.disarm("restore_failed")
-            self._refresh_idle_locked()
 
     def run(
         self,
@@ -411,9 +372,7 @@ class FocusGuard:
         last = self.clock()
         while True:
             self.step()
-            with self._lock:
-                pending = bool(self._pending)
-            if not self.armed and not pending:
+            if not self.armed:
                 return self.summary()
             if live_pids is not None and self.clock() - last >= check_every_s:
                 last = self.clock()
@@ -422,163 +381,182 @@ class FocusGuard:
                     live = {int(pid) for pid in live_pids()}
                 except Exception:
                     self.disarm("alive_unknown")
-                else:
-                    with self._lock:
-                        keep = {
-                            pid
-                            for pid in self._pids
-                            if pid in live or self._added_at.get(pid, 0.0) >= read_at
-                        }
-                        self._pids = keep
-                        for pid in list(self._added_at):
-                            if pid not in keep:
-                                del self._added_at[pid]
-                        if not self._pids:
-                            self.disarm("run_ended")
+                    return self.summary()
+                with self._lock:
+                    keep = {
+                        pid
+                        for pid in self._pids
+                        if pid in live or self._added_at.get(pid, 0.0) >= read_at
+                    }
+                    self._pids = keep
+                    for pid in list(self._added_at):
+                        if pid not in keep:
+                            del self._added_at[pid]
+                    empty = not self._pids
+                if empty:
+                    self.disarm("run_ended")
+                    return self.summary()
             self.sleep(self.poll_s)
 
     def give_back(
         self, fg: int, prev: int, pids: set[int], verified_pid: int
     ) -> tuple[str, bool, bool]:
-        with self._lock:
-            self._give_back_running = True
-            self._refresh_idle_locked()
-        minimized: list[tuple[int, int, float]] = []
+        start = self.clock()
+        settle_at = start + self.settle_s
+        give_up_at = start + self.unresolved_s
+        posted: list[tuple[int, int]] = []
+        seen: set[int] = set()
+        tried: set[int] = set()
         departed = False
-        departed_windows: set[int] = set()
-        outcome = "failed"
-        restored = False
-        try:
-            target = fg
-            target_pid = verified_pid
-            deadline = self.clock() + self.settle_s
-            while True:
-                current_pid = self.fns.window_pid(target)
-                with self._disarm_lock:
-                    if self._reason is not None:
-                        break
-                    if not any(
-                        window == target for window, _pid, _at in minimized
-                    ):
-                        if current_pid != target_pid or target_pid not in pids:
-                            break
-                        try:
-                            self.fns.minimize(target)
-                        except Exception:
-                            break
-                        minimized.append((target, target_pid, self.clock()))
+        target = fg
+        target_pid = verified_pid
+
+        while True:
+            if target is not None and target not in tried:
+                tried.add(target)
+                try:
+                    owner = self.fns.window_pid(target)
+                except Exception:
+                    owner = 0
+                if owner == target_pid and owner in pids:
+                    with self._disarm_lock:
+                        if self._reason is None:
+                            try:
+                                posted_ok = bool(self.fns.minimize(target))
+                            except Exception:
+                                posted_ok = False
+                            if posted_ok:
+                                posted.append((target, owner))
+                target = None
+            try:
                 cur = int(self.fns.foreground() or 0)
-                if cur != 0:
-                    for window, _pid, _at in minimized:
-                        if cur != window:
-                            departed_windows.add(window)
-                if cur != 0 and self.fns.window_pid(cur) not in pids:
-                    departed = True
-                    break
-                cur_minimized = any(
-                    window == cur for window, _pid, _at in minimized
-                )
-                if cur != 0 and not cur_minimized and self.clock() < deadline:
-                    cur_pid = self.fns.window_pid(cur)
-                    if self._verified(cur_pid):
-                        target = cur
-                        target_pid = cur_pid
-                        continue
-                left = deadline - self.clock()
-                if left <= 0:
-                    break
-                self.sleep(min(self.poll_s, left))
-        finally:
-            accepted: dict[int, bool | None] = {}
-            for window, pid, _at in minimized:
-                accepted[window] = self._show_if_owned(window, pid)
-            if not any(value is False for value in accepted.values()):
-                self._observe(
-                    [(window, pid) for window, pid, _at in minimized], accepted
-                )
-            for window, pid, _at in minimized:
-                if self._window_resolved(window, pid, accepted.get(window)):
+            except Exception:
+                cur = 0
+            for window, pid in posted:
+                if window in seen:
                     continue
-                accepted[window] = self._show_if_owned(window, pid)
-            self._observe(
-                [(window, pid) for window, pid, _at in minimized], accepted
+                try:
+                    if (
+                        self.fns.is_window(window)
+                        and self.fns.window_pid(window) == pid
+                        and self.fns.is_iconic(window)
+                    ):
+                        seen.add(window)
+                except Exception:
+                    pass
+            cur_pid = 0
+            if cur != 0:
+                try:
+                    cur_pid = self.fns.window_pid(cur)
+                except Exception:
+                    cur_pid = 0
+                if cur_pid not in pids:
+                    departed = True
+            if (
+                self.armed
+                and cur != 0
+                and cur_pid in pids
+                and cur not in tried
+                and self.clock() < settle_at
+            ):
+                if self._verified(cur_pid):
+                    target = cur
+                    target_pid = cur_pid
+                    continue
+            all_seen = all(
+                window in seen or not self._owned(window, pid)
+                for window, pid in posted
             )
-            restored = all(
-                self._window_resolved(window, pid, accepted.get(window))
-                for window, pid, _at in minimized
+            if all_seen and (departed or self.clock() >= settle_at):
+                break
+            if self.clock() >= give_up_at:
+                break
+            self.sleep(self.poll_s)
+
+        stuck = {
+            window
+            for window, pid in posted
+            if self._owned(window, pid) and window not in seen
+        }
+        accepted: dict[int, bool] = {}
+        self._post_show(posted, accepted)
+        self._settle(posted, accepted)
+        still = [
+            (window, pid)
+            for window, pid in posted
+            if self._unresolved(window, pid, accepted)
+        ]
+        if still:
+            self._post_show(still, accepted)
+            self._settle(posted, accepted)
+        restored = (
+            not any(
+                self._unresolved(window, pid, accepted)
+                for window, pid in posted
             )
+            and not stuck
+        )
+        try:
             front = int(self.fns.foreground() or 0)
-            if front == prev:
-                outcome = "returned"
-            elif front != 0 and self.fns.window_pid(front) not in pids:
+        except Exception:
+            front = 0
+        if front == prev:
+            outcome = "returned"
+        elif front != 0:
+            try:
+                front_pid = self.fns.window_pid(front)
+            except Exception:
+                front_pid = 0
+            if front_pid not in pids:
                 outcome = "elsewhere"
             else:
                 outcome = "failed"
-            with self._lock:
-                self._give_back_running = False
-                for window, pid, requested_at in minimized:
-                    try:
-                        owned = (
-                            self.fns.is_window(window)
-                            and self.fns.window_pid(window) == pid
-                        )
-                    except Exception:
-                        owned = False
-                    if not owned:
-                        self._pending.pop(window, None)
-                        continue
-                    if window in departed_windows:
-                        self._pending.pop(window, None)
-                        continue
-                    counted = not self._window_resolved(
-                        window, pid, accepted.get(window)
-                    )
-                    self._pending[window] = {
-                        "pid": pid,
-                        "time": requested_at,
-                        "departed": False,
-                        "accepted": accepted.get(window),
-                        "restore_failed": counted,
-                    }
-                self._refresh_idle_locked()
+        else:
+            outcome = "failed"
         return outcome, restored, departed
 
-    def _show_if_owned(self, window: int, pid: int) -> bool | None:
+    def _owned(self, window: int, pid: int) -> bool:
         try:
-            if not self.fns.is_window(window):
-                return None
-            if self.fns.window_pid(window) != pid:
-                return None
-            try:
-                return bool(self.fns.show_no_activate(window))
-            except Exception:
-                return False
+            return bool(
+                self.fns.is_window(window) and self.fns.window_pid(window) == pid
+            )
         except Exception:
             return False
 
-    def _window_resolved(
-        self, window: int, pid: int, accepted: bool | None
+    def _unresolved(
+        self, window: int, pid: int, accepted: dict[int, bool]
     ) -> bool:
         try:
             if not self.fns.is_window(window):
-                return True
+                return False
             if self.fns.window_pid(window) != pid:
+                return False
+            if accepted.get(window) is not True:
                 return True
-            return accepted is True and not self.fns.is_iconic(window)
+            return bool(self.fns.is_iconic(window))
         except Exception:
-            return True
+            return False
 
-    def _observe(
-        self,
-        windows: list[tuple[int, int]],
-        accepted: dict[int, bool | None],
+    def _post_show(
+        self, windows: list[tuple[int, int]], accepted: dict[int, bool]
     ) -> None:
-        if any(value is False for value in accepted.values()):
-            return
+        for window, pid in windows:
+            if not self._owned(window, pid):
+                continue
+            try:
+                accepted[window] = bool(self.fns.show_no_activate(window))
+            except Exception:
+                accepted[window] = False
+
+    def _settle(
+        self, windows: list[tuple[int, int]], accepted: dict[int, bool]
+    ) -> None:
         deadline = self.clock() + self.settle_s
         while True:
-            if all(
-                self._window_resolved(window, pid, accepted.get(window))
+            if any(value is False for value in accepted.values()):
+                return
+            if not any(
+                self._unresolved(window, pid, accepted)
                 for window, pid in windows
             ):
                 return

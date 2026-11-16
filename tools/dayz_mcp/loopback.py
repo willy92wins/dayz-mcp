@@ -10322,7 +10322,7 @@ class Handler(BaseHTTPRequestHandler):
                 client, token, body.get("run_id"), body.get("hold_s")
             )
         elif action == "focus":
-            result = lifecycle.set_launch_focus(client, body.get("mode"))
+            result = lifecycle.set_launch_focus(client, body.get("mode"), token)
         elif action == "adopt":
             result = lifecycle.adopt_run(client, token, body.get("run_id"))
         elif action == "reap":

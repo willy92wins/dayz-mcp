@@ -350,7 +350,7 @@ class _FakeLifecycle:
         self.calls.append("foreground")
         return {"ok": True, "run_id": value, "state": "RUNNING"}
 
-    def set_launch_focus(self, client, mode):
+    def set_launch_focus(self, client, mode, token=None):
         self.calls.append("focus")
         return {"ok": True, "focus": mode}
 

@@ -2536,6 +2536,8 @@ class ProcessLifecycle:
         # inbox 5c8e: per-session launch-focus preference and the one guard a
         # run may have. Both live in daemon memory only.
         self._launch_focus_by_session: dict[str, tuple[str, float]] = {}
+        self._launch_focus_by_token: dict[str, tuple[str, float]] = {}
+        self._launch_focus_by_lease: dict[str, tuple[str, float]] = {}
         self._launch_focus_by_run: dict[str, tuple[str, float, str | None]] = {}
         self._focus_decided: dict[str, str] = {}
         self._focus_guards: dict[str, launch_focus.FocusGuard] = {}
@@ -4846,6 +4848,7 @@ class ProcessLifecycle:
         authority = self._authority(decision)
         if authority is None:
             return self._error("lease_required", 403)
+        self._focus_bind_lease(token, authority[1])
         return self._start_run_reserved(client, authority, request)
 
     def _is_idempotent_launch_retry(
@@ -4904,20 +4907,55 @@ class ProcessLifecycle:
             return 0
 
     def set_launch_focus(
-        self, client: ClientIdentity, mode: object
+        self, client: ClientIdentity, mode: object, token: str | None = None
     ) -> dict[str, object]:
         if type(mode) is not str or mode not in launch_focus.FOCUS_MODES:
             return {"error": "invalid_focus", "_http_status": 400}
         if self._focus_fns() is None:
             return {"error": "focus_unsupported", "_http_status": 409}
-        key = _steam_preparation_key(client.session_id)
-        with self._launch_focus_lock:
-            self._launch_focus_by_session.pop(key, None)
-            self._launch_focus_by_session[key] = (mode, self.focus_clock())
-            while len(self._launch_focus_by_session) > _LAUNCH_FOCUS_BOUND:
-                oldest = next(iter(self._launch_focus_by_session))
-                del self._launch_focus_by_session[oldest]
+        if isinstance(token, str) and token:
+            key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            with self._launch_focus_lock:
+                self._launch_focus_by_token.pop(key, None)
+                self._launch_focus_by_token[key] = (mode, self.focus_clock())
+                while len(self._launch_focus_by_token) > _LAUNCH_FOCUS_BOUND:
+                    oldest = next(iter(self._launch_focus_by_token))
+                    del self._launch_focus_by_token[oldest]
+        else:
+            key = _steam_preparation_key(client.session_id)
+            with self._launch_focus_lock:
+                self._launch_focus_by_session.pop(key, None)
+                self._launch_focus_by_session[key] = (mode, self.focus_clock())
+                while len(self._launch_focus_by_session) > _LAUNCH_FOCUS_BOUND:
+                    oldest = next(iter(self._launch_focus_by_session))
+                    del self._launch_focus_by_session[oldest]
         return {"ok": True, "focus": mode}
+
+    def _focus_bind_lease(self, token: object, lease_id: object) -> None:
+        try:
+            if not (
+                isinstance(token, str)
+                and token
+                and isinstance(lease_id, str)
+                and lease_id
+            ):
+                return
+            key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            now = self.focus_clock()
+            with self._launch_focus_lock:
+                stored = self._launch_focus_by_token.pop(key, None)
+                if stored is None:
+                    return
+                mode, stored_at = stored
+                if now - stored_at > _LAUNCH_FOCUS_TTL_S:
+                    return
+                self._launch_focus_by_lease.pop(lease_id, None)
+                self._launch_focus_by_lease[lease_id] = (mode, now)
+                while len(self._launch_focus_by_lease) > _LAUNCH_FOCUS_BOUND:
+                    oldest = next(iter(self._launch_focus_by_lease))
+                    del self._launch_focus_by_lease[oldest]
+        except Exception:
+            pass
 
     def launch_focus_mode(self, session_id: str) -> str:
         key = _steam_preparation_key(session_id)
@@ -4937,7 +4975,10 @@ class ProcessLifecycle:
         now = self.focus_clock()
         with self._launch_focus_lock:
             mode: str | None = None
-            stored = self._launch_focus_by_session.pop(key, None)
+            if lease_id is None:
+                stored = self._launch_focus_by_session.pop(key, None)
+            else:
+                stored = self._launch_focus_by_lease.pop(lease_id, None)
             if stored is not None:
                 fresh_mode, stored_at = stored
                 if now - stored_at <= _LAUNCH_FOCUS_TTL_S:

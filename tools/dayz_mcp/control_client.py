@@ -582,7 +582,11 @@ class ControlClient:
         )
 
     async def lifecycle_focus(self, mode: str) -> dict[str, object]:
-        return await self._session_call("/lifecycle/focus", {"mode": mode})
+        payload: dict[str, object] = {"mode": mode}
+        token = self.active_lease_token
+        if isinstance(token, str) and token:
+            payload["lease_token"] = token
+        return await self._session_call("/lifecycle/focus", payload)
 
     async def lifecycle_reap(self, run_id: str) -> dict[str, object]:
         payload: dict[str, object] = {"run_id": run_id}
