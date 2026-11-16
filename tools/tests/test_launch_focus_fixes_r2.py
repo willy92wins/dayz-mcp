@@ -223,7 +223,8 @@ class RunModeTest(_LifecycleCase):
 
     def test_a_start_attempt_uses_up_the_mode_before_the_launch(self) -> None:
         source = inspect.getsource(ProcessLifecycle._start_run_reserved_holding)
-        attempt = source.index("self._launch_focus_for_run(client, run_id)")
+        # Re-frozen after the review of 3b6e0a7: the attempt carries the start's lease id.
+        attempt = source.index("self._launch_focus_for_run(client, run_id, authority[1])")
         launch = source.index("self.launcher(")
         self.assertLess(attempt, launch)
         # A start that fails after that line leaves no pending mode for the next run.

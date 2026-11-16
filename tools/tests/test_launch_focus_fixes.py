@@ -166,7 +166,9 @@ class GuardFixesTest(unittest.TestCase):
         summary = guard.summary()
         self.assertEqual(summary["restore_failed"], 1)
         self.assertEqual(summary["disarmed"], "restore_failed")
-        self.assertTrue(guard.wait_idle(0))
+        # Re-frozen after the review of 3b6e0a7: the minimize is still queued (it never
+        # took effect), so the guard is not idle until it lands or unresolved_s passes.
+        self.assertFalse(guard.wait_idle(0))
 
 
 class _LifecycleCase(unittest.TestCase):
