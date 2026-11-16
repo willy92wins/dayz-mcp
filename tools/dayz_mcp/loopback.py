@@ -3591,6 +3591,7 @@ class ServerState:
         self._deferred_server_closes: dict[tuple[int, str], dict[str, object]] = {}
         self._version_blocked_instances: set[str] = set()
         self._lease_close_outcomes: list[dict[str, object]] = []
+        self._pending_audits: list[dict[str, object]] = []
         self._lease_close_ignored = 0
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -5337,10 +5338,6 @@ class ServerState:
         origin: str | None,
         extra: dict[str, object] | None = None,
     ) -> None:
-        writer = self.audit_writer
-        write = getattr(writer, "write", None)
-        if not callable(write):
-            return
         payload: dict[str, object] = {
             "event": event,
             "command_id": command_id,
@@ -5349,12 +5346,31 @@ class ServerState:
         }
         if extra:
             payload.update(extra)
-        try:
-            write(payload)
-        except Exception:
-            pass
+        self._write_audit_payload(payload)
+
+    def _flush_pending_audits(self) -> None:
+        if self._lock._is_owned():
+            return
+        writer = self.audit_writer
+        write = getattr(writer, "write", None)
+        if not callable(write):
+            return
+        with self._lock:
+            if not self._pending_audits:
+                return
+            pending = self._pending_audits
+            self._pending_audits = []
+        for payload in pending:
+            try:
+                write(payload)
+            except Exception:
+                pass
 
     def _write_audit_payload(self, payload: dict[str, object]) -> None:
+        if self._lock._is_owned():
+            self._pending_audits.append(payload)
+            return
+        self._flush_pending_audits()
         writer = self.audit_writer
         write = getattr(writer, "write", None)
         if not callable(write):
@@ -6584,8 +6600,10 @@ class ServerState:
             if not self._abandon_authorized_locked(row, client, presented):
                 return 403, {"error": "abandon_forbidden"}
             outcome = self._abandon_row_locked(command_id, reason, quarantine)
-        self._flush_abandon_outcome(outcome)
-        self._audit_abandon_release(outcome, reason)
+        try:
+            self._flush_abandon_outcome(outcome)
+        finally:
+            self._audit_abandon_release(outcome, reason)
         return int(outcome["http_status"]), dict(outcome["body"])
 
     def _abandon_authorized_locked(
@@ -7285,8 +7303,10 @@ class ServerState:
                 else None
             )
         if outcome is not None:
-            self._flush_abandon_outcome(outcome)
-            self._audit_abandon_release(outcome, "deadline" if deadline else reason)
+            try:
+                self._flush_abandon_outcome(outcome)
+            finally:
+                self._audit_abandon_release(outcome, "deadline" if deadline else reason)
             return dict(outcome["body"])
         # No active row. A terminal result stays where it is. A queued id that
         # never grew a row is removed without inventing a retained result.
@@ -7500,6 +7520,7 @@ class ServerState:
     ) -> tuple[int, dict]:
         if peer not in VALID_PEERS:
             return 400, {"error": "bad_peer"}
+        self._flush_pending_audits()
 
         # One GET, one record of this poll. The wait does not touch liveness,
         # attribution, caps, the reaper or the load counters; the body below
@@ -8334,26 +8355,29 @@ class ServerState:
                 self._publish_due_deferred_closes_locked(deferred_quarantine)
             close_outcomes = self._drain_close_outcomes_locked()
 
-        self._flush_close_outcomes(close_outcomes)
-        if late_outcome is not None:
-            self._flush_abandon_outcome(late_outcome)
-            # The abandon has no caller to report to: a release that could not
-            # be queued (cleanup_degraded and its cause) is audited here, and
-            # the lease close stays the group's backstop. The audit file takes
-            # an event only with a reason and a duration_s (JsonlAuditWriter).
-            outcome_body = dict(late_outcome["body"])
-            self._audit_fence(
-                "late_answer_abandon",
-                command_id,
-                late_expected,
-                instance,
-                extra={
-                    **outcome_body,
-                    "reason": "late_answer",
-                    "decision": str(outcome_body.get("status") or ""),
-                    "duration_s": 0.0,
-                },
-            )
+        try:
+            self._flush_close_outcomes(close_outcomes)
+            if late_outcome is not None:
+                self._flush_abandon_outcome(late_outcome)
+        finally:
+            if late_outcome is not None:
+                # The abandon has no caller to report to: a release that could not
+                # be queued (cleanup_degraded and its cause) is audited here, and
+                # the lease close stays the group's backstop. The audit file takes
+                # an event only with a reason and a duration_s (JsonlAuditWriter).
+                outcome_body = dict(late_outcome["body"])
+                self._audit_fence(
+                    "late_answer_abandon",
+                    command_id,
+                    late_expected,
+                    instance,
+                    extra={
+                        **outcome_body,
+                        "reason": "late_answer",
+                        "decision": str(outcome_body.get("status") or ""),
+                        "duration_s": 0.0,
+                    },
+                )
 
         if owner_operation is not None and self.coordination is not None:
             ok_value = stored.get("ok")
@@ -9050,6 +9074,7 @@ class ServerState:
         return 200, {"ok": True, "ms": delay_ms}
 
     def status_snapshot(self, now: float | None = None) -> dict:
+        self._flush_pending_audits()
         if now is None:
             now = self._now()
         self.reap_expired_commands(now)
