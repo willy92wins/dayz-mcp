@@ -609,8 +609,9 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         command_id: int,
         epochs: tuple[object, object, object],
         decision: str,
+        instance: str = INST_C1,
     ) -> None:
-        prefix = instance_fence_mod.instance_prefix(INST_C1)
+        prefix = instance_fence_mod.instance_prefix(instance)
         self.assertEqual(line.get("command_id"), command_id, line)
         self.assertEqual(
             (line.get("expected_instance_prefix"), line.get("origin_instance_prefix")),
@@ -722,6 +723,130 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
                     lines[0], command_id, (sealed_epoch, station_epoch, binding_epoch), "accepted"
                 )
                 self.assertNotIn(INST_C1, audit_file.read_text(encoding="utf-8"))
+                self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+
+    def _move_the_station_epoch(self, state: loopback.ServerState) -> None:
+        """A binding of another run is installed, then retired: the station
+        epoch moves, and no binding of the run under test changes."""
+        before = state._station_epoch
+        other_run = f"run-other-{before}"
+        other = str(uuid.UUID(int=(0x6 << 124) | (before + 1), version=4))
+        bindings = {i: (b.epoch, b.state) for i, b in state._bindings.items()}
+        _bind(state, other, "client", 4000 + before, run_id=other_run)
+        state.retire_role(other_run, "client", "stopped")
+        self.assertEqual(state._station_epoch, before + 2)
+        self.assertEqual(
+            {i: (b.epoch, b.state) for i, b in state._bindings.items() if i != other},
+            bindings,
+        )
+
+    def _bound_again_with_a_fresh_command(
+        self,
+        state: loopback.ServerState,
+        clock: FakeClock,
+        instance: str,
+        pid: int,
+        peer: str,
+        cmd: str,
+    ) -> None:
+        """Past the reconnect gap, a poll from the bound pid makes the binding
+        BOUND again (its epoch stays the new one). A command sealed after the
+        move is delivered; the station epoch moves before it is answered, its
+        own binding's epoch does not; the answer is kept for /await."""
+        clock.advance(loopback.PEER_RECONNECT_GAP_S + 1.0)
+        state.record_poll(peer, instance=instance, source_pid=pid)
+        self.assertEqual(state._bindings[instance].state, instance_fence_mod.BINDING_BOUND)
+        status, fresh = state.enqueue_command(cmd, {}, peer=peer)
+        self.assertEqual(status, 200, fresh)
+        _status, poll = state.record_poll(peer, instance=instance, source_pid=pid)
+        self.assertEqual([c.get("id") for c in poll["commands"]], [fresh["id"]])
+        sealed = state._command_fence[fresh["id"]][1]
+        self.assertEqual(sealed, state._bindings[instance].epoch)
+        self._move_the_station_epoch(state)
+        self.assertNotEqual(state._station_epoch, sealed)
+        result_status, result = state.store_result(
+            {"id": fresh["id"], "ok": 1, "value": 6}, instance=instance
+        )
+        self.assertEqual((result_status, result.get("discarded")), (200, None), result)
+        self.assertEqual((state.take_result(fresh["id"]) or {}).get("value"), 6)
+
+    def test_a_late_result_of_a_server_or_offline_binding_is_audited(self) -> None:
+        # The other positive tests here use a client binding (last review of
+        # PR 419, P3). The trigger does not look at the role: a server
+        # binding, and an offline instance (one process that polls for both
+        # peers), write the same line when their own binding moved on,
+        # whether the old answer comes while the binding is AMBIGUOUS or once
+        # it is BOUND again. A command sealed after the move writes nothing,
+        # also when the station epoch moved before its answer. In every setup
+        # the sealed, binding and station epochs are three values. Mutants
+        # killed: the trigger limited to client bindings; offline bindings
+        # left out; server bindings left out; the other roles audited only
+        # while AMBIGUOUS (review r1); for offline, the station epoch
+        # deciding, or the station and binding epochs swapped in the line
+        # (review r2).
+        cases = (
+            ("server", INST_S1, 1001, "server", "world_time_get"),
+            ("offline", INST_OFF, 3003, "server", "world_time_get"),
+            ("offline", INST_OFF, 3003, "client", "camera_get"),
+        )
+        setups = [case + (when,) for case in cases for when in ("ambiguous", "bound_again")]
+        for role, instance, pid, peer, cmd, answered_while in setups:
+            with self.subTest(
+                role=role, peer=peer, answered_while=answered_while
+            ), TemporaryDirectory() as tmp:
+                clock = FakeClock()
+                state, writer, audit_file = self._state(tmp, clock)
+                _bind(state, instance, role, pid)
+                status, payload = state.enqueue_command(cmd, {}, peer=peer)
+                self.assertEqual(status, 200, payload)
+                command_id = payload["id"]
+                _status, poll = state.record_poll(peer, instance=instance, source_pid=pid)
+                self.assertEqual([c.get("id") for c in poll["commands"]], [command_id])
+                sealed_epoch = state._bindings[instance].epoch
+                self.assertEqual(state._command_fence[command_id][1], sealed_epoch)
+                state.record_poll(peer, instance=instance, source_pid=9999)
+                self.assertEqual(
+                    state._bindings[instance].state, instance_fence_mod.BINDING_AMBIGUOUS
+                )
+                if role == "server":
+                    # The client bound after it moves the station epoch only.
+                    _bind(state, INST_C1, "client", 2001)
+                else:
+                    # An offline run has no other peer: another run's binding,
+                    # installed and retired, moves the station epoch only.
+                    self._move_the_station_epoch(state)
+                if answered_while == "bound_again":
+                    self._bound_again_with_a_fresh_command(
+                        state, clock, instance, pid, peer, cmd
+                    )
+                    self.assertEqual(self._lines(audit_file), [])
+                binding_epoch = state._bindings[instance].epoch
+                station_epoch = state._station_epoch
+                self.assertEqual(len({sealed_epoch, binding_epoch, station_epoch}), 3)
+                result_status, result = state.store_result(
+                    {"id": command_id, "ok": 1, "value": 9}, instance=instance
+                )
+                self.assertEqual(
+                    (result_status, result),
+                    (200, {"ok": True, "id": command_id, "ok_value": 1}),
+                )
+                lines = self._lines(audit_file)
+                self.assertEqual(len(lines), 1, _audit_lines(audit_file))
+                self._assert_line(
+                    lines[0],
+                    command_id,
+                    (sealed_epoch, station_epoch, binding_epoch),
+                    "accepted",
+                    instance=instance,
+                )
+                self.assertEqual((state.take_result(command_id) or {}).get("value"), 9)
+                if answered_while == "ambiguous":
+                    self._bound_again_with_a_fresh_command(
+                        state, clock, instance, pid, peer, cmd
+                    )
+                    self.assertEqual(len(self._lines(audit_file)), 1, _audit_lines(audit_file))
+                self.assertEqual(writer.attempted.count(self.EVENT), 1, writer.attempted)
+                self.assertNotIn(instance, audit_file.read_text(encoding="utf-8"))
                 self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
 
     def test_a_late_result_after_the_binding_is_gone_has_no_binding_epoch(self) -> None:
