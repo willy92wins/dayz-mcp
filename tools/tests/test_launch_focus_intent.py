@@ -1,15 +1,17 @@
 """The launch focus guard records why it left a steal alone (5c8e follow-up).
 
-Oracle frozen before the implementation. In the desktop run of #417 two steals
-were classed user_switched and left alone, and nobody could tell why. The guard
-now reads the window under the cursor when a mouse button is pressed, not when
-the steal is detected (DayZ already covers the screen then), and it keeps a
-bounded log, FocusGuard.evidence(), written as `focus_evidence` in the guard's
-audit row next to the unchanged `focus` counters: one entry per arming (the
-time since the launcher call, what was in front) and one per steal (the input,
-its age, where the cursor was at the press and at detection, and what the rule
-of #417 would have decided). Windows appear only as categories. No test
-touches the desktop or starts a thread.
+Oracle frozen before the implementation (rev. 2, after the review of 5cf693e).
+In the desktop run of #417 two steals were classed user_switched and left
+alone, and nobody could tell why. The guard keeps its decision exactly as in
+#417 (the window under the cursor read when the steal is detected), and it
+now records the evidence: the window under the cursor when a mouse button was
+pressed, whether that press is trustworthy (released since, the longest gap
+between polls since, whether the person window changed since) and what a rule
+based on the press would have decided. It keeps a bounded log,
+FocusGuard.evidence(), written as `focus_evidence` in the guard's audit row
+next to the unchanged `focus` counters: one entry per arming (the time since
+the launcher call, what was in front) and one per steal. Windows appear only
+as categories. No test touches the desktop or starts a thread.
 """
 from __future__ import annotations
 
@@ -59,11 +61,15 @@ STEAL_KEYS = {
     "mouse_age_s",
     "click_age_s",
     "click_window",
+    "click_held",
+    "click_person_changed",
+    "poll_gap_s",
     "detect_window",
-    "old_user_switched",
+    "press_rule_switched",
 }
 CATEGORIES = {"run", "person", "other", "none"}
 OUTCOMES = {
+    "pending",
     "user_switched",
     "no_previous",
     "away",
@@ -72,6 +78,13 @@ OUTCOMES = {
     "returned",
     "elsewhere",
     "failed",
+}
+NO_PRESS = {
+    "click_age_s": None,
+    "click_window": None,
+    "click_held": None,
+    "click_person_changed": None,
+    "poll_gap_s": None,
 }
 
 
@@ -83,6 +96,22 @@ def _broken_cursor() -> int:
     raise OSError("no cursor")
 
 
+class _HookClock(FakeClock):
+    """A clock whose next reading first runs `hook` and then returns the time read
+    before it: another thread acting between a caller's clock read and its lock."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hook = None
+
+    def __call__(self) -> float:
+        value = self.now
+        hook, self.hook = self.hook, None
+        if hook is not None:
+            hook()
+        return value
+
+
 class _GuardCase(unittest.TestCase):
     def setUp(self) -> None:
         self.desk = FakeDesktop()
@@ -90,7 +119,8 @@ class _GuardCase(unittest.TestCase):
 
     def guard(self, **kwargs) -> FocusGuard:
         fns = kwargs.pop("fns", None) or self.desk.fns()
-        return FocusGuard(fns=fns, clock=self.clock, sleep=self.clock.sleep, **kwargs)
+        clock = kwargs.pop("clock", None) or self.clock
+        return FocusGuard(fns=fns, clock=clock, sleep=clock.sleep, **kwargs)
 
     def tick(self, guard: FocusGuard, seconds: float = 0.025) -> None:
         self.clock.now += seconds
@@ -116,8 +146,10 @@ class _GuardCase(unittest.TestCase):
                 self.assertEqual(got, want, key)
 
 
-class PressReadTest(_GuardCase):
-    def test_a_click_in_the_persons_window_just_before_dayz_covers_it_is_given_back(
+class DecisionUnchangedTest(_GuardCase):
+    """The decision stays the rule of #417; the press only goes to the log."""
+
+    def test_a_click_in_the_persons_window_just_before_dayz_covers_it_is_logged(
         self,
     ) -> None:
         guard = self.guard()
@@ -128,27 +160,32 @@ class PressReadTest(_GuardCase):
         self.tick(guard)
         pressed = self.clock.now
         self.desk.mouse = False
+        self.tick(guard)
         self.tick(guard, 0.2)
         self.desk.steal(CLIENT)  # ...and DayZ comes up under the cursor
         self.desk.cursor = CLIENT
         at = self.detect(guard)
-        self.assertEqual(self.desk.minimizes(), [CLIENT])
+        # As in #417: the cursor is over DayZ now, so the steal is left alone.
+        self.assertEqual(self.desk.calls, [])
         summary = guard.summary()
-        self.assertEqual((summary["returned"], summary["user_switched"]), (1, 0))
+        self.assertEqual((summary["user_switched"], summary["returned"]), (1, 0))
         (entry,) = steals(guard)
         self.assert_entry(
             entry,
             {
                 "kind": "steal",
                 "at_s": at - START,
-                "outcome": "returned",
+                "outcome": "user_switched",
                 "input": "mouse",
                 "key_age_s": None,
                 "mouse_age_s": at - pressed,
                 "click_age_s": at - pressed,
                 "click_window": "person",
+                "click_held": False,
+                "click_person_changed": False,
+                "poll_gap_s": 0.2,
                 "detect_window": "run",
-                "old_user_switched": True,
+                "press_rule_switched": False,
             },
         )
 
@@ -166,50 +203,24 @@ class PressReadTest(_GuardCase):
         self.tick(guard)
         self.desk.steal(CLIENT)
         at = self.detect(guard)
-        self.assertEqual(self.desk.minimizes(), [CLIENT])
+        self.assertEqual(self.desk.calls, [])
         (entry,) = steals(guard)
         self.assertEqual(
             (
                 entry["outcome"],
                 entry["input"],
                 entry["click_window"],
+                entry["click_held"],
                 entry["detect_window"],
-                entry["old_user_switched"],
+                entry["press_rule_switched"],
             ),
-            ("returned", "mouse", "person", "run", True),
+            ("user_switched", "mouse", "person", True, "run", False),
         )
         # The button is still down at the steal: the mouse was seen just now,
         # the press it belongs to earlier.
         self.assertAlmostEqual(entry["mouse_age_s"], 0.0, delta=0.011)
         self.assertAlmostEqual(entry["click_age_s"], at - pressed, delta=0.011)
-
-    def test_a_press_that_switched_to_another_window_gives_back_to_that_window(
-        self,
-    ) -> None:
-        guard = self.guard()
-        guard.add_pids([CLIENT_PID])
-        self.tick(guard)  # the person works in PERSON
-        self.desk.mouse = True  # and clicks OTHER to work there
-        self.desk.cursor = OTHER
-        self.tick(guard)
-        self.desk.mouse = False
-        self.desk.steal(OTHER)
-        self.tick(guard)  # OTHER is now the person's window
-        self.desk.steal(CLIENT)  # DayZ comes up under the cursor
-        self.desk.cursor = CLIENT
-        self.detect(guard)
-        self.assertEqual(self.desk.minimizes(), [CLIENT])
-        self.assertEqual(self.desk.front, OTHER)
-        (entry,) = steals(guard)
-        self.assertEqual(
-            (
-                entry["outcome"],
-                entry["click_window"],
-                entry["detect_window"],
-                entry["old_user_switched"],
-            ),
-            ("returned", "person", "run", True),
-        )
+        self.assertAlmostEqual(entry["poll_gap_s"], 0.025, delta=0.011)
 
     def test_each_new_press_reads_the_cursor_again(self) -> None:
         guard = self.guard()
@@ -224,12 +235,15 @@ class PressReadTest(_GuardCase):
         self.desk.cursor = PERSON
         self.tick(guard)
         self.desk.mouse = False
+        self.tick(guard)
         self.desk.steal(CLIENT)
         self.desk.cursor = CLIENT
         self.detect(guard)
-        self.assertEqual(self.desk.minimizes(), [CLIENT])
         (entry,) = steals(guard)
-        self.assertEqual(entry["click_window"], "person")
+        self.assertEqual(
+            (entry["click_window"], entry["click_held"], entry["press_rule_switched"]),
+            ("person", False, False),
+        )
 
     def test_a_button_already_down_at_the_first_poll_counts_as_a_press(self) -> None:
         self.desk.mouse = True
@@ -240,11 +254,14 @@ class PressReadTest(_GuardCase):
         self.desk.cursor = CLIENT
         self.desk.steal(CLIENT)
         self.detect(guard)
-        self.assertEqual(self.desk.minimizes(), [CLIENT])
+        self.assertEqual(self.desk.calls, [])
         (entry,) = steals(guard)
-        self.assertEqual(entry["click_window"], "person")
+        self.assertEqual(
+            (entry["click_window"], entry["click_held"], entry["press_rule_switched"]),
+            ("person", True, False),
+        )
 
-    def test_a_press_on_a_dayz_window_is_still_a_switch(self) -> None:
+    def test_a_press_on_a_dayz_window_is_logged_as_run(self) -> None:
         guard = self.guard()
         guard.add_pids([CLIENT_PID])
         self.tick(guard)
@@ -255,21 +272,18 @@ class PressReadTest(_GuardCase):
         self.desk.steal(CLIENT)
         self.detect(guard)
         self.assertEqual(self.desk.calls, [])
-        summary = guard.summary()
-        self.assertEqual(summary["user_switched"], 1)
         (entry,) = steals(guard)
         self.assertEqual(
             (
                 entry["outcome"],
-                entry["input"],
                 entry["click_window"],
                 entry["detect_window"],
-                entry["old_user_switched"],
+                entry["press_rule_switched"],
             ),
-            ("user_switched", "mouse", "run", "run", True),
+            ("user_switched", "run", "run", True),
         )
 
-    def test_a_press_on_another_window_is_a_switch(self) -> None:
+    def test_a_press_on_another_window_is_logged_as_other(self) -> None:
         guard = self.guard()
         guard.add_pids([CLIENT_PID])
         self.tick(guard)
@@ -283,9 +297,71 @@ class PressReadTest(_GuardCase):
         self.assertEqual(self.desk.calls, [])
         (entry,) = steals(guard)
         self.assertEqual(
-            (entry["outcome"], entry["click_window"], entry["detect_window"]),
-            ("user_switched", "other", "run"),
+            (entry["click_window"], entry["detect_window"], entry["press_rule_switched"]),
+            ("other", "run", True),
         )
+
+    def test_a_click_that_changed_the_person_window_is_flagged(self) -> None:
+        guard = self.guard()
+        guard.add_pids([CLIENT_PID])
+        self.tick(guard)  # the person works in PERSON
+        self.desk.mouse = True  # and clicks OTHER (an application, or a selector)
+        self.desk.cursor = OTHER
+        self.tick(guard)
+        self.desk.mouse = False
+        self.desk.steal(OTHER)
+        self.tick(guard)  # OTHER is now the person window
+        self.desk.steal(CLIENT)  # DayZ comes up under the cursor
+        self.desk.cursor = CLIENT
+        self.detect(guard)
+        self.assertEqual(self.desk.calls, [])
+        (entry,) = steals(guard)
+        self.assertEqual(
+            (
+                entry["outcome"],
+                entry["click_window"],
+                entry["click_person_changed"],
+                entry["press_rule_switched"],
+            ),
+            ("user_switched", "person", True, False),
+        )
+
+    def test_a_gap_in_polling_after_a_press_is_logged(self) -> None:
+        guard = self.guard()
+        guard.add_pids([CLIENT_PID])
+        self.tick(guard)
+        self.desk.mouse = True  # pressed in the person's window and, as far as polls show, held
+        self.desk.cursor = PERSON
+        self.tick(guard)
+        slow = []
+
+        def slow_give_back(hwnd: int) -> None:
+            if not slow:
+                slow.append(hwnd)
+                self.clock.now += 0.3  # no poll while the give-back runs
+
+        self.desk.on_minimize = slow_give_back
+        self.desk.steal(CLIENT)  # the cursor is still over PERSON: given back
+        self.detect(guard)
+        self.assertEqual(self.desk.minimizes(), [CLIENT])
+        # During the give-back the person released and pressed DayZ: no poll saw it.
+        self.desk.steal(CLIENT)
+        self.desk.cursor = CLIENT
+        self.detect(guard)
+        self.assertEqual(self.desk.minimizes(), [CLIENT])  # left alone, as in #417
+        first, second = steals(guard)
+        self.assertEqual(first["outcome"], "returned")
+        self.assertEqual(
+            (
+                second["outcome"],
+                second["click_window"],
+                second["click_held"],
+                second["press_rule_switched"],
+            ),
+            ("user_switched", "person", True, False),
+        )
+        self.assertGreaterEqual(second["poll_gap_s"], 0.3)
+        self.assertEqual(second["poll_gap_s"], round(second["poll_gap_s"], 2))
 
 
 class StealLogTest(_GuardCase):
@@ -311,10 +387,9 @@ class StealLogTest(_GuardCase):
                 "input": "key",
                 "key_age_s": at - key_at,
                 "mouse_age_s": None,
-                "click_age_s": None,
-                "click_window": None,
+                **NO_PRESS,
                 "detect_window": "person",
-                "old_user_switched": True,
+                "press_rule_switched": True,
             },
         )
 
@@ -333,8 +408,13 @@ class StealLogTest(_GuardCase):
         self.assertEqual(self.desk.calls, [])
         (entry,) = steals(guard)
         self.assertEqual(
-            (entry["outcome"], entry["input"], entry["click_window"]),
-            ("user_switched", "key", "person"),
+            (
+                entry["outcome"],
+                entry["input"],
+                entry["click_window"],
+                entry["press_rule_switched"],
+            ),
+            ("user_switched", "key", "person", True),
         )
 
     def test_a_steal_without_recent_input_is_given_back_and_logged_as_none(
@@ -357,10 +437,9 @@ class StealLogTest(_GuardCase):
                 "input": "none",
                 "key_age_s": None,
                 "mouse_age_s": None,
-                "click_age_s": None,
-                "click_window": None,
+                **NO_PRESS,
                 "detect_window": "run",
-                "old_user_switched": False,
+                "press_rule_switched": False,
             },
         )
 
@@ -392,10 +471,24 @@ class StealLogTest(_GuardCase):
                 "mouse_age_s": at - pressed,
                 "click_age_s": at - pressed,
                 "click_window": "run",
+                "click_held": False,
+                "click_person_changed": False,
+                "poll_gap_s": 0.5,
                 "detect_window": "run",
-                "old_user_switched": False,
+                "press_rule_switched": False,
             },
         )
+
+    def test_a_steal_reads_pending_while_its_give_back_runs(self) -> None:
+        guard = self.guard()
+        guard.add_pids([CLIENT_PID])
+        self.tick(guard)
+        seen = []
+        self.desk.on_minimize = lambda hwnd: seen.append(steals(guard)[-1]["outcome"])
+        self.desk.steal(CLIENT)
+        self.detect(guard)
+        self.assertEqual(seen, ["pending"])
+        self.assertEqual(steals(guard)[-1]["outcome"], "returned")
 
     def test_a_steal_with_no_window_to_give_back_to_is_logged(self) -> None:
         self.desk.front = CLIENT  # DayZ is in front at the arming, nothing known before it
@@ -521,6 +614,28 @@ class ArmLogTest(_GuardCase):
         self.assertLessEqual(log[0]["at_s"], log[1]["at_s"])
         self.assertLessEqual(log[1]["at_s"], log[2]["at_s"])
 
+    def test_times_never_run_backwards_when_a_steal_lands_during_an_arming(
+        self,
+    ) -> None:
+        clock = _HookClock()
+        self.clock = clock
+        guard = self.guard(clock=clock)
+        guard.add_pids([CLIENT_PID], foreground_before=PERSON)
+        self.tick(guard)
+        clock.now = START + 0.1
+
+        def steal_meanwhile() -> None:
+            clock.now = START + 0.2
+            self.desk.steal(CLIENT)
+            guard.step()  # another thread polls between the arming's clock read and its lock
+
+        clock.hook = steal_meanwhile
+        self.assertTrue(guard.extend([SERVER_PID], arm_delay_s=1.0))
+        log = guard.evidence()["entries"]
+        self.assertEqual([entry["kind"] for entry in log], ["arm", "steal", "arm"])
+        times = [entry["at_s"] for entry in log]
+        self.assertEqual(times, sorted(times))
+
 
 class LogBoundAndShapeTest(_GuardCase):
     def test_the_log_keeps_sixteen_entries_and_counts_the_rest(self) -> None:
@@ -574,8 +689,10 @@ class LogBoundAndShapeTest(_GuardCase):
             self.assertIn(entry["input"], {"key", "mouse", "none"})
             self.assertIn(entry["click_window"], CATEGORIES | {None})
             self.assertIn(entry["detect_window"], CATEGORIES)
-            self.assertIsInstance(entry["old_user_switched"], bool)
-            for key in ("at_s", "key_age_s", "mouse_age_s", "click_age_s"):
+            self.assertIn(entry["click_held"], {True, False, None})
+            self.assertIn(entry["click_person_changed"], {True, False, None})
+            self.assertIsInstance(entry["press_rule_switched"], bool)
+            for key in ("at_s", "key_age_s", "mouse_age_s", "click_age_s", "poll_gap_s"):
                 if entry[key] is not None:
                     self.assertIsInstance(entry[key], (int, float), key)
                     self.assertNotIsInstance(entry[key], bool, key)
@@ -600,7 +717,7 @@ class LogBoundAndShapeTest(_GuardCase):
 
 
 class CursorFailureTest(_GuardCase):
-    def test_a_press_whose_cursor_read_raises_is_not_the_persons(self) -> None:
+    def test_a_cursor_read_that_raises_counts_as_no_window(self) -> None:
         guard = self.guard(fns=replace(self.desk.fns(), cursor_window=_broken_cursor))
         guard.add_pids([CLIENT_PID])
         self.tick(guard)
@@ -758,7 +875,23 @@ class ArmDelayWiringTest(unittest.TestCase):
         (entry,) = guard.evidence()["entries"]
         self.assertIsNone(entry["arm_delay_s"])
 
-    def test_the_guard_row_carries_the_log(self) -> None:
+    def test_a_failed_clock_read_forgets_an_earlier_launch_of_the_run(self) -> None:
+        self.lifecycle._remember_focus_launch("run-x")  # a launch at 1000 that never armed
+
+        def broken_clock() -> float:
+            raise OSError("no clock")
+
+        self.clock.now = START + 10.0
+        self.lifecycle.focus_clock = broken_clock
+        self.lifecycle._remember_focus_launch("run-x")  # the next launch: its read fails
+        self.lifecycle.focus_clock = self.clock
+        self.clock.now = START + 14.0
+        self.lifecycle._arm_launch_focus(IDENTITY_A, "run-x", 41)
+        guard = self.lifecycle._focus_guards["run-x"]
+        (entry,) = guard.evidence()["entries"]
+        self.assertIsNone(entry["arm_delay_s"])
+
+    def test_the_guard_row_carries_the_evidence(self) -> None:
         guard = self.start()
         guard.disarm("foreground_verb")
         self.starts[0]()
@@ -820,8 +953,11 @@ class DocsTest(unittest.TestCase):
         for word in (
             "focus_evidence",
             "click_window",
+            "click_held",
+            "click_person_changed",
+            "poll_gap_s",
             "detect_window",
-            "old_user_switched",
+            "press_rule_switched",
             "arm_delay_s",
             "front_at_arm",
         ):
