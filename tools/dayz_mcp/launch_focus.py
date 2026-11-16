@@ -218,6 +218,8 @@ class FocusGuard:
         self._last_mouse: float | None = None
         self._last_key: float | None = None
         self._in_steal = False
+        self._give_back_running = False
+        self._fence: dict[int, dict] = {}
         self._attempts = 0
         self._first_steal_s: float | None = None
         self._reason: str | None = None
@@ -297,6 +299,8 @@ class FocusGuard:
     def step(self) -> None:
         with self._lock:
             now = self.clock()
+            self._service_fence(now)
+            self._refresh_idle()
             if not self.armed:
                 return
             if self._end is not None and now >= self._end:
@@ -349,19 +353,112 @@ class FocusGuard:
                 return
             self._attempts += 1
             pids = set(self._pids)
+            self._give_back_running = True
             self._idle.clear()
+        result: tuple[str, bool, bool, dict[int, dict]] | None = None
         try:
-            outcome, restored, departed = self.give_back(fg, prev, pids, pid)
+            result = self.give_back(fg, prev, pids, pid)
         finally:
             with self._lock:
-                self._idle.set()
-        with self._lock:
-            if departed:
-                self._in_steal = False
-            self._counters[outcome] += 1
-            if not restored:
-                self._counters["restore_failed"] += 1
-                self.disarm("restore_failed")
+                if result is None:
+                    outcome, restored, departed, fenced = "failed", False, False, {}
+                else:
+                    outcome, restored, departed, fenced = result
+                for window, info in fenced.items():
+                    self._fence[window] = info
+                self._give_back_running = False
+                self._counters[outcome] += 1
+                if departed:
+                    self._in_steal = False
+                if not restored:
+                    self._counters["restore_failed"] += 1
+                    self.disarm("restore_failed")
+                self._refresh_idle()
+
+    def _read_foreground(self) -> int:
+        try:
+            return int(self.fns.foreground() or 0)
+        except Exception:
+            return 0
+
+    def _read_pid(self, hwnd: int) -> int:
+        try:
+            return int(self.fns.window_pid(hwnd))
+        except Exception:
+            return 0
+
+    def _refresh_idle(self) -> None:
+        if not self._give_back_running and not self._fence:
+            self._idle.set()
+        else:
+            self._idle.clear()
+
+    def _service_fence(self, now: float) -> None:
+        for window in list(self._fence):
+            info = self._fence[window]
+            pid = info["pid"]
+            try:
+                if not self.fns.is_window(window):
+                    del self._fence[window]
+                    continue
+                if int(self.fns.window_pid(window)) != pid:
+                    del self._fence[window]
+                    continue
+            except Exception:
+                del self._fence[window]
+                continue
+            if not info["shown"]:
+                try:
+                    iconic = bool(self.fns.is_iconic(window))
+                except Exception:
+                    iconic = False
+                if not iconic:
+                    continue
+                try:
+                    owned = bool(self.fns.is_window(window)) and int(
+                        self.fns.window_pid(window)
+                    ) == pid
+                except Exception:
+                    owned = False
+                if not owned:
+                    del self._fence[window]
+                    continue
+                try:
+                    accepted = bool(self.fns.show_no_activate(window))
+                except Exception:
+                    accepted = False
+                info["shown"] = True
+                info["tries"] = 1
+                info["accepted"] = accepted
+                info["at"] = now
+                continue
+            try:
+                iconic = bool(self.fns.is_iconic(window))
+            except Exception:
+                iconic = False
+            if info["accepted"] and not iconic:
+                del self._fence[window]
+                continue
+            if (not info["accepted"]) or (now - info["at"] >= self.settle_s):
+                if info["tries"] < 2:
+                    try:
+                        owned = bool(self.fns.is_window(window)) and int(
+                            self.fns.window_pid(window)
+                        ) == pid
+                    except Exception:
+                        owned = False
+                    if not owned:
+                        del self._fence[window]
+                        continue
+                    try:
+                        accepted = bool(self.fns.show_no_activate(window))
+                    except Exception:
+                        accepted = False
+                    info["tries"] = 2
+                    info["accepted"] = accepted
+                    info["at"] = now
+                else:
+                    del self._fence[window]
 
     def run(
         self,
@@ -372,8 +469,13 @@ class FocusGuard:
         last = self.clock()
         while True:
             self.step()
+            with self._lock:
+                fence_empty = not self._fence
             if not self.armed:
-                return self.summary()
+                if fence_empty:
+                    return self.summary()
+                self.sleep(self.poll_s)
+                continue
             if live_pids is not None and self.clock() - last >= check_every_s:
                 last = self.clock()
                 read_at = self.clock()
@@ -381,7 +483,7 @@ class FocusGuard:
                     live = {int(pid) for pid in live_pids()}
                 except Exception:
                     self.disarm("alive_unknown")
-                    return self.summary()
+                    continue
                 with self._lock:
                     keep = {
                         pid
@@ -395,12 +497,12 @@ class FocusGuard:
                     empty = not self._pids
                 if empty:
                     self.disarm("run_ended")
-                    return self.summary()
+                    continue
             self.sleep(self.poll_s)
 
     def give_back(
         self, fg: int, prev: int, pids: set[int], verified_pid: int
-    ) -> tuple[str, bool, bool]:
+    ) -> tuple[str, bool, bool, dict[int, dict]]:
         start = self.clock()
         settle_at = start + self.settle_s
         give_up_at = start + self.unresolved_s
@@ -415,7 +517,7 @@ class FocusGuard:
             if target is not None and target not in tried:
                 tried.add(target)
                 try:
-                    owner = self.fns.window_pid(target)
+                    owner = int(self.fns.window_pid(target))
                 except Exception:
                     owner = 0
                 if owner == target_pid and owner in pids:
@@ -428,40 +530,35 @@ class FocusGuard:
                             if posted_ok:
                                 posted.append((target, owner))
                 target = None
-            try:
-                cur = int(self.fns.foreground() or 0)
-            except Exception:
-                cur = 0
+            before = self._read_foreground()
+            if before != 0 and self._read_pid(before) not in pids:
+                departed = True
             for window, pid in posted:
                 if window in seen:
                     continue
                 try:
                     if (
                         self.fns.is_window(window)
-                        and self.fns.window_pid(window) == pid
+                        and int(self.fns.window_pid(window)) == pid
                         and self.fns.is_iconic(window)
                     ):
                         seen.add(window)
                 except Exception:
                     pass
-            cur_pid = 0
-            if cur != 0:
-                try:
-                    cur_pid = self.fns.window_pid(cur)
-                except Exception:
-                    cur_pid = 0
-                if cur_pid not in pids:
-                    departed = True
+            after = self._read_foreground()
+            after_pid = self._read_pid(after) if after != 0 else 0
+            if after != 0 and after_pid not in pids:
+                departed = True
             if (
                 self.armed
-                and cur != 0
-                and cur_pid in pids
-                and cur not in tried
+                and after != 0
+                and after_pid in pids
+                and after not in tried
                 and self.clock() < settle_at
             ):
-                if self._verified(cur_pid):
-                    target = cur
-                    target_pid = cur_pid
+                if self._verified(after_pid):
+                    target = after
+                    target_pid = after_pid
                     continue
             all_seen = all(
                 window in seen or not self._owned(window, pid)
@@ -473,47 +570,54 @@ class FocusGuard:
                 break
             self.sleep(self.poll_s)
 
-        stuck = {
-            window
+        restore_windows = [
+            (window, pid) for window, pid in posted if window in seen
+        ]
+        fenced = {
+            window: {
+                "pid": pid,
+                "shown": False,
+                "accepted": None,
+                "tries": 0,
+                "at": 0.0,
+            }
             for window, pid in posted
-            if self._owned(window, pid) and window not in seen
+            if window not in seen and self._owned(window, pid)
         }
         accepted: dict[int, bool] = {}
-        self._post_show(posted, accepted)
-        self._settle(posted, accepted)
+        self._post_show(restore_windows, accepted)
+        if self._settle(restore_windows, accepted, pids):
+            departed = True
         still = [
             (window, pid)
-            for window, pid in posted
+            for window, pid in restore_windows
             if self._unresolved(window, pid, accepted)
         ]
         if still:
             self._post_show(still, accepted)
-            self._settle(posted, accepted)
+            if self._settle(restore_windows, accepted, pids):
+                departed = True
         restored = (
             not any(
                 self._unresolved(window, pid, accepted)
-                for window, pid in posted
+                for window, pid in restore_windows
             )
-            and not stuck
+            and not fenced
         )
-        try:
-            front = int(self.fns.foreground() or 0)
-        except Exception:
-            front = 0
-        if front == prev:
-            outcome = "returned"
-        elif front != 0:
-            try:
-                front_pid = self.fns.window_pid(front)
-            except Exception:
-                front_pid = 0
+        front = self._read_foreground()
+        if front != 0:
+            front_pid = self._read_pid(front)
             if front_pid not in pids:
+                departed = True
+            if front == prev:
+                outcome = "returned"
+            elif front_pid not in pids:
                 outcome = "elsewhere"
             else:
                 outcome = "failed"
         else:
             outcome = "failed"
-        return outcome, restored, departed
+        return outcome, restored, departed, fenced
 
     def _owned(self, window: int, pid: int) -> bool:
         try:
@@ -549,20 +653,27 @@ class FocusGuard:
                 accepted[window] = False
 
     def _settle(
-        self, windows: list[tuple[int, int]], accepted: dict[int, bool]
-    ) -> None:
+        self,
+        windows: list[tuple[int, int]],
+        accepted: dict[int, bool],
+        pids: set[int],
+    ) -> bool:
+        departed = False
         deadline = self.clock() + self.settle_s
         while True:
+            front = self._read_foreground()
+            if front != 0 and self._read_pid(front) not in pids:
+                departed = True
             if any(value is False for value in accepted.values()):
-                return
+                return departed
             if not any(
                 self._unresolved(window, pid, accepted)
                 for window, pid in windows
             ):
-                return
+                return departed
             left = deadline - self.clock()
             if left <= 0:
-                return
+                return departed
             self.sleep(min(self.poll_s, left))
 
     def _verified(self, pid: int) -> bool:

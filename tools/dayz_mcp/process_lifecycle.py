@@ -2541,6 +2541,7 @@ class ProcessLifecycle:
         self._launch_focus_by_run: dict[str, tuple[str, float, str | None]] = {}
         self._focus_decided: dict[str, str] = {}
         self._focus_guards: dict[str, launch_focus.FocusGuard] = {}
+        self._focus_guards_retired: dict[str, list[launch_focus.FocusGuard]] = {}
         self._launch_focus_lock = threading.Lock()
         self.focus_fns = focus_fns
         self.focus_start = None
@@ -5009,6 +5010,8 @@ class ProcessLifecycle:
         try:
             with self._launch_focus_lock:
                 guards = list(self._focus_guards.values())
+                for retired in self._focus_guards_retired.values():
+                    guards.extend(retired)
             for guard in guards:
                 guard.disarm(reason)
         except Exception:
@@ -5066,6 +5069,10 @@ class ProcessLifecycle:
                     ):
                         new = False
                 if new:
+                    if guard is not None and not guard.wait_idle(0):
+                        self._focus_guards_retired.setdefault(run_id, []).append(
+                            guard
+                        )
                     guard = launch_focus.FocusGuard(
                         fns=fns,
                         verify=lambda p, r=run_id: self._focus_pid_owned(r, p),
@@ -5106,6 +5113,13 @@ class ProcessLifecycle:
             with self._launch_focus_lock:
                 if self._focus_guards.get(run_id) is guard:
                     del self._focus_guards[run_id]
+                retired = self._focus_guards_retired.get(run_id)
+                if retired is not None:
+                    kept = [item for item in retired if item is not guard]
+                    if kept:
+                        self._focus_guards_retired[run_id] = kept
+                    else:
+                        self._focus_guards_retired.pop(run_id, None)
             decision = (
                 "gave_back"
                 if summary["returned"] + summary["elsewhere"] + summary["failed"] > 0
@@ -5127,12 +5141,27 @@ class ProcessLifecycle:
     ) -> bool:
         with self._launch_focus_lock:
             guard = self._focus_guards.get(run_id)
-        if guard is None:
+            retired = list(self._focus_guards_retired.get(run_id, ()))
+        guards = ([guard] if guard is not None else []) + retired
+        if not guards:
             return True
-        guard.disarm(reason)
+        for item in guards:
+            item.disarm(reason)
         if wait_s <= 0:
             return True
-        return guard.wait_idle(wait_s)
+        deadline = time.monotonic() + wait_s
+        idle = True
+        for item in guards:
+            left = max(0.0, deadline - time.monotonic())
+            if not item.wait_idle(left):
+                idle = False
+        with self._launch_focus_lock:
+            still = [item for item in retired if not item.wait_idle(0)]
+            if still:
+                self._focus_guards_retired[run_id] = still
+            else:
+                self._focus_guards_retired.pop(run_id, None)
+        return idle
 
     def _steam_mutation_allowed(self) -> bool | str:
         """Probe outside the lifecycle lock, then compare the captured run state."""
