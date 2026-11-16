@@ -5349,11 +5349,18 @@ class ServerState:
         self._write_audit_payload(payload)
 
     def _flush_pending_audits(self) -> None:
-        if self._lock._is_owned():
+        if not self._pending_audits:
             return
         writer = self.audit_writer
         write = getattr(writer, "write", None)
         if not callable(write):
+            if self._lock._is_owned():
+                self._pending_audits = []
+                return
+            with self._lock:
+                self._pending_audits = []
+            return
+        if self._lock._is_owned():
             return
         with self._lock:
             if not self._pending_audits:
@@ -5367,6 +5374,10 @@ class ServerState:
                 pass
 
     def _write_audit_payload(self, payload: dict[str, object]) -> None:
+        writer = self.audit_writer
+        write = getattr(writer, "write", None)
+        if not callable(write):
+            return
         if self._lock._is_owned():
             self._pending_audits.append(payload)
             return
