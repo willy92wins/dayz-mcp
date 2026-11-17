@@ -299,18 +299,19 @@ class LifecycleStartTest(unittest.TestCase):
         self.assertEqual(self._rejections(), [("box_reserved", "spawn")])
         self.assertEqual(lifecycle.box_occupancy()["runs"], [])
 
-    def test_the_last_look_comes_after_the_foreground_read(self) -> None:
-        # The foreground read is the last step before that look; nothing that
-        # can block or touch the disk sits between the look and the spawn.
+    def test_the_last_look_comes_after_the_launch_focus(self) -> None:
+        # Binding the launch focus, which takes a lock another request can
+        # hold, is the last step before that look; nothing that can wait or
+        # touch the disk sits between the look and the spawn.
         lifecycle = self.fixture.lifecycle
-        original_foreground = lifecycle._focus_foreground
+        original_focus = lifecycle._launch_focus_for_run
 
-        def foreground_then_reserve() -> int:
-            value = original_foreground()
+        def focus_then_reserve(*args: object, **kwargs: object) -> str:
+            mode = original_focus(*args, **kwargs)
             _write_flag(self.flag, age_s=0.0)
-            return value
+            return mode
 
-        lifecycle._focus_foreground = foreground_then_reserve  # type: ignore[method-assign]
+        lifecycle._launch_focus_for_run = focus_then_reserve  # type: ignore[method-assign]
 
         result = self._start()
 

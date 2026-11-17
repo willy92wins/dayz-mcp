@@ -5743,15 +5743,16 @@ class ProcessLifecycle:
                         cancel=cancel,
                     )
                 focus_before = self._focus_foreground()
+                self._launch_focus_for_run(client, run_id, authority[1])
                 # The M1 reservation file once more, the last look before the
                 # spawn: the storage rotation and the launch intent above
-                # write to disk, and the file may appear while they do. It
-                # comes before the launch focus is bound to this run, so a
-                # refused launch keeps the caller's mode for its retry, and
-                # what is left until the process starts is in-memory work.
-                # Closing that window too would need M1 to hold the box
-                # admission lock while it writes the file. The refusal is
-                # settled like a launcher failure (box_reservation.py).
+                # write to disk, and binding the launch focus can wait for its
+                # lock, so the file may appear meanwhile. A refused start has
+                # used up its focus mode, as any failed start does. What is
+                # left until the process starts is a clock read; closing that
+                # window too would need M1 to hold the box admission lock
+                # while it writes the file. The refusal is settled like a
+                # launcher failure (box_reservation.py).
                 if box_reservation.current_reservation() is not None:
                     audited = self._audit(
                         "lifecycle_start_rejected",
@@ -5774,7 +5775,6 @@ class ProcessLifecycle:
                     if not audited:
                         self._add_degradation(settled, "audit_failed")
                     return settled
-                self._launch_focus_for_run(client, run_id, authority[1])
                 launched_at = self._server_start_clock()
                 try:
                     launched = self.launcher(
