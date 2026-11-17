@@ -15,6 +15,7 @@ no release decided writes nothing.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import tempfile
 import unittest
@@ -381,41 +382,53 @@ class ReleaseAuditSourcesTest(unittest.TestCase):
         # Review r3 of PR 427: once the release is decided under the lock, a
         # later failure (finish_operation_exact raising) must not lose its
         # line, whichever path decided it: the reaper at the deadline, the
-        # caller's /abandon or an in-process abandon. The error still reaches
-        # the caller, as PR 418 pins for the spawn, and a second abandon and a
-        # reap add nothing. Mutants killed: these sources audited only after a
-        # flush that returned normally, on every path or on one; the error
-        # swallowed.
+        # caller's /abandon or an in-process abandon. Review r1 of PR 428:
+        # whatever the error, and for a refused release too (retail
+        # quarantine). The error still reaches the caller, as PR 418 pins for
+        # the spawn, and a second abandon and a reap add nothing. Mutants
+        # killed: these sources audited only after a flush that returned
+        # normally, on every path or on one; the error swallowed; the line
+        # written on one error type only; only a queued release audited after
+        # a failure.
         reasons = {"deadline": "deadline", "http": "cancelled", "in_process": "tool_cancelled"}
-        for source in SOURCES:
-            for path, reason in reasons.items():
-                with self.subTest(source=source[0], path=path):
-                    state, coordinator, now, token = self._state()
-                    audit = self._real_audit(state)
-                    body = self._delivered(state, token, source)
-                    with patch.object(
-                        coordinator, "finish_operation_exact", side_effect=RuntimeError("injected")
-                    ):
-                        with self.assertRaises(RuntimeError):
-                            if path == "deadline":
-                                now[0] += 6.0
-                                state.status_snapshot()
-                            elif path == "http":
-                                self._request_abandon(state, token, body["id"], reason)
-                            else:
-                                state.abandon_command(body["id"], reason)
-                    queued = self._queued_releases(state, source)
+        cases = itertools.product(
+            SOURCES, reasons.items(), ("release_queued", "cleanup_degraded"), (RuntimeError, OSError)
+        )
+        for source, (path, reason), decision, error in cases:
+            with self.subTest(source=source[0], path=path, decision=decision, error=error.__name__):
+                state, coordinator, now, token = self._state()
+                audit = self._real_audit(state)
+                body = self._delivered(state, token, source)
+                if decision == "cleanup_degraded":
+                    state.retail_probe = lambda: {"known": True, "processes": [{"name": "DayZ_x64.exe"}]}
+                with patch.object(coordinator, "finish_operation_exact", side_effect=error("injected")):
+                    with self.assertRaises(error):
+                        if path == "deadline":
+                            now[0] += 6.0
+                            state.status_snapshot()
+                        elif path == "http":
+                            self._request_abandon(state, token, body["id"], reason)
+                        else:
+                            state.abandon_command(body["id"], reason)
+                queued = self._queued_releases(state, source)
+                lines = self._release_lines(audit)
+                self.assertEqual(len(lines), 1, self._lines(audit))
+                if decision == "release_queued":
                     self.assertEqual(len(queued), 1, bound_queue(state, source[1]))
-                    lines = self._release_lines(audit)
-                    self.assertEqual(len(lines), 1, self._lines(audit))
                     self._assert_line(
                         lines[0], source, command_id=body["id"], reason=reason,
-                        decision="release_queued", release_id=queued[0]["id"],
+                        decision=decision, release_id=queued[0]["id"],
                     )
-                    self.assertEqual(state.abandon_command(body["id"], "cancelled"), {"status": "noop"})
-                    now[0] += 6.0
-                    state.status_snapshot()
-                    self.assertEqual(len(self._release_lines(audit)), 1, self._lines(audit))
+                else:
+                    self.assertEqual(queued, [])
+                    self._assert_line(
+                        lines[0], source, command_id=body["id"], reason=reason,
+                        decision=decision, cause="quarantine",
+                    )
+                self.assertEqual(state.abandon_command(body["id"], "cancelled"), {"status": "noop"})
+                now[0] += 6.0
+                state.status_snapshot()
+                self.assertEqual(len(self._release_lines(audit)), 1, self._lines(audit))
 
     def test_a_hold_cancelled_by_a_lease_end_without_a_round_is_audited_as_lease_end(self) -> None:
         # cleanup_owner's path without a lease-end close round
