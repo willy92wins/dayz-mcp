@@ -14,6 +14,11 @@ would load (native_launcher_transaction.read_bridge_pbos). The fixture policies
 name P:\\Mods, where the deployed PBO lives on the development PC, so every test
 gets a reader that reads nothing; a test of the gate patches its own.
 
+The daemon reads the DayZ Studio (M1) reservation of the box from a file on
+the development PC (box_reservation.read_box_reservation), which M1 creates
+and removes while this suite may run. Every test gets a reader that finds no
+reservation; a test of the reservation patches its own.
+
 The server import below runs before any test module's body, and inbox.py reads
 LOCALAPPDATA on import. test_progressive_disclosure.py and
 test_fn_p0_small_model_loops.py default it before they import the server, so
@@ -39,6 +44,7 @@ if os.name != "nt":
 
     linux_compat.install()
 
+from dayz_mcp import box_reservation as _box_reservation  # noqa: E402
 from dayz_mcp import native_launcher_transaction as _launcher_transaction  # noqa: E402
 from dayz_mcp import server as _server  # noqa: E402
 
@@ -62,3 +68,10 @@ def no_bridge_pbos(mod_path: str) -> list[bytes]:
 
 
 _launcher_transaction.read_bridge_pbos = no_bridge_pbos
+
+
+def no_box_reservation() -> None:
+    return None
+
+
+_box_reservation.read_box_reservation = no_box_reservation

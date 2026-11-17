@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, urlparse
 
 from dayz_mcp import (
     anim_timeline,
+    box_reservation,
     camera_path,
     daemon_credential,
     loadout,
@@ -701,6 +702,13 @@ def _box_payload(state: "ServerState") -> dict:
                     occupancy["claimed_s"] = claim.get("claimed_s")
     occupancy["queue"] = queue
     if claimed:
+        occupancy["occupied"] = True
+    # The DayZ Studio (M1) reservation file, read on every status and never
+    # cached: M1's servers leave gaps in which no DayZ holds the box, and a
+    # FIFO waiter must not read it free in them (box_reservation.py).
+    reservation = box_reservation.current_reservation()
+    if reservation is not None:
+        occupancy["reservation"] = reservation
         occupancy["occupied"] = True
     if "occupied" not in occupancy:
         occupancy["occupied"] = True

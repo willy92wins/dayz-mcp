@@ -28,6 +28,7 @@ from typing import Callable, Mapping, TypeVar
 
 from dayz_mcp import (
     box_holder,
+    box_reservation,
     dayz_test_storage,
     launch_focus,
     window_close,
@@ -5385,6 +5386,16 @@ class ProcessLifecycle:
                     "active_run_exists",
                     audit_reason="box_claimed",
                 )
+            # The DayZ Studio (M1) reservation file (box_reservation.py). Read
+            # again after the last socket-table read, before the storage
+            # rotation, and once more right before the spawn.
+            if box_reservation.current_reservation() is not None:
+                return self._start_rejection(
+                    client,
+                    authority,
+                    "active_run_exists",
+                    audit_reason=box_reservation.BOX_RESERVED,
+                )
             registered_pids = {
                 record.pid for run in active for record in run.processes
             }
@@ -5640,6 +5651,13 @@ class ProcessLifecycle:
                 pre_launch_reason = self._foreign_port_reason(
                     registered_pids, requested_port
                 )
+                # The M1 reservation file, read after the socket table: the
+                # last look before the spawn (box_reservation.py).
+                if (
+                    pre_launch_reason is None
+                    and box_reservation.current_reservation() is not None
+                ):
+                    pre_launch_reason = box_reservation.BOX_RESERVED
                 if pre_launch_reason is not None:
                     audited = self._audit(
                         "lifecycle_start_rejected",
@@ -5761,6 +5779,37 @@ class ProcessLifecycle:
                 focus_before = self._focus_foreground()
                 self._remember_focus_launch(run_id)
                 self._launch_focus_for_run(client, run_id, authority[1])
+                # The M1 reservation file once more, the last look before the
+                # spawn: the storage rotation and the launch intent above
+                # write to disk, and binding the launch focus can wait for its
+                # lock, so the file may appear meanwhile. A refused start has
+                # used up its focus mode, as any failed start does. What is
+                # left until the process starts is a clock read; closing that
+                # window too would need M1 to hold the box admission lock
+                # while it writes the file. The refusal is settled like a
+                # launcher failure (box_reservation.py).
+                if box_reservation.current_reservation() is not None:
+                    audited = self._audit(
+                        "lifecycle_start_rejected",
+                        client,
+                        box_reservation.BOX_RESERVED,
+                        "rejected",
+                        run_id=run_id,
+                        stage="spawn",
+                    )
+                    self._retire_minted(run_id, launch_role, minted, "launch_failed")
+                    settled = self._settle_failed_launch(
+                        client=client,
+                        previous=previous,
+                        provisional=provisional,
+                        launched=None,
+                        record=None,
+                        confirmed_error="active_run_exists",
+                        attempt_started_at=attempt_started_at,
+                    )
+                    if not audited:
+                        self._add_degradation(settled, "audit_failed")
+                    return settled
                 launched_at = self._server_start_clock()
                 try:
                     launched = self.launcher(
