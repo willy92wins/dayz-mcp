@@ -5353,7 +5353,8 @@ class ProcessLifecycle:
                     audit_reason="box_claimed",
                 )
             # The DayZ Studio (M1) reservation file (box_reservation.py). Read
-            # again right before the spawn, beside the last socket-table read.
+            # again after the last socket-table read, before the storage
+            # rotation, and once more right before the spawn.
             if box_reservation.current_reservation() is not None:
                 return self._start_rejection(
                     client,
@@ -5741,6 +5742,32 @@ class ProcessLifecycle:
                         attempt_started_at=attempt_started_at,
                         cancel=cancel,
                     )
+                # The M1 reservation file once more, right before the spawn:
+                # the storage rotation and the launch intent above write to
+                # disk, and the file may appear while they do. The refusal is
+                # settled like a launcher failure (box_reservation.py).
+                if box_reservation.current_reservation() is not None:
+                    audited = self._audit(
+                        "lifecycle_start_rejected",
+                        client,
+                        box_reservation.BOX_RESERVED,
+                        "rejected",
+                        run_id=run_id,
+                        stage="spawn",
+                    )
+                    self._retire_minted(run_id, launch_role, minted, "launch_failed")
+                    settled = self._settle_failed_launch(
+                        client=client,
+                        previous=previous,
+                        provisional=provisional,
+                        launched=None,
+                        record=None,
+                        confirmed_error="active_run_exists",
+                        attempt_started_at=attempt_started_at,
+                    )
+                    if not audited:
+                        self._add_degradation(settled, "audit_failed")
+                    return settled
                 focus_before = self._focus_foreground()
                 self._launch_focus_for_run(client, run_id, authority[1])
                 launched_at = self._server_start_clock()
