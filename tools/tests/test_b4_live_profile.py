@@ -218,6 +218,7 @@ class AlwaysRefusedTest(unittest.TestCase):
             ("vehicle_control", {}, "client"),
             ("vehicle_telemetry", {}, "client"),
             ("player_kill", {}, "server"),
+            ("player_set_stance", {}, "server"),
             ("world_spawn", {}, "server"),
             ("restore_gameplay", {}, "client"),
         )
@@ -350,6 +351,10 @@ class _FakeLifecycle:
         self.calls.append("foreground")
         return {"ok": True, "run_id": value, "state": "RUNNING"}
 
+    def set_launch_focus(self, client, mode, token=None):
+        self.calls.append("focus")
+        return {"ok": True, "focus": mode}
+
     def adopt_run(self, client, token, value):
         self.calls.append("adopt")
         return {"ok": True, "run_id": value, "state": "RUNNING"}
@@ -389,6 +394,7 @@ _LIFECYCLE_BODIES: dict[str, dict] = {
         "run_id": "R",
         "hold_s": 1,
     },
+    "focus": {"identity": IDENTITY_PAYLOAD, "mode": "take"},
     "adopt": {"identity": IDENTITY_PAYLOAD, "lease_token": "token", "run_id": "R"},
     "reap": {"identity": IDENTITY_PAYLOAD, "lease_token": "token", "run_id": "R"},
     "status": {"identity": IDENTITY_PAYLOAD},

@@ -9,12 +9,14 @@ the bridges are not under test here.
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 import threading
 import time
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -24,6 +26,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp import core, loopback, session_coordination
+from dayz_mcp.runtime_state import JsonlAuditWriter, RuntimePaths
 from dayz_mcp.session_coordination import (
     LEASE_END_BOUND_S,
     SESSION_TTL_S,
@@ -4354,6 +4357,48 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self.assertEqual(close["id"], queued["id"])
         self._accepted(self._settle("client", close))
         self.assertEqual(self._queued("server"), ["lease_close"])
+
+    def test_a_late_copy_of_an_undelivered_close_is_audited_as_discarded(self) -> None:
+        # late_result_same_instance on store_result's lease-close branch. A
+        # second process presents the client's instance while its close is
+        # still queued, so the binding goes AMBIGUOUS and takes a new epoch;
+        # then a result for that close comes from the same instance. It is
+        # discarded as for any undelivered close, and its audit line says
+        # discarded, as the HTTP answer does. Mutant killed: the decision left
+        # at accepted on this branch.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = RuntimePaths(
+                root, root / "audit", root / "coordination.json", root / "runs.json"
+            )
+            self.state.audit_writer = JsonlAuditWriter(paths, "gen-close-same-instance")
+            self._ended_lease()
+            queued = self.state._bound_queues[INST_CLIENT][0]
+            sealed_epoch = self.state._command_fence[queued["id"]][1]
+            self.assertEqual(self._poll("client", pid=PID_CLIENT + 1), [])
+            binding_epoch = self.state._bindings[INST_CLIENT].epoch
+            self.assertNotEqual(binding_epoch, sealed_epoch)
+            ignored = self.state._lease_close_ignored
+            self._discarded(self._settle("client", queued))
+            self.assertEqual(self.state._lease_close_ignored, ignored + 1)
+            audit_file = root / "audit" / "events.jsonl"
+            text = audit_file.read_text(encoding="utf-8") if audit_file.exists() else ""
+            lines = [json.loads(line) for line in text.splitlines() if line.strip()]
+            same = [e for e in lines if e.get("event") == "late_result_same_instance"]
+            self.assertEqual(
+                [
+                    (
+                        e.get("command_id"),
+                        e.get("decision"),
+                        e.get("reason"),
+                        e.get("expected_epoch"),
+                        e.get("binding_epoch"),
+                    )
+                    for e in same
+                ],
+                [(queued["id"], "discarded", "binding_epoch_changed", sealed_epoch, binding_epoch)],
+                lines,
+            )
 
     def test_close_result_ok_accepts_true_and_int_one_only(self) -> None:
         # POS: Enforce serializes bool ok as 0/1; both True and int 1 settle

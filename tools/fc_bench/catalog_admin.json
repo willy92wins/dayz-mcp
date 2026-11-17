@@ -66,6 +66,12 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "trigger_cursor": {
+            "type": "integer"
+          },
+          "trigger_run": {
+            "type": "integer"
+          },
           "timeout_s": {
             "type": "number"
           }

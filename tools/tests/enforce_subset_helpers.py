@@ -179,6 +179,21 @@ class EnforceArray(list):
     def Clear(self) -> None:
         del self[:]
 
+    def Remove(self, index: int) -> None:
+        # array.Remove puts the last element in the hole; the order is not
+        # kept (scripts/1_core/proto/enscript.c:457-463).
+        if type(index) is not int or not 0 <= index < len(self):
+            raise AssertionError(f"Remove({index!r}) outside an array of {len(self)}")
+        last = self.pop()
+        if index < len(self):
+            self[index] = last
+
+    def RemoveOrdered(self, index: int) -> None:
+        # array.RemoveOrdered keeps the order (enscript.c:464-469).
+        if type(index) is not int or not 0 <= index < len(self):
+            raise AssertionError(f"RemoveOrdered({index!r}) outside an array of {len(self)}")
+        del self[index]
+
 
 class EnforceMap:
     """map<K, V> in insertion order. Get of a missing key is null; a second

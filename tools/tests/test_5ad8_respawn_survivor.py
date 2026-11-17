@@ -120,8 +120,19 @@ class _CharData:
 
 
 class _Player:
+    # Dead: the state vanilla respawns. A living, conscious, free player is
+    # refused before anything changes (tests/test_player_respawn_alive.py).
     def __init__(self, log: list) -> None:
         self._log = log
+
+    def IsAlive(self) -> bool:
+        return False
+
+    def IsUnconscious(self) -> bool:
+        return False
+
+    def IsRestrained(self) -> bool:
+        return False
 
     def SimulateDeath(self, flag: bool) -> None:
         self._log.append(("SimulateDeath", flag))
@@ -340,7 +351,8 @@ class EnforceSourceTest(unittest.TestCase):
         self.assertEqual(CLIENT_CAPABILITY_BITS[:46], BASE_CLIENT)
         self.assertEqual(CLIENT_CAPABILITY_BITS[46], COMMAND)
         self.assertEqual(CLIENT_CAPABILITY_BITS[47:], ("ui_menu_set", "ui_map_set"))
-        self.assertEqual(SERVER_CAPABILITY_BITS, SERVER_BITS)
+        self.assertEqual(SERVER_CAPABILITY_BITS[:48], SERVER_BITS)
+        self.assertEqual(SERVER_CAPABILITY_BITS[48:], ("player_set_stance",))
         self.assertEqual(SERVER_ARG_CONTRACT, SERVER_CONTRACT)
         self.assertEqual(server_arg_contract_hash(), "3b800b7c7ee0674c")
         self.assertEqual(bridge_readiness.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b800b7c7ee0674c")

@@ -9,6 +9,7 @@ from tests.steam_helpers import FakeSteamGate
 
 import ast
 import dataclasses
+import functools
 import hashlib
 import json
 import os
@@ -16,9 +17,11 @@ import re
 import time
 import unittest
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from tests._addon_paths import addon_root
 
@@ -34,7 +37,7 @@ from dayz_mcp.process_lifecycle import (
     RunManifestStore,
     RunRecord,
 )
-from dayz_mcp.runtime_state import RuntimePaths
+from dayz_mcp.runtime_state import JsonlAuditWriter, RuntimePaths
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from tests.lifecycle_helpers import stamp_launcher
 from tests._source_snapshot import source_of
@@ -336,6 +339,958 @@ class ResultFenceTest(unittest.TestCase):
         self.assertNotIn(INST_C2, blob)
         names = [event.get("event") for event in events]
         self.assertIn("late_result_fenced", names)
+
+
+class _LockCheckedWriter:
+    """The daemon's JsonlAuditWriter, noting each write made under the broker lock.
+
+    attempted keeps the name of every event handed to the writer, also the ones
+    the writer refuses (on main, late_result_same_instance had no reason and no
+    duration_s, so it was raised and refused and never reached the file).
+    """
+
+    def __init__(self, state: loopback.ServerState, inner: JsonlAuditWriter) -> None:
+        self._state = state
+        self._inner = inner
+        self.under_lock: list[object] = []
+        self.attempted: list[object] = []
+
+    def write(self, event: dict) -> bool:
+        self.attempted.append(event.get("event"))
+        if self._state._lock._is_owned():  # type: ignore[attr-defined]
+            self.under_lock.append(event.get("event"))
+        return self._inner.write(event)
+
+
+def _audit_lines(audit_file: Path) -> list[dict]:
+    text = audit_file.read_text(encoding="utf-8") if audit_file.exists() else ""
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+def _late_same_instance_command(
+    test: unittest.TestCase, state: loopback.ServerState
+) -> tuple[int, int]:
+    """A command of INST_C1 delivered under one epoch of its binding, then the binding moves on.
+
+    A second process presents the same instance, so the binding goes AMBIGUOUS
+    and takes the next station epoch (plan 2026-08-18, sections 5 and 7.5;
+    _note_poll_pid_locked). The server binding after it moves the station epoch
+    only. Returns the command id and the epoch it was sealed with; the sealed
+    epoch, the binding's epoch and the station epoch are then three values.
+    """
+    _bind(state, INST_C1, "client", 2001)
+    status, payload = state.enqueue_command("camera_get", {}, peer="client")
+    test.assertEqual(status, 200, payload)
+    _status, poll = state.record_poll("client", instance=INST_C1, source_pid=2001)
+    test.assertEqual([command.get("id") for command in poll["commands"]], [payload["id"]])
+    sealed_epoch = state._bindings[INST_C1].epoch
+    test.assertEqual(state._command_fence[payload["id"]][1], sealed_epoch)
+    state.record_poll("client", instance=INST_C1, source_pid=9999)
+    test.assertEqual(state._bindings[INST_C1].state, instance_fence_mod.BINDING_AMBIGUOUS)
+    _bind(state, INST_S1, "server", 2002)
+    test.assertEqual(
+        len({sealed_epoch, state._bindings[INST_C1].epoch, state._station_epoch}), 3
+    )
+    return payload["id"], sealed_epoch
+
+
+class ResultFenceAuditFileTest(unittest.TestCase):
+    """late_result_fenced reaches the daemon's real audit file.
+
+    JsonlAuditWriter refuses an event without reason and duration_s, and
+    _audit_fence swallowed that refusal, so on main the event never reached
+    events.jsonl (ResultFenceTest's fake writer keeps any dict). The line is
+    written after the broker lock is released: the writer rewrites a file of
+    up to 5 MB.
+    """
+
+    def test_late_result_fenced_reaches_the_real_audit_file(self) -> None:
+        # Mutant killed: the payload without reason and duration_s (main);
+        # the write made while the broker lock is held.
+        for presented in (INST_C2, None):
+            with self.subTest(instance=presented), TemporaryDirectory() as tmp:
+                state = loopback.ServerState("k")
+                root = Path(tmp)
+                paths = RuntimePaths(
+                    root, root / "audit", root / "coordination.json", root / "runs.json"
+                )
+                writer = _LockCheckedWriter(state, JsonlAuditWriter(paths, "gen-fence-audit"))
+                state.audit_writer = writer
+                _bind(state, INST_C1, "client", 2001)
+                status, payload = state.enqueue_command("camera_get", {}, peer="client")
+                self.assertEqual(status, 200, payload)
+                # A later binding moves the station epoch past the one the
+                # command was sealed with, so the two epochs differ.
+                _bind(state, INST_S1, "server", 2002)
+                sealed_epoch = state._bindings[INST_C1].epoch
+                station_epoch = state._station_epoch
+                self.assertNotEqual(sealed_epoch, station_epoch)
+                result_status, result = state.store_result(
+                    {"id": payload["id"], "ok": 1, "value": 9}, instance=presented
+                )
+                self.assertEqual((result_status, result.get("discarded")), (200, True), result)
+                audit_file = root / "audit" / "events.jsonl"
+                text = audit_file.read_text(encoding="utf-8") if audit_file.exists() else ""
+                lines = [json.loads(line) for line in text.splitlines() if line.strip()]
+                fenced = [e for e in lines if e.get("event") == "late_result_fenced"]
+                self.assertEqual(len(fenced), 1, lines)
+                line = fenced[0]
+                self.assertEqual(line.get("command_id"), payload["id"], line)
+                self.assertEqual(
+                    (line.get("reason"), line.get("decision"), line.get("duration_s")),
+                    ("instance_mismatch", "discarded", 0.0),
+                    line,
+                )
+                self.assertEqual(
+                    line.get("expected_instance_prefix"),
+                    instance_fence_mod.instance_prefix(INST_C1),
+                    line,
+                )
+                self.assertEqual(
+                    line.get("origin_instance_prefix"),
+                    instance_fence_mod.instance_prefix(presented),
+                    line,
+                )
+                # Sol r1 finding 3: the values, not only the keys. Mutant
+                # killed: a wrong expected_epoch or origin_epoch.
+                self.assertEqual(
+                    (line.get("expected_epoch"), line.get("origin_epoch")),
+                    (sealed_epoch, station_epoch),
+                    line,
+                )
+                self.assertEqual(line.get("daemon_generation"), "gen-fence-audit", line)
+                self.assertNotIn(INST_C1, text)
+                if presented is not None:
+                    self.assertNotIn(presented, text)
+                self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+
+    def test_a_caller_holding_the_broker_lock_gets_no_fence_audit_under_it(self) -> None:
+        # Sol r1 finding 1: the broker lock is an RLock; a caller that already
+        # holds it still holds it after store_result's own section. The line
+        # is written at the next lock-free point (status_snapshot). Mutant
+        # killed: writing right after store_result's own lock section.
+        with TemporaryDirectory() as tmp:
+            state = loopback.ServerState("k")
+            root = Path(tmp)
+            paths = RuntimePaths(
+                root, root / "audit", root / "coordination.json", root / "runs.json"
+            )
+            writer = _LockCheckedWriter(state, JsonlAuditWriter(paths, "gen-fence-audit"))
+            state.audit_writer = writer
+            _bind(state, INST_C1, "client", 2001)
+            status, payload = state.enqueue_command("camera_get", {}, peer="client")
+            self.assertEqual(status, 200, payload)
+            with state._lock:  # type: ignore[attr-defined]
+                result_status, result = state.store_result(
+                    {"id": payload["id"], "ok": 1, "value": 9}, instance=INST_C2
+                )
+            self.assertEqual((result_status, result.get("discarded")), (200, True), result)
+            self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+            state.status_snapshot()
+            self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+            audit_file = root / "audit" / "events.jsonl"
+            text = audit_file.read_text(encoding="utf-8") if audit_file.exists() else ""
+            lines = [json.loads(line) for line in text.splitlines() if line.strip()]
+            fenced = [e for e in lines if e.get("event") == "late_result_fenced"]
+            self.assertEqual(len(fenced), 1, lines)
+            self.assertEqual(fenced[0].get("command_id"), payload["id"], fenced[0])
+
+    def test_without_an_audit_writer_nothing_is_kept_for_later(self) -> None:
+        # The embedded server never sets an audit writer. A line raised while
+        # the broker lock is held must not be kept for a later write that can
+        # never happen. Re-targeted with the trigger fix: the plain server
+        # results this test used no longer raise late_result_same_instance, so
+        # it stores late results of the same instance (a moved binding epoch)
+        # and a fenced result while a caller holds the lock. Mutant killed:
+        # deferring payloads with no writer.
+        state = loopback.ServerState("k", time_fn=FakeClock())
+        self.assertIsNone(state.audit_writer)
+        command_id, _sealed = _late_same_instance_command(self, state)
+        status, fenced = state.enqueue_command("world_time_get", {}, peer="server")
+        self.assertEqual(status, 200, fenced)
+        with state._lock:  # type: ignore[attr-defined]
+            for retry in (False, True):
+                result_status, result = state.store_result(
+                    {"id": command_id, "ok": 1}, instance=INST_C1, retry=retry
+                )
+                self.assertEqual(result_status, 200, result)
+                self.assertEqual(state._pending_audits, [])
+            result_status, result = state.store_result(
+                {"id": fenced["id"], "ok": 1}, instance=INST_C2
+            )
+            self.assertEqual((result_status, result.get("discarded")), (200, True), result)
+            self.assertEqual(state._pending_audits, [])
+        state.status_snapshot()
+        self.assertEqual(state._pending_audits, [])
+
+    def test_a_result_leaves_nothing_pending_once_it_returns(self) -> None:
+        # Sol r2 finding 2 (PR 418): with a writer, a line store_result raised
+        # under its own lock section was kept until the next poll, status read
+        # or audit write, so results with none of those in between (the
+        # bridge's retries, for example) grew the pending list. Re-targeted
+        # with the trigger fix: late results of the same instance, since plain
+        # results raise nothing now. A late result stored by a caller holding
+        # the lock waits in the pending list; the next result handled without
+        # the lock (here its retried copy, which raises no line of its own)
+        # writes it before returning, with no poll or status read in between
+        # (review r2 of PR 419). Mutant killed: store_result leaving the
+        # pending list for a later poll or status read.
+        with TemporaryDirectory() as tmp:
+            state = loopback.ServerState("k", time_fn=FakeClock())
+            root = Path(tmp)
+            paths = RuntimePaths(
+                root, root / "audit", root / "coordination.json", root / "runs.json"
+            )
+            writer = _LockCheckedWriter(state, JsonlAuditWriter(paths, "gen-fence-audit"))
+            state.audit_writer = writer
+            audit_file = root / "audit" / "events.jsonl"
+            command_id, _sealed = _late_same_instance_command(self, state)
+
+            def same_instance_lines() -> list[tuple[object, object]]:
+                return [
+                    (e.get("command_id"), e.get("decision"))
+                    for e in _audit_lines(audit_file)
+                    if e.get("event") == "late_result_same_instance"
+                ]
+
+            with state._lock:  # type: ignore[attr-defined]
+                result_status, result = state.store_result(
+                    {"id": command_id, "ok": 1}, instance=INST_C1
+                )
+                self.assertEqual(result_status, 200, result)
+            self.assertEqual(same_instance_lines(), [])
+            for _ in range(3):
+                result_status, result = state.store_result(
+                    {"id": command_id, "ok": 1}, instance=INST_C1, retry=True
+                )
+                self.assertEqual((result_status, result.get("duplicate")), (200, True), result)
+                self.assertEqual(state._pending_audits, [])
+                self.assertEqual(same_instance_lines(), [(command_id, "accepted")])
+            self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+
+
+class ResultSameInstanceAuditTest(unittest.TestCase):
+    """late_result_same_instance: a result of the same instance whose binding moved on.
+
+    The fence seals each command with the epoch of its instance's binding
+    (_seal_command). On main the trigger compared that epoch with the station
+    epoch, which every binding, retirement and AMBIGUOUS transition of any peer
+    moves, so once both peers were bound every plain result of the peer bound
+    first raised the event. Plan 2026-08-18 (section 4, store_result; section
+    7.4) asks for it on a result of the same instance with an old epoch, taken
+    as the late completion of its command, and the daemon already reads "old"
+    that way for a lease close (_close_outcome_from_result_locked: no binding,
+    or a binding whose epoch is not the sealed one). On main the payload also
+    lacked reason and duration_s, so the real writer refused it.
+
+    The line: command_id, expected_instance_prefix, origin_instance_prefix,
+    expected_epoch (sealed), origin_epoch (the station epoch, as in
+    late_result_fenced), binding_epoch (the binding's epoch now, null when no
+    binding is left), reason binding_epoch_changed, decision accepted or
+    discarded (as store_result's HTTP answer says), duration_s 0.0.
+    """
+
+    EVENT = "late_result_same_instance"
+
+    def _state(self, tmp: str, clock: FakeClock | None = None):
+        state = loopback.ServerState("k", time_fn=clock or FakeClock())
+        root = Path(tmp)
+        paths = RuntimePaths(
+            root, root / "audit", root / "coordination.json", root / "runs.json"
+        )
+        writer = _LockCheckedWriter(state, JsonlAuditWriter(paths, "gen-same-instance"))
+        state.audit_writer = writer
+        return state, writer, root / "audit" / "events.jsonl"
+
+    def _lines(self, audit_file: Path) -> list[dict]:
+        return [e for e in _audit_lines(audit_file) if e.get("event") == self.EVENT]
+
+    def _assert_line(
+        self,
+        line: dict,
+        command_id: int,
+        epochs: tuple[object, object, object],
+        decision: str,
+        instance: str = INST_C1,
+    ) -> None:
+        prefix = instance_fence_mod.instance_prefix(instance)
+        self.assertEqual(line.get("command_id"), command_id, line)
+        self.assertEqual(
+            (line.get("expected_instance_prefix"), line.get("origin_instance_prefix")),
+            (prefix, prefix),
+            line,
+        )
+        self.assertEqual(
+            (line.get("expected_epoch"), line.get("origin_epoch"), line.get("binding_epoch")),
+            epochs,
+            line,
+        )
+        self.assertIn("binding_epoch", line)
+        self.assertEqual(
+            (line.get("reason"), line.get("decision"), line.get("duration_s")),
+            ("binding_epoch_changed", decision, 0.0),
+            line,
+        )
+        self.assertEqual(line.get("daemon_generation"), "gen-same-instance", line)
+
+    def test_a_result_whose_own_binding_kept_its_epoch_raises_no_event(self) -> None:
+        # The flood (PR 418 follow-up, probe on main): another binding, another
+        # peer's AMBIGUOUS transition or its relaunch moves the station epoch,
+        # not the epoch of this result's own binding. Mutant killed: the
+        # comparison with the station epoch (main), which raised the event for
+        # every plain result of the peer bound first.
+        for scenario in ("server_first", "client_first", "client_ambiguous", "client_relaunched"):
+            with self.subTest(scenario=scenario), TemporaryDirectory() as tmp:
+                state, writer, audit_file = self._state(tmp)
+                if scenario == "client_first":
+                    _bind(state, INST_C1, "client", 2001)
+                    _bind(state, INST_S1, "server", 2002)
+                    first = INST_C1
+                else:
+                    _bind(state, INST_S1, "server", 2002)
+                    _bind(state, INST_C1, "client", 2001)
+                    first = INST_S1
+                client: str | None = INST_C1
+                if scenario == "client_ambiguous":
+                    state.record_poll("client", instance=INST_C1, source_pid=9999)
+                    self.assertEqual(
+                        state._bindings[INST_C1].state, instance_fence_mod.BINDING_AMBIGUOUS
+                    )
+                    client = None
+                elif scenario == "client_relaunched":
+                    state.retire_role("run-fence", "client", "replace-role")
+                    _bind(state, INST_C2, "client", 2003)
+                    client = INST_C2
+                self.assertNotEqual(state._bindings[first].epoch, state._station_epoch)
+                results = [("server", INST_S1, "world_time_get")] * 2
+                if client is not None:
+                    results += [("client", client, "camera_get")] * 2
+                for peer, instance, cmd in results:
+                    status, payload = state.enqueue_command(cmd, {}, peer=peer)
+                    self.assertEqual(status, 200, payload)
+                    result_status, result = state.store_result(
+                        {"id": payload["id"], "ok": 1, "value": 5}, instance=instance
+                    )
+                    self.assertEqual(
+                        (result_status, result.get("discarded")), (200, None), result
+                    )
+                    stored = state.take_result(payload["id"])
+                    self.assertEqual((stored or {}).get("value"), 5, stored)
+                state.status_snapshot()
+                self.assertNotIn(self.EVENT, writer.attempted, writer.attempted)
+                self.assertEqual(self._lines(audit_file), [])
+
+    def test_a_late_result_of_the_same_instance_reaches_the_real_audit_file(self) -> None:
+        # The binding went AMBIGUOUS after the command was delivered; the
+        # answer comes while it is AMBIGUOUS, or after it is BOUND again (the
+        # epoch stays the new one). A command sealed after the move writes
+        # nothing. The answer is kept for /await, as before. Mutants killed:
+        # the payload without reason, decision or duration_s (main: refused);
+        # a wrong epoch in the line; the write made under the broker lock.
+        for answered_while in ("ambiguous", "bound_again"):
+            with self.subTest(answered_while=answered_while), TemporaryDirectory() as tmp:
+                clock = FakeClock()
+                state, writer, audit_file = self._state(tmp, clock)
+                command_id, sealed_epoch = _late_same_instance_command(self, state)
+                if answered_while == "bound_again":
+                    clock.advance(loopback.PEER_RECONNECT_GAP_S + 1.0)
+                    state.record_poll("client", instance=INST_C1, source_pid=2001)
+                    self.assertEqual(
+                        state._bindings[INST_C1].state, instance_fence_mod.BINDING_BOUND
+                    )
+                    status, fresh = state.enqueue_command("camera_get", {}, peer="client")
+                    self.assertEqual(status, 200, fresh)
+                    _status, poll = state.record_poll(
+                        "client", instance=INST_C1, source_pid=2001
+                    )
+                    self.assertEqual([c.get("id") for c in poll["commands"]], [fresh["id"]])
+                    result_status, result = state.store_result(
+                        {"id": fresh["id"], "ok": 1, "value": 6}, instance=INST_C1
+                    )
+                    self.assertEqual((result_status, result.get("discarded")), (200, None), result)
+                binding_epoch = state._bindings[INST_C1].epoch
+                station_epoch = state._station_epoch
+                result_status, result = state.store_result(
+                    {"id": command_id, "ok": 1, "value": 9}, instance=INST_C1
+                )
+                self.assertEqual(
+                    (result_status, result),
+                    (200, {"ok": True, "id": command_id, "ok_value": 1}),
+                )
+                stored = state.take_result(command_id)
+                self.assertEqual((stored or {}).get("value"), 9, stored)
+                lines = self._lines(audit_file)
+                self.assertEqual(len(lines), 1, _audit_lines(audit_file))
+                self._assert_line(
+                    lines[0], command_id, (sealed_epoch, station_epoch, binding_epoch), "accepted"
+                )
+                self.assertNotIn(INST_C1, audit_file.read_text(encoding="utf-8"))
+                self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+
+    def _move_the_station_epoch(self, state: loopback.ServerState) -> None:
+        """A binding of another run is installed, then retired: the station
+        epoch moves, and no binding of the run under test changes."""
+        before = state._station_epoch
+        other_run = f"run-other-{before}"
+        other = str(uuid.UUID(int=(0x6 << 124) | (before + 1), version=4))
+        bindings = {i: (b.epoch, b.state) for i, b in state._bindings.items()}
+        _bind(state, other, "client", 4000 + before, run_id=other_run)
+        state.retire_role(other_run, "client", "stopped")
+        self.assertEqual(state._station_epoch, before + 2)
+        self.assertEqual(
+            {i: (b.epoch, b.state) for i, b in state._bindings.items() if i != other},
+            bindings,
+        )
+
+    def _readings(self, state: loopback.ServerState, instance: str) -> tuple:
+        """What the server poll and the client poll last read (None: not
+        polled yet), and the state of the instance's binding."""
+        return (
+            state._peer_last_class.get("server"),
+            state._peer_last_class.get("client"),
+            state._bindings[instance].state,
+        )
+
+    def _poll_reads(
+        self,
+        state: loopback.ServerState,
+        peer: str,
+        instance: str,
+        pid: int | None,
+        reading: str,
+    ) -> None:
+        """One poll of peer presenting instance from pid (None: no pid); it
+        reads reading and delivers nothing."""
+        _status, poll = state.record_poll(peer, instance=instance, source_pid=pid)
+        self.assertEqual((poll["bind"], poll["commands"]), (reading, []))
+
+    def _without_a_pid(
+        self,
+        state: loopback.ServerState,
+        instance: str,
+        peers: tuple[str, ...],
+        clock: FakeClock | None = None,
+    ) -> None:
+        """Each poll in peers comes once without a pid (its socket was not
+        attributed this tick): it reads instance_unattributed and leaves the
+        binding as it is (loopback.py:7635-7639): same object, state and
+        epoch. With clock, the clock first moves 0.01 s, so these polls are
+        newer than every poll before them."""
+        if clock is not None and peers:
+            clock.advance(0.01)
+        for peer in peers:
+            binding = state._bindings[instance]
+            before = (binding.state, binding.epoch)
+            self._poll_reads(state, peer, instance, None, "instance_unattributed")
+            self.assertIs(state._bindings[instance], binding)
+            self.assertEqual((binding.state, binding.epoch), before)
+
+    def _keep_polling(
+        self,
+        state: loopback.ServerState,
+        instance: str,
+        pid: int,
+        other: str | None,
+        lose_pid: tuple[str, ...],
+        clock: FakeClock,
+    ) -> None:
+        """Just before a fresh answer: the poll of other (when given) reads
+        BOUND again, then the polls in lose_pid come without a pid, newer."""
+        if other is not None:
+            self._poll_reads(state, other, instance, pid, instance_fence_mod.BINDING_BOUND)
+        self._without_a_pid(state, instance, lose_pid, clock)
+
+    def _bound_again_with_a_fresh_command(
+        self,
+        state: loopback.ServerState,
+        clock: FakeClock,
+        instance: str,
+        pid: int,
+        peer: str,
+        cmd: str,
+        before_answer: Callable[[], None] | None = None,
+    ) -> tuple:
+        """Past the reconnect gap, a poll from the bound pid makes the binding
+        BOUND again (its epoch stays the new one). A command sealed after the
+        move is delivered; the station epoch moves before it is answered, its
+        own binding's epoch does not; before_answer runs just before the
+        answer, which is kept for /await. Returns the readings (_readings)
+        when the answer came."""
+        clock.advance(loopback.PEER_RECONNECT_GAP_S + 1.0)
+        state.record_poll(peer, instance=instance, source_pid=pid)
+        self.assertEqual(state._bindings[instance].state, instance_fence_mod.BINDING_BOUND)
+        status, fresh = state.enqueue_command(cmd, {}, peer=peer)
+        self.assertEqual(status, 200, fresh)
+        _status, poll = state.record_poll(peer, instance=instance, source_pid=pid)
+        self.assertEqual([c.get("id") for c in poll["commands"]], [fresh["id"]])
+        sealed = state._command_fence[fresh["id"]][1]
+        self.assertEqual(sealed, state._bindings[instance].epoch)
+        self._move_the_station_epoch(state)
+        self.assertNotEqual(state._station_epoch, sealed)
+        if before_answer is not None:
+            before_answer()
+        self.assertEqual(state._bindings[instance].epoch, sealed)
+        readings = self._readings(state, instance)
+        result_status, result = state.store_result(
+            {"id": fresh["id"], "ok": 1, "value": 6}, instance=instance
+        )
+        self.assertEqual((result_status, result.get("discarded")), (200, None), result)
+        self.assertEqual((state.take_result(fresh["id"]) or {}).get("value"), 6)
+        return readings
+
+    def test_a_late_result_of_a_server_or_offline_binding_is_audited(self) -> None:
+        # The other positive tests here use a client binding (last review of
+        # PR 419, P3). The trigger does not look at the role: a server
+        # binding, and an offline instance (one process that polls for both
+        # peers), write the same line when their own binding moved on,
+        # whether the old answer comes while the binding is AMBIGUOUS or once
+        # it is BOUND again. A command sealed after the move writes nothing,
+        # also when the station epoch moved before its answer. In every setup
+        # the sealed, binding and station epochs are three values. The second
+        # pid presents the offline instance through the poll that delivered
+        # the command, or through its other poll (last review of PR 421, P3).
+        # A poll that presents the offline instance with a pid reads BOUND or
+        # AMBIGUOUS. One that comes without a pid reads instance_unattributed
+        # and leaves the binding as it is; it can come on either poll, or on
+        # both, in any state (lose_pid: just before each answer, 0.01 s after
+        # the polls before it; with bound_again the old answer follows the
+        # fresh one with no poll between them). Over those
+        # three readings and "not polled yet", the old answer comes in every
+        # combination an offline binding that moved on can be in, and the
+        # fresh answer in every one with the binding BOUND again; the test
+        # checks it visited each one (reviews of PR 423). Mutants killed: the
+        # trigger limited to client bindings; offline bindings left out;
+        # server bindings left out; the other roles audited only while
+        # AMBIGUOUS (PR 421 review r1); for offline, the station epoch
+        # deciding, or the station and binding epochs swapped in the line
+        # (PR 421 review r2); for offline, no line for the old answer, or a
+        # line for the fresh one, in any one combination.
+        # (role, instance, pid, peer of the command, command, peer of pid
+        # 9999, follow: the process keeps polling, so within the gap its next
+        # poll of the delivering peer reads AMBIGUOUS too, and once the
+        # binding is BOUND again its next poll of the other peer reads BOUND
+        # before the fresh answer)
+        cases = (
+            ("server", INST_S1, 1001, "server", "world_time_get", "server", False),
+            ("offline", INST_OFF, 3003, "server", "world_time_get", "server", False),
+            ("offline", INST_OFF, 3003, "client", "camera_get", "client", False),
+            ("offline", INST_OFF, 3003, "server", "world_time_get", "client", False),
+            ("offline", INST_OFF, 3003, "client", "camera_get", "server", False),
+            ("offline", INST_OFF, 3003, "server", "world_time_get", "client", True),
+            ("offline", INST_OFF, 3003, "client", "camera_get", "server", True),
+        )
+        bound = instance_fence_mod.BINDING_BOUND
+        ambiguous = instance_fence_mod.BINDING_AMBIGUOUS
+        unattributed = "instance_unattributed"
+        # (server poll reads, client poll reads, binding state); None: not
+        # polled yet. Only a poll with a pid moves a binding between
+        # AMBIGUOUS and BOUND (_note_poll_pid_locked; confirm only moves
+        # STARTING to BOUND), so while it is AMBIGUOUS a poll with a pid last
+        # read AMBIGUOUS, and once it is BOUND again one last read BOUND; a
+        # poll without a pid may then overwrite either reading, or both.
+        with_a_pid = {
+            (ambiguous, None, ambiguous),
+            (None, ambiguous, ambiguous),
+            (bound, ambiguous, ambiguous),
+            (ambiguous, bound, ambiguous),
+            (ambiguous, ambiguous, ambiguous),
+            (bound, None, bound),
+            (None, bound, bound),
+            (bound, ambiguous, bound),
+            (ambiguous, bound, bound),
+            (bound, bound, bound),
+        }
+        losses = ((), ("server",), ("client",), ("server", "client"))
+
+        def lost(readings: tuple, peers: tuple[str, ...]) -> tuple:
+            server, client, binding_state = readings
+            return (
+                unattributed if "server" in peers else server,
+                unattributed if "client" in peers else client,
+                binding_state,
+            )
+
+        reachable = {lost(readings, peers) for readings in with_a_pid for peers in losses}
+        self.assertEqual(len(reachable), 24)
+        visited = set()
+        fresh_visited = set()
+        setups = [
+            case + (lose_pid, when)
+            for case in cases
+            for lose_pid in (losses if case[0] == "offline" else ((),))
+            for when in ("ambiguous", "bound_again")
+        ]
+        for role, instance, pid, peer, cmd, conflict_peer, follow, lose_pid, answered_while in (
+            setups
+        ):
+            with self.subTest(
+                role=role,
+                peer=peer,
+                conflict_peer=conflict_peer,
+                follow=follow,
+                lose_pid=lose_pid,
+                answered_while=answered_while,
+            ), TemporaryDirectory() as tmp:
+                clock = FakeClock()
+                state, writer, audit_file = self._state(tmp, clock)
+                _bind(state, instance, role, pid)
+                status, payload = state.enqueue_command(cmd, {}, peer=peer)
+                self.assertEqual(status, 200, payload)
+                command_id = payload["id"]
+                _status, poll = state.record_poll(peer, instance=instance, source_pid=pid)
+                self.assertEqual([c.get("id") for c in poll["commands"]], [command_id])
+                sealed_epoch = state._bindings[instance].epoch
+                self.assertEqual(state._command_fence[command_id][1], sealed_epoch)
+                if conflict_peer != peer:
+                    # The offline process polls for its other peer too;
+                    # nothing is queued there.
+                    self._poll_reads(state, conflict_peer, instance, pid, bound)
+                self._poll_reads(state, conflict_peer, instance, 9999, ambiguous)
+                self.assertEqual(state._bindings[instance].state, ambiguous)
+                if conflict_peer != peer:
+                    # The poll that delivered the command still reads BOUND.
+                    self.assertEqual(state._peer_last_class[peer], bound)
+                    if follow:
+                        self._poll_reads(state, peer, instance, pid, ambiguous)
+                if role == "server":
+                    # The client bound after it moves the station epoch only.
+                    _bind(state, INST_C1, "client", 2001)
+                else:
+                    # An offline run has no other peer: another run's binding,
+                    # installed and retired, moves the station epoch only.
+                    self._move_the_station_epoch(state)
+                before_fresh = functools.partial(
+                    self._keep_polling,
+                    state,
+                    instance,
+                    pid,
+                    conflict_peer if follow else None,
+                    lose_pid,
+                    clock,
+                )
+                if answered_while == "bound_again":
+                    # The old answer comes right after the fresh one, with no
+                    # poll between them.
+                    fresh = self._bound_again_with_a_fresh_command(
+                        state, clock, instance, pid, peer, cmd, before_fresh
+                    )
+                    self.assertEqual(self._lines(audit_file), [])
+                else:
+                    self._without_a_pid(state, instance, lose_pid, clock)
+                if role == "offline":
+                    visited.add(self._readings(state, instance))
+                binding_epoch = state._bindings[instance].epoch
+                station_epoch = state._station_epoch
+                self.assertEqual(len({sealed_epoch, binding_epoch, station_epoch}), 3)
+                result_status, result = state.store_result(
+                    {"id": command_id, "ok": 1, "value": 9}, instance=instance
+                )
+                self.assertEqual(
+                    (result_status, result),
+                    (200, {"ok": True, "id": command_id, "ok_value": 1}),
+                )
+                lines = self._lines(audit_file)
+                self.assertEqual(len(lines), 1, _audit_lines(audit_file))
+                self._assert_line(
+                    lines[0],
+                    command_id,
+                    (sealed_epoch, station_epoch, binding_epoch),
+                    "accepted",
+                    instance=instance,
+                )
+                self.assertEqual((state.take_result(command_id) or {}).get("value"), 9)
+                if answered_while == "ambiguous":
+                    fresh = self._bound_again_with_a_fresh_command(
+                        state, clock, instance, pid, peer, cmd, before_fresh
+                    )
+                    self.assertEqual(len(self._lines(audit_file)), 1, _audit_lines(audit_file))
+                if role == "offline":
+                    fresh_visited.add(fresh)
+                self.assertEqual(writer.attempted.count(self.EVENT), 1, writer.attempted)
+                self.assertNotIn(instance, audit_file.read_text(encoding="utf-8"))
+                self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+        self.assertEqual(visited, reachable)
+        self.assertEqual(fresh_visited, {r for r in reachable if r[2] == bound})
+
+    def test_an_offline_late_answer_when_a_poll_lost_its_pid_before_the_other_polled(
+        self,
+    ) -> None:
+        # The readings do not say in which order the polls came (review r1 of
+        # PR 424, P3). In the test above a poll without a pid comes last,
+        # just before the answer. Here the poll that delivered the command
+        # comes without a pid first; then the other poll comes with the pid:
+        # within the gap it reads AMBIGUOUS, past the gap it makes the
+        # binding BOUND again and delivers a fresh command. The clock moves
+        # between the polls, so the reading without a pid is the older one.
+        # The old answer still writes its one line, and the fresh one none.
+        # Mutants killed: for offline, no line for the old answer, or a line
+        # for the fresh one, when the poll that read no pid is the older.
+        ambiguous = instance_fence_mod.BINDING_AMBIGUOUS
+        bound = instance_fence_mod.BINDING_BOUND
+        directions = (
+            ("server", "world_time_get", "client", "camera_get"),
+            ("client", "camera_get", "server", "world_time_get"),
+        )
+        for peer, cmd, other, other_cmd in directions:
+            for answered_while in ("ambiguous", "bound_again"):
+                with self.subTest(
+                    peer=peer, other=other, answered_while=answered_while
+                ), TemporaryDirectory() as tmp:
+                    clock = FakeClock()
+                    state, writer, audit_file = self._state(tmp, clock)
+                    _bind(state, INST_OFF, "offline", 3003)
+                    status, payload = state.enqueue_command(cmd, {}, peer=peer)
+                    self.assertEqual(status, 200, payload)
+                    command_id = payload["id"]
+                    _status, poll = state.record_poll(peer, instance=INST_OFF, source_pid=3003)
+                    self.assertEqual([c.get("id") for c in poll["commands"]], [command_id])
+                    sealed_epoch = state._bindings[INST_OFF].epoch
+                    self._poll_reads(state, other, INST_OFF, 9999, ambiguous)
+                    clock.advance(0.01)
+                    self._without_a_pid(state, INST_OFF, (peer,))
+                    self._move_the_station_epoch(state)
+                    clock.advance(0.01)
+                    if answered_while == "ambiguous":
+                        self._poll_reads(state, other, INST_OFF, 3003, ambiguous)
+                    else:
+                        fresh = self._bound_again_with_a_fresh_command(
+                            state, clock, INST_OFF, 3003, other, other_cmd
+                        )
+                        self.assertEqual(self._lines(audit_file), [])
+                    binding_state = ambiguous if answered_while == "ambiguous" else bound
+                    readings = {peer: "instance_unattributed", other: binding_state}
+                    self.assertEqual(
+                        self._readings(state, INST_OFF),
+                        (readings["server"], readings["client"], binding_state),
+                    )
+                    if answered_while == "bound_again":
+                        self.assertEqual(fresh, self._readings(state, INST_OFF))
+                    self.assertLess(state._last_poll_at[peer], state._last_poll_at[other])
+                    binding_epoch = state._bindings[INST_OFF].epoch
+                    station_epoch = state._station_epoch
+                    self.assertEqual(len({sealed_epoch, binding_epoch, station_epoch}), 3)
+                    result_status, result = state.store_result(
+                        {"id": command_id, "ok": 1, "value": 9}, instance=INST_OFF
+                    )
+                    self.assertEqual(
+                        (result_status, result),
+                        (200, {"ok": True, "id": command_id, "ok_value": 1}),
+                    )
+                    lines = self._lines(audit_file)
+                    self.assertEqual(len(lines), 1, _audit_lines(audit_file))
+                    self._assert_line(
+                        lines[0],
+                        command_id,
+                        (sealed_epoch, station_epoch, binding_epoch),
+                        "accepted",
+                        instance=INST_OFF,
+                    )
+                    self.assertEqual((state.take_result(command_id) or {}).get("value"), 9)
+                    self.assertEqual(writer.attempted.count(self.EVENT), 1, writer.attempted)
+                    self.assertNotIn(INST_OFF, audit_file.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        writer.under_lock, [], "audit written under the broker lock"
+                    )
+
+    def test_a_late_result_after_the_binding_is_gone_has_no_binding_epoch(self) -> None:
+        # The binding was retired, then RETIRED_INSTANCE_LIMIT later
+        # retirements dropped the instance from the retired list: the fence
+        # still names it, no binding is left, and the answer is still kept (as
+        # on main). No binding is not the sealed epoch, the same reading as
+        # _close_outcome_from_result_locked. Mutants killed: reading the
+        # binding with no None check (the result raises); no line without a
+        # binding; binding_epoch other than null.
+        with TemporaryDirectory() as tmp:
+            state, writer, audit_file = self._state(tmp)
+            _bind(state, INST_C1, "client", 2001, run_id="run-gone")
+            status, payload = state.enqueue_command("camera_get", {}, peer="client")
+            self.assertEqual(status, 200, payload)
+            _status, poll = state.record_poll("client", instance=INST_C1, source_pid=2001)
+            self.assertEqual([c.get("id") for c in poll["commands"]], [payload["id"]])
+            sealed_epoch = state._bindings[INST_C1].epoch
+            state.retire_role("run-gone", "client", "stopped")
+            # Guard, unchanged: while the instance is listed as retired, its
+            # result is refused before the epoch check.
+            result_status, result = state.store_result(
+                {"id": payload["id"], "ok": 1, "value": 9}, instance=INST_C1
+            )
+            self.assertEqual((result_status, result.get("error")), (409, "binding_retired"))
+            for index in range(loopback.RETIRED_INSTANCE_LIMIT):
+                other = str(uuid.UUID(int=(0x5 << 124) | (index + 1), version=4))
+                _bind(state, other, "client", 3000 + index, run_id=f"run-x{index}")
+                state.retire_role(f"run-x{index}", "client", "stopped")
+            self.assertNotIn(INST_C1, state._retired_instances)
+            self.assertNotIn(INST_C1, state._bindings)
+            self.assertIn(payload["id"], state._command_fence)
+            station_epoch = state._station_epoch
+            result_status, result = state.store_result(
+                {"id": payload["id"], "ok": 1, "value": 9}, instance=INST_C1
+            )
+            self.assertEqual(
+                (result_status, result), (200, {"ok": True, "id": payload["id"], "ok_value": 1})
+            )
+            self.assertEqual((state.take_result(payload["id"]) or {}).get("value"), 9)
+            lines = self._lines(audit_file)
+            self.assertEqual(len(lines), 1, _audit_lines(audit_file))
+            self._assert_line(
+                lines[0], payload["id"], (sealed_epoch, station_epoch, None), "accepted"
+            )
+            self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+
+    def test_a_retried_copy_writes_nothing_and_a_discarded_copy_says_so(self) -> None:
+        # The bridge resends a failed result POST once with retry (d67f): a
+        # copy of a result already stored changes nothing, so it writes no
+        # second line. A plain copy (no retry) is a result the daemon handles:
+        # before the answer is read it is stored again and accepted, as on
+        # main, and writes its own line; after the answer was read it is
+        # discarded (its HTTP answer says so), and its line says discarded.
+        # Mutants killed: the line raised before the retry check; a decision
+        # that ignores the discard; no line for a result already stored
+        # (review r1).
+        with TemporaryDirectory() as tmp:
+            state, writer, audit_file = self._state(tmp)
+            command_id, sealed_epoch = _late_same_instance_command(self, state)
+            body = {"id": command_id, "ok": 1, "value": 9}
+            self.assertEqual(
+                state.store_result(dict(body), instance=INST_C1),
+                (200, {"ok": True, "id": command_id, "ok_value": 1}),
+            )
+            result_status, copy = state.store_result(dict(body), instance=INST_C1, retry=True)
+            self.assertEqual((result_status, copy.get("duplicate")), (200, True), copy)
+            self.assertEqual(
+                state.store_result(dict(body), instance=INST_C1),
+                (200, {"ok": True, "id": command_id, "ok_value": 1}),
+            )
+            self.assertEqual((state.take_result(command_id, remove=True) or {}).get("value"), 9)
+            result_status, late_copy = state.store_result(dict(body), instance=INST_C1)
+            self.assertEqual((result_status, late_copy.get("discarded")), (200, True), late_copy)
+            lines = self._lines(audit_file)
+            self.assertEqual(
+                [(e.get("command_id"), e.get("decision")) for e in lines],
+                [(command_id, "accepted"), (command_id, "accepted"), (command_id, "discarded")],
+                _audit_lines(audit_file),
+            )
+            epochs = (sealed_epoch, state._station_epoch, state._bindings[INST_C1].epoch)
+            for line, decision in zip(lines, ("accepted", "accepted", "discarded")):
+                self._assert_line(line, command_id, epochs, decision)
+            self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+
+    def test_a_first_result_sent_as_a_retry_is_audited(self) -> None:
+        # The bridge marks a resend with retry even when the first POST never
+        # reached the daemon: then that copy is the first result the daemon
+        # handles. It is stored and accepted, as on main, and writes the line.
+        # Mutant killed: skipping every result sent with retry (review r2).
+        with TemporaryDirectory() as tmp:
+            state, writer, audit_file = self._state(tmp)
+            command_id, sealed_epoch = _late_same_instance_command(self, state)
+            self.assertEqual(
+                state.store_result(
+                    {"id": command_id, "ok": 1, "value": 9}, instance=INST_C1, retry=True
+                ),
+                (200, {"ok": True, "id": command_id, "ok_value": 1}),
+            )
+            self.assertEqual((state.take_result(command_id) or {}).get("value"), 9)
+            lines = self._lines(audit_file)
+            self.assertEqual(len(lines), 1, _audit_lines(audit_file))
+            epochs = (sealed_epoch, state._station_epoch, state._bindings[INST_C1].epoch)
+            self._assert_line(lines[0], command_id, epochs, "accepted")
+            self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+
+    def test_an_unreadable_binding_is_judged_by_its_epoch(self) -> None:
+        # A poll from the bound pid whose creation time cannot be read leaves
+        # the binding UNREADABLE without moving its epoch
+        # (_note_poll_pid_locked). After an AMBIGUOUS transition the epoch has
+        # moved, and the old command's answer writes its line; with no
+        # AMBIGUOUS before, the epoch is still the sealed one and nothing is
+        # raised. Mutant killed: no event while the binding is UNREADABLE
+        # (review r2).
+        for moved in (True, False):
+            with self.subTest(moved=moved), TemporaryDirectory() as tmp:
+                state, writer, audit_file = self._state(tmp)
+                if moved:
+                    command_id, sealed_epoch = _late_same_instance_command(self, state)
+                else:
+                    _bind(state, INST_C1, "client", 2001)
+                    status, payload = state.enqueue_command("camera_get", {}, peer="client")
+                    self.assertEqual(status, 200, payload)
+                    _status, poll = state.record_poll(
+                        "client", instance=INST_C1, source_pid=2001
+                    )
+                    self.assertEqual([c.get("id") for c in poll["commands"]], [payload["id"]])
+                    command_id = payload["id"]
+                    sealed_epoch = state._bindings[INST_C1].epoch
+                epoch_before = state._bindings[INST_C1].epoch
+                with patch.object(state, "_lookup_creation_time", return_value=None):
+                    state.record_poll("client", instance=INST_C1, source_pid=2001)
+                binding = state._bindings[INST_C1]
+                self.assertEqual(binding.state, instance_fence_mod.BINDING_UNREADABLE)
+                self.assertEqual(binding.epoch, epoch_before)
+                self.assertEqual(binding.epoch != sealed_epoch, moved)
+                self.assertEqual(
+                    state.store_result(
+                        {"id": command_id, "ok": 1, "value": 9}, instance=INST_C1
+                    ),
+                    (200, {"ok": True, "id": command_id, "ok_value": 1}),
+                )
+                self.assertEqual((state.take_result(command_id) or {}).get("value"), 9)
+                lines = self._lines(audit_file)
+                if moved:
+                    self.assertEqual(len(lines), 1, _audit_lines(audit_file))
+                    epochs = (sealed_epoch, state._station_epoch, binding.epoch)
+                    self._assert_line(lines[0], command_id, epochs, "accepted")
+                else:
+                    self.assertEqual(lines, [])
+                    self.assertNotIn(self.EVENT, writer.attempted, writer.attempted)
+                self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+
+    def test_a_caller_holding_the_broker_lock_gets_no_audit_write_under_it(self) -> None:
+        # The broker lock is an RLock: a caller that already holds it still
+        # holds it after store_result's own section. The line is written at
+        # the next lock-free point (status_snapshot). Mutant killed: writing
+        # right after store_result's own lock section.
+        with TemporaryDirectory() as tmp:
+            state, writer, audit_file = self._state(tmp)
+            command_id, _sealed = _late_same_instance_command(self, state)
+            with state._lock:  # type: ignore[attr-defined]
+                result_status, result = state.store_result(
+                    {"id": command_id, "ok": 1, "value": 9}, instance=INST_C1
+                )
+                self.assertEqual(result_status, 200, result)
+            self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+            state.status_snapshot()
+            self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
+            lines = self._lines(audit_file)
+            self.assertEqual(
+                [(e.get("command_id"), e.get("decision")) for e in lines],
+                [(command_id, "accepted")],
+                _audit_lines(audit_file),
+            )
+
+    def test_the_line_is_written_when_a_later_step_of_the_result_fails(self) -> None:
+        # A step after the answer is kept raises, inside store_result's lock
+        # section or after it: the line is still written, and the error still
+        # reaches the caller. Mutant killed: the line queued only once the
+        # whole lock section, or the flush after it, has returned.
+        for step in (
+            "_note_hold_result_locked",
+            "_drain_close_outcomes_locked",
+            "_flush_close_outcomes",
+        ):
+            with self.subTest(step=step), TemporaryDirectory() as tmp:
+                state, writer, audit_file = self._state(tmp)
+                command_id, _sealed = _late_same_instance_command(self, state)
+                with patch.object(state, step, side_effect=RuntimeError("injected")):
+                    with self.assertRaises(RuntimeError):
+                        state.store_result(
+                            {"id": command_id, "ok": 1, "value": 9}, instance=INST_C1
+                        )
+                lines = self._lines(audit_file)
+                self.assertEqual(
+                    [(e.get("command_id"), e.get("decision")) for e in lines],
+                    [(command_id, "accepted")],
+                    _audit_lines(audit_file),
+                )
+                self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
 
 
 class EnforceBridgeFenceTest(unittest.TestCase):

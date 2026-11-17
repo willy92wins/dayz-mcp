@@ -26,7 +26,13 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
 
-from dayz_mcp import box_holder, dayz_test_storage, window_close, window_foreground
+from dayz_mcp import (
+    box_holder,
+    dayz_test_storage,
+    launch_focus,
+    window_close,
+    window_foreground,
+)
 from dayz_mcp.box_admission import box_admission
 from dayz_mcp.child_environment import whitelisted_child_environment
 from dayz_mcp.input_activity import InputAttributor, InputSample
@@ -1149,6 +1155,15 @@ def _use_projection(
 _GENERATION_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _STEAM_PREP_TOKEN = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _STEAM_PREPARATION_BOUND = 32
+# inbox 5c8e: the launch-focus mode a session chose for its next launch.
+_LAUNCH_FOCUS_BOUND = 64
+_LAUNCH_FOCUS_TTL_S = 900.0
+
+
+def _start_focus_thread(target: Callable[[], None]) -> None:
+    threading.Thread(
+        target=target, name="dayz-mcp-launch-focus", daemon=True
+    ).start()
 
 
 def _steam_prep_token(value: object) -> str | None:
@@ -2453,6 +2468,7 @@ class ProcessLifecycle:
         bridge_probe: object | None = None,
         daemon_generation: str | None = None,
         steam_gate: object | None = None,
+        focus_fns: launch_focus.FocusFns | None = None,
     ) -> None:
         self.coordinator = coordinator
         self.manifest = manifest
@@ -2517,6 +2533,19 @@ class ProcessLifecycle:
         # One row per session; never persisted and never includes identity or PIDs.
         self._steam_preparation_by_session: dict[str, dict[str, object]] = {}
         self._steam_preparation_lock = threading.Lock()
+        # inbox 5c8e: per-session launch-focus preference and the one guard a
+        # run may have. Both live in daemon memory only.
+        self._launch_focus_by_session: dict[str, tuple[str, float]] = {}
+        self._launch_focus_by_token: dict[str, tuple[str, float]] = {}
+        self._launch_focus_by_lease: dict[str, tuple[str, float]] = {}
+        self._launch_focus_by_run: dict[str, tuple[str, float, str | None]] = {}
+        self._focus_decided: dict[str, str] = {}
+        self._focus_guards: dict[str, launch_focus.FocusGuard] = {}
+        self._focus_guards_retired: dict[str, list[launch_focus.FocusGuard]] = {}
+        self._launch_focus_lock = threading.Lock()
+        self.focus_fns = focus_fns
+        self.focus_start = None
+        self.focus_clock = time.monotonic
         self._activity_lock = threading.Lock()
         self._last_activity: dict[tuple[str, str], float] = {}
         self._activity_unknown: set[tuple[str, str]] = set()
@@ -4840,6 +4869,7 @@ class ProcessLifecycle:
         authority = self._authority(decision)
         if authority is None:
             return self._error("lease_required", 403)
+        self._focus_bind_lease(token, authority[1])
         return self._start_run_reserved(client, authority, request)
 
     def _is_idempotent_launch_retry(
@@ -4884,6 +4914,274 @@ class ProcessLifecycle:
             while len(self._steam_preparation_by_session) > _STEAM_PREPARATION_BOUND:
                 oldest = next(iter(self._steam_preparation_by_session))
                 del self._steam_preparation_by_session[oldest]
+
+    def _focus_fns(self) -> launch_focus.FocusFns | None:
+        return self.focus_fns
+
+    def _focus_foreground(self) -> int:
+        fns = self._focus_fns()
+        if fns is None:
+            return 0
+        try:
+            return int(fns.foreground() or 0)
+        except Exception:
+            return 0
+
+    def set_launch_focus(
+        self, client: ClientIdentity, mode: object, token: str | None = None
+    ) -> dict[str, object]:
+        if type(mode) is not str or mode not in launch_focus.FOCUS_MODES:
+            return {"error": "invalid_focus", "_http_status": 400}
+        if self._focus_fns() is None:
+            return {"error": "focus_unsupported", "_http_status": 409}
+        if isinstance(token, str) and token:
+            key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            with self._launch_focus_lock:
+                self._launch_focus_by_token.pop(key, None)
+                self._launch_focus_by_token[key] = (mode, self.focus_clock())
+                while len(self._launch_focus_by_token) > _LAUNCH_FOCUS_BOUND:
+                    oldest = next(iter(self._launch_focus_by_token))
+                    del self._launch_focus_by_token[oldest]
+        else:
+            key = _steam_preparation_key(client.session_id)
+            with self._launch_focus_lock:
+                self._launch_focus_by_session.pop(key, None)
+                self._launch_focus_by_session[key] = (mode, self.focus_clock())
+                while len(self._launch_focus_by_session) > _LAUNCH_FOCUS_BOUND:
+                    oldest = next(iter(self._launch_focus_by_session))
+                    del self._launch_focus_by_session[oldest]
+        return {"ok": True, "focus": mode}
+
+    def _focus_bind_lease(self, token: object, lease_id: object) -> None:
+        try:
+            if not (
+                isinstance(token, str)
+                and token
+                and isinstance(lease_id, str)
+                and lease_id
+            ):
+                return
+            key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            now = self.focus_clock()
+            with self._launch_focus_lock:
+                stored = self._launch_focus_by_token.pop(key, None)
+                if stored is None:
+                    return
+                mode, stored_at = stored
+                if now - stored_at > _LAUNCH_FOCUS_TTL_S:
+                    return
+                self._launch_focus_by_lease.pop(lease_id, None)
+                self._launch_focus_by_lease[lease_id] = (mode, now)
+                while len(self._launch_focus_by_lease) > _LAUNCH_FOCUS_BOUND:
+                    oldest = next(iter(self._launch_focus_by_lease))
+                    del self._launch_focus_by_lease[oldest]
+        except Exception:
+            pass
+
+    def launch_focus_mode(self, session_id: str) -> str:
+        key = _steam_preparation_key(session_id)
+        with self._launch_focus_lock:
+            stored = self._launch_focus_by_session.get(key)
+        if stored is None:
+            return launch_focus.DEFAULT_FOCUS
+        mode, stored_at = stored
+        if self.focus_clock() - stored_at <= _LAUNCH_FOCUS_TTL_S:
+            return mode
+        return launch_focus.DEFAULT_FOCUS
+
+    def _launch_focus_for_run(
+        self, client: ClientIdentity, run_id: str, lease_id: str | None = None
+    ) -> str:
+        key = _steam_preparation_key(client.session_id)
+        now = self.focus_clock()
+        with self._launch_focus_lock:
+            mode: str | None = None
+            if lease_id is None:
+                stored = self._launch_focus_by_session.pop(key, None)
+            else:
+                stored = self._launch_focus_by_lease.pop(lease_id, None)
+            if stored is not None:
+                fresh_mode, stored_at = stored
+                if now - stored_at <= _LAUNCH_FOCUS_TTL_S:
+                    mode = fresh_mode
+                    self._launch_focus_by_run.pop(run_id, None)
+                    self._launch_focus_by_run[run_id] = (mode, now, lease_id)
+                    while len(self._launch_focus_by_run) > _LAUNCH_FOCUS_BOUND:
+                        oldest = next(iter(self._launch_focus_by_run))
+                        del self._launch_focus_by_run[oldest]
+            if mode is None:
+                kept = self._launch_focus_by_run.get(run_id)
+                if kept is not None:
+                    kept_mode, bound_at, kept_lease = kept
+                    if (
+                        now - bound_at <= _LAUNCH_FOCUS_TTL_S
+                        and kept_lease == lease_id
+                    ):
+                        mode = kept_mode
+            if mode is None:
+                mode = launch_focus.DEFAULT_FOCUS
+            self._focus_decided[run_id] = mode
+            while len(self._focus_decided) > _LAUNCH_FOCUS_BOUND:
+                oldest = next(iter(self._focus_decided))
+                del self._focus_decided[oldest]
+            return mode
+
+    def stop_launch_focus(self, reason: str = "daemon_stopping") -> None:
+        try:
+            with self._launch_focus_lock:
+                guards = list(self._focus_guards.values())
+                for retired in self._focus_guards_retired.values():
+                    guards.extend(retired)
+            for guard in guards:
+                guard.disarm(reason)
+        except Exception:
+            pass
+
+    def _focus_live_pids(self, run_id: str) -> set[int]:
+        run = self.manifest.get(run_id)
+        if run is None or run.state not in _ACTIVE_STATES:
+            return set()
+        return {
+            record.pid
+            for record in run.processes
+            if record.role in _RESTART_DEBT_ROLES
+        }
+
+    def _focus_pid_owned(self, run_id: str, pid: int) -> bool:
+        run = self.manifest.get(run_id)
+        if run is None:
+            return False
+        for record in run.processes:
+            if record.pid == pid and record.role in _RESTART_DEBT_ROLES:
+                kind, _reason = self._classify_registered_process(record)
+                return kind == "owned"
+        return False
+
+    def _arm_launch_focus(
+        self,
+        client: ClientIdentity,
+        run_id: str,
+        pid: int,
+        foreground_before: int = 0,
+    ) -> None:
+        try:
+            with self._launch_focus_lock:
+                decided = self._focus_decided.pop(run_id, None)
+            if decided is not None:
+                mode = decided
+            else:
+                mode = self._launch_focus_for_run(client, run_id)
+                with self._launch_focus_lock:
+                    self._focus_decided.pop(run_id, None)
+            if mode != "keep":
+                self._disarm_launch_focus(run_id, "take")
+                return
+            fns = self._focus_fns()
+            if fns is None:
+                return
+            with self._launch_focus_lock:
+                guard = self._focus_guards.get(run_id)
+                new = True
+                if guard is not None and guard.armed:
+                    if guard.extend(
+                        {pid} | self._focus_live_pids(run_id),
+                        foreground_before=foreground_before,
+                    ):
+                        new = False
+                if new:
+                    if guard is not None and not guard.wait_idle(0):
+                        self._focus_guards_retired.setdefault(run_id, []).append(
+                            guard
+                        )
+                    guard = launch_focus.FocusGuard(
+                        fns=fns,
+                        verify=lambda p, r=run_id: self._focus_pid_owned(r, p),
+                    )
+                    self._focus_guards[run_id] = guard
+                    guard.add_pids(
+                        {pid} | self._focus_live_pids(run_id),
+                        foreground_before=foreground_before,
+                    )
+            if new:
+                starter = self.focus_start or _start_focus_thread
+                try:
+                    starter(
+                        lambda: self._run_focus_guard(client, run_id, guard)
+                    )
+                except Exception:
+                    guard.disarm("thread_failed")
+                    with self._launch_focus_lock:
+                        if self._focus_guards.get(run_id) is guard:
+                            del self._focus_guards[run_id]
+        except Exception:
+            pass
+
+    def _run_focus_guard(
+        self,
+        client: ClientIdentity,
+        run_id: str,
+        guard: launch_focus.FocusGuard,
+    ) -> None:
+        try:
+            try:
+                summary = guard.run(
+                    live_pids=lambda: self._focus_live_pids(run_id)
+                )
+            except Exception:
+                guard.disarm("guard_failed")
+                summary = guard.summary()
+            with self._launch_focus_lock:
+                if self._focus_guards.get(run_id) is guard:
+                    del self._focus_guards[run_id]
+                retired = self._focus_guards_retired.get(run_id)
+                if retired is not None:
+                    kept = [item for item in retired if item is not guard]
+                    if kept:
+                        self._focus_guards_retired[run_id] = kept
+                    else:
+                        self._focus_guards_retired.pop(run_id, None)
+            decision = (
+                "gave_back"
+                if summary["returned"] + summary["elsewhere"] + summary["failed"] > 0
+                else "watched"
+            )
+            self._audit(
+                "lifecycle_focus_guard",
+                client,
+                str(summary["disarmed"]),
+                decision,
+                run_id=run_id,
+                focus=summary,
+            )
+        except Exception:
+            pass
+
+    def _disarm_launch_focus(
+        self, run_id: str, reason: str, wait_s: float = 0.0
+    ) -> bool:
+        with self._launch_focus_lock:
+            guard = self._focus_guards.get(run_id)
+            retired = list(self._focus_guards_retired.get(run_id, ()))
+        guards = ([guard] if guard is not None else []) + retired
+        if not guards:
+            return True
+        for item in guards:
+            item.disarm(reason)
+        if wait_s <= 0:
+            return True
+        deadline = time.monotonic() + wait_s
+        idle = True
+        for item in guards:
+            left = max(0.0, deadline - time.monotonic())
+            if not item.wait_idle(left):
+                idle = False
+        with self._launch_focus_lock:
+            still = [item for item in retired if not item.wait_idle(0)]
+            if still:
+                self._focus_guards_retired[run_id] = still
+            else:
+                self._focus_guards_retired.pop(run_id, None)
+        return idle
 
     def _steam_mutation_allowed(self) -> bool | str:
         """Probe outside the lifecycle lock, then compare the captured run state."""
@@ -5426,6 +5724,8 @@ class ProcessLifecycle:
                         attempt_started_at=attempt_started_at,
                         cancel=cancel,
                     )
+                focus_before = self._focus_foreground()
+                self._launch_focus_for_run(client, run_id, authority[1])
                 launched_at = self._server_start_clock()
                 try:
                     launched = self.launcher(
@@ -5551,6 +5851,7 @@ class ProcessLifecycle:
                     # server's port bound: that start is over.
                     self._end_server_start_watch(run_id)
 
+                self._arm_launch_focus(client, run_id, pid, focus_before)
                 result: dict[str, object] = {
                     "ok": True,
                     "run_id": run_id,
@@ -7989,6 +8290,12 @@ class ProcessLifecycle:
                         )
                 if player is None:
                     return self._reject_reserved(authority, command, "client_process_gone")
+                if not self._disarm_launch_focus(
+                    run_id, "foreground_verb", wait_s=3.0
+                ):
+                    return self._reject_reserved(
+                        authority, command, "focus_guard_busy"
+                    )
                 windows = getattr(self, "window_fns", None)
                 fns = getattr(self, "foreground_fns", None)
                 hwnd = window_foreground.client_window(

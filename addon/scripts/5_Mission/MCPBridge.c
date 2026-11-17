@@ -78,14 +78,14 @@ class MCPBridge : Managed
 	// sent on the poll: the poll sends SERVER_CAPABILITIES_MASK instead.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "lease_close,loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "lease_close,loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_set_stance,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
 	// Compact announcement sent on every poll as cm=<epoch>.<hex>: the census
 	// above as a bitmask. Bit order is bridge_readiness.SERVER_CAPABILITY_BITS
 	// in tools/dayz_mcp/bridge_readiness.py (append only, never reorder);
 	// bit i set means the census name at index i is dispatched. Precomputed:
 	// no runtime code computes it, and the tests tie it bit for bit to
 	// SERVER_CAPABILITIES and to Dispatch().
-	protected const string SERVER_CAPABILITIES_MASK = "1.ffffffffffff";
+	protected const string SERVER_CAPABILITIES_MASK = "1.1ffffffffffff";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
@@ -824,6 +824,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "player_kill")
 		{
 			postNow = DispatchPlayerKill(command, result);
+		}
+		else if (command.cmd == "player_set_stance")
+		{
+			postNow = DispatchPlayerSetStance(command, result);
 		}
 		else if (command.cmd == "bot_start")
 		{
@@ -4004,6 +4008,86 @@ class MCPBridge : Managed
 			killPlayer.SetAllowDamage(damageAllowed);
 			result.ok = false;
 			result.error = "kill_not_applied";
+			return true;
+		}
+		result.ok = true;
+		return true;
+	}
+
+
+	// player_set_stance: server-authoritative stance (and optional vanilla
+	// unconsciousness juncture) on a living PlayerBase. uid is required and
+	// never falls back to the first human. Does not write health or shock,
+	// does not kill, does not respawn.
+	protected bool DispatchPlayerSetStance(MCPCommand command, MCPResult result)
+	{
+		string stanceUid;
+		string stanceError;
+		string stanceWanted;
+		Human stanceHuman;
+		PlayerBase stancePlayer;
+		PlayerIdentity stanceIdentity;
+		MCPPlayerSetStance stanceReport;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		stanceUid = command.args.uid;
+		stanceWanted = command.args.stance;
+		if (stanceUid == "" || (stanceWanted != "erect" && stanceWanted != "crouch" && stanceWanted != "prone"))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		stanceHuman = FindHumanByUid(stanceUid);
+		if (!stanceHuman)
+		{
+			result.ok = false;
+			result.error = "player_not_found";
+			return true;
+		}
+		stancePlayer = PlayerBase.Cast(stanceHuman);
+		if (!stancePlayer)
+		{
+			result.ok = false;
+			result.error = "player_not_found";
+			return true;
+		}
+		stanceIdentity = stancePlayer.GetIdentity();
+		if (!stanceIdentity)
+		{
+			result.ok = false;
+			result.error = "no_identity";
+			return true;
+		}
+		if (stanceIdentity.GetPlainId() != stanceUid)
+		{
+			result.ok = false;
+			result.error = "player_not_found";
+			return true;
+		}
+		if (!stancePlayer.IsAlive())
+		{
+			result.ok = false;
+			result.error = "player_dead";
+			return true;
+		}
+
+		stanceReport = new MCPPlayerSetStance();
+		stanceReport.uid = stanceUid;
+		stanceReport.requested = stanceWanted;
+		stanceReport.recover_requested = command.args.recover;
+		stanceReport.before = stancePlayer.MCPStanceName();
+		stanceError = stancePlayer.MCPSetStanceServer(stanceWanted, command.args.recover);
+		stanceReport.applied = stanceError == "";
+		result.player_set_stance = stanceReport;
+		if (stanceError != "")
+		{
+			result.ok = false;
+			result.error = stanceError;
 			return true;
 		}
 		result.ok = true;
@@ -8672,6 +8756,7 @@ class MCPBridge : Managed
 		bool moveActive = false;
 		bool weaponActive = false;
 		bool lookActive = false;
+		bool stanceActive = false;
 		bool holdActive = false;
 		m_Players.Clear();
 		GetGame().GetPlayers(m_Players);
@@ -8707,6 +8792,11 @@ class MCPBridge : Managed
 					lookActive = true;
 				}
 
+				if (player.MCPStanceActiveNow())
+				{
+					stanceActive = true;
+				}
+
 				// §2.7 step 3: census only, no new interrupt from the server.
 				ActionManagerServer holdManager = ActionManagerServer.Cast(player.GetActionManager());
 				if (holdManager && holdManager.MCP_HoldServerBusy())
@@ -8721,6 +8811,7 @@ class MCPBridge : Managed
 		AddCloseEntry(census, "survivor_drive", MCPSurvivorDrive.LeaseCloseBusy(), "survivor_drive");
 		AddCloseEntry(census, "move_copy", moveActive, "move_copy");
 		AddCloseEntry(census, "look_copy", lookActive, "look_copy");
+		AddCloseEntry(census, "stance_copy", stanceActive, "stance_copy");
 		AddCloseEntry(census, "weapon", weaponActive, "weapon");
 		AddCloseEntry(census, "action_hold", holdActive, "action_hold");
 		bool jobsActive = false;
@@ -8809,6 +8900,32 @@ class MCPBridge : Managed
 		PostResult(result);
 	}
 
+	protected bool IsPlayerInCloseFloors(PlayerBase player, MCPArgs closeArgs)
+	{
+		int low;
+		int high;
+		int idx;
+		MCPLeaseCloseFloor carried;
+		if (!player || !closeArgs || !closeArgs.close_floors)
+		{
+			return false;
+		}
+		low = 0;
+		high = 0;
+		player.GetNetworkID(low, high);
+		idx = 0;
+		while (idx < closeArgs.close_floors.Count())
+		{
+			carried = closeArgs.close_floors.Get(idx);
+			if (carried && low == carried.net_low && high == carried.net_high)
+			{
+				return true;
+			}
+			idx = idx + 1;
+		}
+		return false;
+	}
+
 	// §2.7 stop steps. Jobs post through their timeout path; server_perf is
 	// kept (it only reads). RPC and infected debt are never recalled.
 	protected bool DispatchLeaseClose(MCPCommand command, MCPResult result)
@@ -8863,6 +8980,7 @@ class MCPBridge : Managed
 							floorPlayer.MCPMoveCloseServer(carried.move_id, carried.conn_gen);
 							floorPlayer.MCPWeaponCloseServer(carried.weapon_id, carried.conn_gen);
 							floorPlayer.MCPLookCloseServer(carried.look_id, carried.conn_gen);
+							floorPlayer.MCPStanceCloseServer(carried.conn_gen);
 						}
 					}
 
@@ -8871,6 +8989,22 @@ class MCPBridge : Managed
 
 				f = f + 1;
 			}
+		}
+
+		m_Players.Clear();
+		GetGame().GetPlayers(m_Players);
+		int stanceCloseIndex = 0;
+		while (stanceCloseIndex < m_Players.Count())
+		{
+			PlayerBase stanceClosePlayer = PlayerBase.Cast(m_Players.Get(stanceCloseIndex));
+			if (stanceClosePlayer)
+			{
+				if (!IsPlayerInCloseFloors(stanceClosePlayer, command.args))
+				{
+					stanceClosePlayer.MCPStanceCloseServer(stanceClosePlayer.MCPConnGenValue());
+				}
+			}
+			stanceCloseIndex = stanceCloseIndex + 1;
 		}
 
 		if (m_Jobs)
@@ -8952,6 +9086,75 @@ class MCPBridge : Managed
 		return players;
 	}
 
+	protected void FillPlayerTriggers(PlayerBase body, MCPPlayerState state)
+	{
+		MCPPlayerTriggerBody tracker;
+		MCPPlayerTriggerLive live;
+		MCPPlayerTriggerInside insideCopy;
+		MCPPlayerTriggerEvent eventCopy;
+		MCPPlayerTriggerEvent triggerEvent;
+		int index;
+		int posIndex;
+		state.trigger_run = MCPPlayerTriggers.RunId();
+		state.trigger_seq = MCPPlayerTriggers.LastSeq();
+		state.trigger_evicted_seq = 0;
+		if (!body)
+		{
+			return;
+		}
+		tracker = body.MCPGetTriggerBody(false);
+		if (!tracker)
+		{
+			return;
+		}
+		tracker.PruneGone();
+		state.trigger_seq = MCPPlayerTriggers.LastSeq();
+		state.trigger_evicted_seq = tracker.evicted_seq;
+		index = 0;
+		while (index < tracker.inside.Count())
+		{
+			live = tracker.inside.Get(index);
+			if (live && live.entry)
+			{
+				insideCopy = new MCPPlayerTriggerInside();
+				insideCopy.type = live.entry.type;
+				insideCopy.net_id_low = live.entry.net_id_low;
+				insideCopy.net_id_high = live.entry.net_id_high;
+				posIndex = 0;
+				while (posIndex < live.entry.pos.Count())
+				{
+					insideCopy.pos.Insert(live.entry.pos.Get(posIndex));
+					posIndex = posIndex + 1;
+				}
+				insideCopy.shape = live.entry.shape;
+				insideCopy.enter_uptime_s = live.entry.enter_uptime_s;
+				state.triggers.Insert(insideCopy);
+			}
+			index = index + 1;
+		}
+		index = 0;
+		while (index < tracker.events.Count())
+		{
+			triggerEvent = tracker.events.Get(index);
+			eventCopy = new MCPPlayerTriggerEvent();
+			eventCopy.seq = triggerEvent.seq;
+			eventCopy.kind = triggerEvent.kind;
+			eventCopy.type = triggerEvent.type;
+			eventCopy.net_id_low = triggerEvent.net_id_low;
+			eventCopy.net_id_high = triggerEvent.net_id_high;
+			posIndex = 0;
+			while (posIndex < triggerEvent.pos.Count())
+			{
+				eventCopy.pos.Insert(triggerEvent.pos.Get(posIndex));
+				posIndex = posIndex + 1;
+			}
+			eventCopy.shape = triggerEvent.shape;
+			eventCopy.uptime_s = triggerEvent.uptime_s;
+			state.trigger_events.Insert(eventCopy);
+			index = index + 1;
+		}
+	}
+
 	protected MCPPlayerState BuildPlayerState()
 	{
 		m_Players.Clear();
@@ -8993,6 +9196,7 @@ class MCPBridge : Managed
 			FillPlayerVitals(body, vitals);
 			state.water = vitals.water;
 			state.energy = vitals.energy;
+			FillPlayerTriggers(body, state);
 		}
 		return state;
 	}

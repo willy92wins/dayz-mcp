@@ -37,6 +37,7 @@ from dayz_mcp import (
     dayz_test_tool,
     host_config,
     inbox,
+    launch_focus,
     native_launcher_transaction,
     orphan_guard,
     playbook_tool as playbook_tool_mod,
@@ -699,6 +700,7 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "player_godmode",
     # A mistyped uid key must not be dropped: kill has no first-player fallback.
     "player_kill",
+    "player_set_stance",
     "bot_start",
     "bot_stop",
     # A mistyped scene_id key must not create a batch outside its scene, where
@@ -2819,6 +2821,11 @@ class ClientRuntime:
             result.pop("lease_id", None)
         return result
 
+    async def lifecycle_focus(self, mode: str) -> dict[str, Any]:
+        return await self._control_with_lazy_spawn(
+            self._control.lifecycle_focus, mode
+        )
+
     async def lifecycle_reap(self, run_id: str) -> dict[str, Any]:
         result = await self._control_with_lazy_spawn(
             self._control.lifecycle_reap, run_id
@@ -3717,6 +3724,21 @@ CLIENT_START_BUDGET_DESCRIPTION = (
     "covers the slowest startup MEASURED - itself a lower bound, since the "
     "process starts before its log header and polls after the mission exists."
 )
+FOCUS_DESCRIPTION = (
+    'focus="keep" (default) or focus="take". DayZ brings its own window to '
+    "the front a few seconds after it starts. With focus=\"keep\", for 300 s "
+    "after each launch of the run the daemon takes the foreground away from "
+    "a DayZ window that grabbed it while a person was using the PC (input in "
+    "the last 200 s) and did not switch to DayZ themselves (Alt, a Windows "
+    "key, or a click on the DayZ window just before): it minimizes that "
+    "window, so Windows activates the next window (best effort the one the "
+    "person had), then shows it again without activating it; at most 3 times "
+    "per launch. A DayZ window without the foreground can give "
+    "capture_screenshot a frozen frame and stream textures for minutes; "
+    "dayz_test_foreground asks Windows to bring the client forward and ends "
+    'this for the run. focus="take" leaves the foreground to DayZ, as '
+    "before. The answer reports focus: {mode, set}."
+)
 
 
 def _describe_run_parameters(app: FastMCP, tool_name: str) -> None:
@@ -3747,6 +3769,7 @@ def _describe_run_parameters(app: FastMCP, tool_name: str) -> None:
         ("server_adminlog", SERVER_ADMINLOG_DESCRIPTION),
         ("client_start_budget_s", CLIENT_START_BUDGET_DESCRIPTION),
         ("takeover", TAKEOVER_DESCRIPTION),
+        ("focus", FOCUS_DESCRIPTION),
     ):
         prop = props.get(field)
         if not isinstance(prop, dict):
@@ -6666,7 +6689,23 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Cycle: session_release (if holding) -> dayz_test_run -> "
-            "session_acquire_wait. Queue and run an approved DayZ test "
+            "session_acquire_wait. "
+            'focus="keep" (default) or focus="take". DayZ brings its own '
+            "window to the front a few seconds after it starts. With "
+            'focus="keep", for 300 s after each launch of the run the daemon '
+            "takes the foreground away from a DayZ window that grabbed it "
+            "while a person was using the PC (input in the last 200 s) and "
+            "did not switch to DayZ themselves (Alt, a Windows key, or a "
+            "click on the DayZ window just before): it minimizes that "
+            "window, so Windows activates the next window (best effort the "
+            "one the person had), then shows it again without activating it; "
+            "at most 3 times per launch. A DayZ window without the "
+            "foreground can give capture_screenshot a frozen frame and "
+            "stream textures for minutes; dayz_test_foreground asks Windows "
+            "to bring the client forward and ends this for the run. "
+            'focus="take" leaves the foreground to DayZ, as before. The '
+            "answer reports focus: {mode, set}. "
+            "Queue and run an approved DayZ test "
             "project; lease ownership and heartbeat remain internal to the "
             "tool. Release any held session lease before calling. The run it "
             "leaves has no owner (RUNNING_IDLE). session_acquire_wait adopts "
@@ -6838,6 +6877,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         mod_dir: StrictStr | None = None,
         client_start_budget_s: StrictFloat | StrictInt | None = None,
         on_busy: StrictStr = "fail",
+        focus: StrictStr = "keep",
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         caller_stale = await _observe_caller_tool_registry_stale(
@@ -6865,6 +6905,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(
                 "bad_dayz_test_request:server_adminlog_requires_server"
             )
+        if focus not in launch_focus.FOCUS_MODES:
+            raise ToolError("bad_dayz_test_request:invalid_focus")
         client = _client_runtime()
         # The runtime's monotonic clock (ClientRuntime(time_fn=...)), the one
         # its own call deadlines use; it holds the box wait budget below.
@@ -6941,6 +6983,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         progress_cb=report,
                         auto_remediate_steam=auto_remediate_steam,
                         client_start_budget_s=budget_s,
+                        focus=focus,
                         project_mod_override=project_mod_override,
                         connect_host=connect_host,
                         mod_dir=mod_dir,
@@ -7467,12 +7510,52 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "(GetAllowDamage() false on the server). water and energy are "
             "the body's stats, 0 to 5000, as player_heal reads them; an older "
             "PBO leaves them out. "
+            "triggers is the list of scripted triggers (Trigger subclasses) "
+            "the server-side body is inside now, empty when none. "
+            "trigger_events are its enter/leave/gone events with a monotonic "
+            "seq, paged with trigger_cursor plus trigger_run like "
+            "player_trace's cursor. A trigger deleted while the player is "
+            "inside shows up as a gone event when it is next noticed. "
+            "The ring keeps 32 events per body and trigger_events_overflow "
+            "says some were lost. A respawned body starts empty; an older "
+            "PBO leaves these fields out. "
             f"{GODMODE_DEFAULT_LINE}"
         )
     )
-    async def query_player_state(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def query_player_state(
+        trigger_cursor: StrictInt = 0,
+        trigger_run: StrictInt = 0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(trigger_cursor, int) or isinstance(trigger_cursor, bool) or trigger_cursor < 0:
+            raise ToolError(_bad_args("trigger_cursor", trigger_cursor, "be an int >= 0"))
+        if not isinstance(trigger_run, int) or isinstance(trigger_run, bool) or trigger_run < 0:
+            raise ToolError(_bad_args("trigger_run", trigger_run, "be an int >= 0"))
+        if trigger_cursor > 0 and trigger_run == 0:
+            raise ToolError(_bad_args("trigger_run", trigger_run, "be given with trigger_cursor"))
         async with runtime.tool_lock:
-            return await runtime.call_bridge("query_player_state", {}, "server", _timeout(timeout_s))
+            result = await runtime.call_bridge("query_player_state", {}, "server", _timeout(timeout_s))
+        if isinstance(result, dict):
+            state = result.get("state")
+            if isinstance(state, dict) and isinstance(state.get("trigger_events"), list):
+                effective_cursor = trigger_cursor
+                reset = False
+                if trigger_cursor > 0 and trigger_run != state.get("trigger_run"):
+                    effective_cursor = 0
+                    reset = True
+                kept = [
+                    event
+                    for event in state["trigger_events"]
+                    if isinstance(event, dict) and isinstance(event.get("seq"), int) and event["seq"] > effective_cursor
+                ]
+                state["trigger_events"] = kept
+                state["trigger_next_cursor"] = kept[-1]["seq"] if kept else effective_cursor
+                evicted = state.get("trigger_evicted_seq")
+                state["trigger_events_overflow"] = bool(
+                    isinstance(evicted, int) and effective_cursor < evicted
+                )
+                state["trigger_cursor_reset"] = reset
+        return result
 
     @app.tool(
         description=(
@@ -8664,6 +8747,59 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         args = {"uid": uid}
         async with runtime.tool_lock:
             return await runtime.call_bridge("player_kill", args, "server", _timeout(timeout_s))
+
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Set a connected living player's body stance "
+            "(erect, crouch or prone) without killing or respawning them and "
+            "without writing health or shock. uid is required and never falls "
+            "back to the first human; uid selects by "
+            "PlayerIdentity.GetPlainId(). Two-sided route (server RPC -> owner "
+            "ScriptInputUserData -> both CommandHandlers; not a client "
+            "UAStance input, which r7d showed is not drivable from the harness "
+            "after a collapse): the owner sends ScriptInputUserData and "
+            "applies HumanCommandMove.ForceStance in its CommandHandler, the "
+            "server accepts that input and applies ForceStance in its own "
+            "CommandHandler, and both sides later release the lock with "
+            "ForceStance(-1) in CommandHandler so the player can change stance "
+            "with input. StartCommand_Move is never called (it would cut the "
+            "vanilla wake-up animation and swim/ladder/fall/climb). A dead "
+            "body is refused as player_dead with no respawn. A body in a "
+            "vehicle is in_vehicle. An unconscious body is still_unconscious "
+            "unless recover=true, which requests the vanilla juncture "
+            "DayZPlayerSyncJunctures.SendPlayerUnconsciousness(player, false) "
+            "(the same call player_heal uses) without writing health or shock "
+            "and queues the stance until a move command appears after wake-up; "
+            "recover=false (default) never calls that juncture. A new request "
+            "while a previous one is in flight, cancelling, or still holding "
+            "the ForceStance lock is refused as busy. The immediate answer is "
+            "player_set_stance: uid, requested, applied, recover_requested, "
+            "before (a pre-apply snapshot). applied=true means queued "
+            "(accepted for apply), not that GetMovementState already matches; "
+            "the result is confirmed by a later server RPT observed= line. "
+            "Errors: bad_args, player_not_found, no_identity, player_dead, "
+            "in_vehicle, still_unconscious, no_move_command, swimming, "
+            "climbing, in_water, cannot_change_stance, busy, heavy_item, "
+            "rpc_failed. "
+            f"{GODMODE_DEFAULT_LINE}"
+        )
+    )
+    async def player_set_stance(
+        uid: StrictStr,
+        stance: Literal["erect", "crouch", "prone"],
+        recover: StrictBool = False,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(uid, str) or not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
+        if stance not in ("erect", "crouch", "prone"):
+            raise ToolError(_bad_args("stance", stance, "be erect, crouch or prone"))
+        if not isinstance(recover, bool):
+            raise ToolError(_bad_args("recover", recover, "be a bool"))
+        args: dict[str, Any] = {"uid": uid, "stance": stance, "recover": recover}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("player_set_stance", args, "server", _timeout(timeout_s))
 
     @app.tool(
         description=(
@@ -11450,7 +11586,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Request a local-player respawn through the "
         "same character-selection, death-screen, menu, and mission teardown sequence as "
-        "vanilla InGameMenu.GameRespawn. Without survivor_type the respawn is random as before. "
+        "vanilla InGameMenu.GameRespawn. Vanilla respawns only a dead, unconscious or restrained "
+        "player, and the server kills an unconscious or restrained one to respawn it. With or "
+        "without survivor_type, a living, conscious, unrestrained local player is refused as "
+        "player_alive_conscious and nothing changes (player_kill first for a new body); an older "
+        "client bridge that accepts the call answers ok/requested instead and nothing happens. "
+        "Without survivor_type the respawn is random as before. "
         "survivor_type, one of the 31 vanilla survivor classes "
         f"({', '.join(VANILLA_SURVIVOR_TYPES)}), asks vanilla's custom respawn for that class. "
         "The server honours it only in respawn mode CUSTOM (cfggameplay or serverDZ.cfg "
