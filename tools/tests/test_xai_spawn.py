@@ -7,6 +7,7 @@ carries the criterion -> test -> mutant table.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import math
@@ -1431,21 +1432,27 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
         # Sol r1 finding 2: once the release is queued under the lock, a later
         # failure (finish_operation_exact raising) must not lose its line, and
         # the error still reaches the caller. The reaper's abandon at the
-        # deadline too (review r3 of PR 427), and whatever the error (review
-        # r1 of PR 428). Mutants killed: the audit written only after a flush
-        # that returned normally, on every path or on the reaper's alone; the
-        # line written on one error type only.
+        # deadline too (review r3 of PR 427), whatever the error (review r1 of
+        # PR 428), and when the caller already holds the broker lock, which is
+        # re-entrant (review r2 of PR 428): the line then waits for the next
+        # lock-free point. Mutants killed: the audit written only after a
+        # flush that returned normally, on every path or on the reaper's
+        # alone; the line written on one error type only; the line dropped
+        # after a failure under an outer lock.
         shapes = ("abandon_command", "request_abandon", "late_answer", "deadline")
-        for shape, error in itertools.product(shapes, (RuntimeError, OSError)):
-            with self.subTest(shape=shape, error=error.__name__):
+        for shape, error, outer_lock in itertools.product(
+            shapes, (RuntimeError, OSError), (False, True)
+        ):
+            with self.subTest(shape=shape, error=error.__name__, outer_lock=outer_lock):
                 self._writers = []
                 state, now, command_id = self._delivered_spawn()
                 audit = self._real_audit(state)
                 coordination = state.coordination
                 self.assertIsNotNone(coordination)
+                outer = state._lock if outer_lock else contextlib.nullcontext()  # type: ignore[attr-defined]
                 with patch.object(
                     coordination, "finish_operation_exact", side_effect=error("injected")
-                ):
+                ), outer:
                     with self.assertRaises(error):
                         if shape == "abandon_command":
                             state.abandon_command(command_id, "tool_cancelled")
@@ -1457,6 +1464,10 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
                         else:
                             now[0] += 0.126
                             state.store_result({"id": command_id, "ok": 1}, instance=INST_SERVER)
+                if outer_lock:
+                    # Nothing written under the lock; the next lock-free point writes it.
+                    self.assertEqual(self._release_lines(audit, command_id), [])
+                    state.status_snapshot()
                 self.assertEqual(len(self._queued_release_ids(state)), 1)
                 lines = self._release_lines(audit, command_id)
                 self.assertEqual(len(lines), 1, self._lines(audit))

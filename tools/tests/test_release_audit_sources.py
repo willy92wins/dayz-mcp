@@ -15,6 +15,7 @@ no release decided writes nothing.
 """
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import tempfile
@@ -384,24 +385,34 @@ class ReleaseAuditSourcesTest(unittest.TestCase):
         # line, whichever path decided it: the reaper at the deadline, the
         # caller's /abandon or an in-process abandon. Review r1 of PR 428:
         # whatever the error, and for a refused release too (retail
-        # quarantine). The error still reaches the caller, as PR 418 pins for
-        # the spawn, and a second abandon and a reap add nothing. Mutants
-        # killed: these sources audited only after a flush that returned
-        # normally, on every path or on one; the error swallowed; the line
-        # written on one error type only; only a queued release audited after
-        # a failure.
+        # quarantine). Review r2 of PR 428: also when the caller already holds
+        # the broker lock, which is re-entrant; the line then waits for the
+        # next lock-free point. The error still reaches the caller, as PR 418
+        # pins for the spawn, and a second abandon and a reap add nothing.
+        # Mutants killed: these sources audited only after a flush that
+        # returned normally, on every path or on one; the error swallowed; the
+        # line written on one error type only; only a queued release audited
+        # after a failure; the line dropped after a failure under an outer
+        # lock.
         reasons = {"deadline": "deadline", "http": "cancelled", "in_process": "tool_cancelled"}
         cases = itertools.product(
-            SOURCES, reasons.items(), ("release_queued", "cleanup_degraded"), (RuntimeError, OSError)
+            SOURCES,
+            reasons.items(),
+            ("release_queued", "cleanup_degraded"),
+            (RuntimeError, OSError),
+            (False, True),
         )
-        for source, (path, reason), decision, error in cases:
-            with self.subTest(source=source[0], path=path, decision=decision, error=error.__name__):
+        for source, (path, reason), decision, error, outer_lock in cases:
+            with self.subTest(
+                source=source[0], path=path, decision=decision, error=error.__name__, outer_lock=outer_lock
+            ):
                 state, coordinator, now, token = self._state()
                 audit = self._real_audit(state)
                 body = self._delivered(state, token, source)
                 if decision == "cleanup_degraded":
                     state.retail_probe = lambda: {"known": True, "processes": [{"name": "DayZ_x64.exe"}]}
-                with patch.object(coordinator, "finish_operation_exact", side_effect=error("injected")):
+                outer = state._lock if outer_lock else contextlib.nullcontext()  # type: ignore[attr-defined]
+                with patch.object(coordinator, "finish_operation_exact", side_effect=error("injected")), outer:
                     with self.assertRaises(error):
                         if path == "deadline":
                             now[0] += 6.0
@@ -410,6 +421,10 @@ class ReleaseAuditSourcesTest(unittest.TestCase):
                             self._request_abandon(state, token, body["id"], reason)
                         else:
                             state.abandon_command(body["id"], reason)
+                if outer_lock:
+                    # Nothing written under the lock; the next lock-free point writes it.
+                    self.assertEqual(self._release_lines(audit), [])
+                    state.status_snapshot()
                 queued = self._queued_releases(state, source)
                 lines = self._release_lines(audit)
                 self.assertEqual(len(lines), 1, self._lines(audit))
