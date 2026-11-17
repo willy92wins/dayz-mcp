@@ -1067,8 +1067,11 @@ class AIGroupSpawnLateAnswerTest(unittest.TestCase):
 
     def test_a_late_failed_answer_also_queues_the_release_once(self) -> None:
         # Mutant killed: abandoning only on ok=1. A spawn that created part of
-        # its group and then failed answers ok=0 with created set.
+        # its group and then failed answers ok=0 with created set. Its line
+        # names the release it queued (review r2 of PR 429). Mutant killed:
+        # the late line of a failed answer without release_id.
         state, now, command_id = self._delivered_spawn()
+        events = self._audit(state)
         now[0] += 0.126
         failed = {
             "id": command_id,
@@ -1079,6 +1082,16 @@ class AIGroupSpawnLateAnswerTest(unittest.TestCase):
         for retry in (False, True):
             status, stored = state.store_result(dict(failed), instance=INST_SERVER, retry=retry)
             self.assertEqual(status, 200, stored)
+        queued = [c["id"] for c in bound_queue(state, "server") if c.get("cmd") == RELEASE]
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(
+            [
+                (e["status"], e.get("release_id"))
+                for e in events
+                if e.get("event") == "late_answer_abandon"
+            ],
+            [("release_queued", queued[0])],
+        )
         releases = self._releases(state) + self._releases(state)
         self.assertEqual(releases, [(RELEASE, {"spawn_token": TOKEN})])
 
@@ -1553,12 +1566,13 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
         # flush that writes only the first pending line. Each line names its
         # own spawn's release (review r3 of PR 428), also when each flush
         # fails (review r1 of PR 429): the reaper stops at a failed flush, so
-        # each status_snapshot under the lock abandons one spawn. Mutants
-        # killed: the deferred lines written with the last queued release's
-        # id; a line deferred during a failure giving its id to the lines
-        # deferred before it.
-        for failure in (False, True):
-            with self.subTest(failure=failure):
+        # each status_snapshot under the lock abandons one spawn. The same
+        # for two late answers stored under the lock (review r2 of PR 429).
+        # Mutants killed: the deferred lines written with the last queued
+        # release's id; a line deferred during a failure giving its id to the
+        # lines deferred before it; the late lines given the last late id.
+        for kind, failure in itertools.product(("deadline", "late_answer"), (False, True)):
+            with self.subTest(kind=kind, failure=failure):
                 self._writers = []
                 now = [1000.0]
                 state = _bound_state(clock=lambda: now[0])
@@ -1575,22 +1589,41 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
                 self.assertEqual(status, 200, second)
                 ids = (first["id"], second["id"])
                 self.assertEqual(sorted(c["id"] for c in _delivered(state)), sorted(ids))
-                now[0] += 0.06
-                if failure:
-                    coordination = state.coordination
-                    self.assertIsNotNone(coordination)
-                    with patch.object(
+                coordination = state.coordination
+                self.assertIsNotNone(coordination)
+                injected = (
+                    patch.object(
                         coordination, "finish_operation_exact", side_effect=RuntimeError("injected")
-                    ), state._lock:  # type: ignore[attr-defined]
-                        for _ in ids:
-                            with self.assertRaises(RuntimeError):
-                                state.status_snapshot()
-                    self.assertEqual(
-                        [e for command_id in ids for e in self._release_lines(audit, command_id)], []
                     )
+                    if failure
+                    else contextlib.nullcontext()
+                )
+                if kind == "deadline":
+                    now[0] += 0.06
+                    with injected, state._lock:  # type: ignore[attr-defined]
+                        if failure:
+                            for _ in ids:
+                                with self.assertRaises(RuntimeError):
+                                    state.status_snapshot()
+                        else:
+                            state.status_snapshot()
+                    event, reason = "abandon_release", "deadline"
                 else:
-                    with state._lock:  # type: ignore[attr-defined]
-                        state.status_snapshot()
+                    now[0] += 0.126
+                    with injected, state._lock:  # type: ignore[attr-defined]
+                        for command_id in ids:
+                            if failure:
+                                with self.assertRaises(RuntimeError):
+                                    state.store_result(
+                                        {"id": command_id, "ok": 1}, instance=INST_SERVER
+                                    )
+                            else:
+                                self.assertTrue(self._answer(state, command_id).get("discarded"))
+                    event, reason = "late_answer_abandon", "late_answer"
+                # Nothing is written under the lock; the next lock-free point writes both.
+                self.assertEqual(
+                    [e for command_id in ids for e in self._release_lines(audit, command_id)], []
+                )
                 state.status_snapshot()
                 self.assertEqual(len(self._queued_release_ids(state)), 2)
                 releases = {
@@ -1603,7 +1636,7 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
                     lines = self._release_lines(audit, command_id)
                     self.assertEqual(
                         [(e.get("event"), e.get("reason"), e.get("release_id")) for e in lines],
-                        [("abandon_release", "deadline", releases[token])],
+                        [(event, reason, releases[token])],
                         self._lines(audit),
                     )
 
