@@ -8,6 +8,8 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -501,6 +503,216 @@ class LinuxHostArgvShapeTest(unittest.TestCase):
             launcher._child_environment(secrets_env)
         allowed = launcher._child_environment({"DAYZ_MCP_CANCEL_HANDLE": "3"})
         self.assertEqual(allowed["DAYZ_MCP_CANCEL_HANDLE"], "3")
+
+
+class _FakeStream:
+    def __init__(self, descriptor: int) -> None:
+        self.descriptor = descriptor
+
+    def fileno(self) -> int:
+        return self.descriptor
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+    def read1(self, _size: int) -> bytes:
+        return b""
+
+
+class _StuckWorker:
+    """A worker that took the request and then never writes nor exits."""
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        to_worker_read, to_worker_write = os.pipe()
+        from_worker_read, from_worker_write = os.pipe()
+        # The worker's ends stay open: no EOF ever reaches the relay.
+        self.held = [to_worker_read, from_worker_write]
+        self.stdin = _FakeStream(to_worker_write)
+        self.stdout = _FakeStream(from_worker_read)
+        self.stderr = _FakeStream(-1)
+        self.killed = False
+        self.wait_timeouts: list[object] = []
+
+    def poll(self) -> int | None:
+        return -9 if self.killed else None
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.wait_timeouts.append(timeout)
+        if not self.killed:
+            raise subprocess.TimeoutExpired("worker", timeout)
+        return -9
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def release(self) -> None:
+        for stream in (self.stdin, self.stdout):
+            stream.close()
+        while self.held:
+            os.close(self.held.pop())
+
+
+class SuperviseWorkerCancelMidReadTest(unittest.TestCase):
+    """Sol #411 [P1]: a cancel that lands while _read_exact waits still ends the relay.
+
+    The worker is stuck (it never answers nor exits) and the cancel arrives after
+    the relay is already blocked reading the next frame header. The grace that
+    cancel starts must bound that same read; the relay then kills the worker and
+    returns, so the operation can finish and release its lease.
+    """
+
+    GRACE_S = 0.4
+
+    def setUp(self) -> None:
+        if POSIX:
+            self.launcher = linux_launcher
+        else:
+            from dayz_mcp import linux_launcher as launcher
+
+            self.launcher = launcher
+        self.workers: list[_StuckWorker] = []
+        self.reading = threading.Event()
+        self.select_calls = 0
+
+        def popen(*args: object, **kwargs: object) -> _StuckWorker:
+            worker = _StuckWorker(*args, **kwargs)
+            self.workers.append(worker)
+            return worker
+
+        def never_ready(readable, _writable, _errors, timeout):
+            # Nothing ever arrives from the worker: wait out the timeout.
+            self.select_calls += 1
+            self.reading.set()
+            time.sleep(min(timeout, 0.02))
+            return [], [], []
+
+        for patcher in (
+            patch.object(self.launcher, "_CANCEL_GRACE_S", self.GRACE_S),
+            patch.object(self.launcher, "_EXIT_WAIT_S", 0.05),
+            patch.object(self.launcher.subprocess, "Popen", popen),
+            patch.object(self.launcher.select, "select", never_ready),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def tearDown(self) -> None:
+        for worker in self.workers:
+            worker.release()
+
+    def _bundle(self) -> object:
+        return self.launcher.VerifiedLinuxBundle(
+            sealed_policies=(), manifest_sha256="0" * 64, app_sha256="0" * 64, root=Path("/bundle")
+        )
+
+    def test_a_cancel_during_the_header_read_is_bounded_by_its_grace(self) -> None:
+        cancel = threading.Event()
+        result: dict[str, object] = {}
+
+        def run() -> None:
+            started = time.monotonic()
+            result["code"] = self.launcher._supervise_worker(
+                self._bundle(),
+                canonical_request=b"request",
+                secrets_env={},
+                cancel_signal=cancel,
+                output_sink=None,
+            )
+            result["elapsed"] = time.monotonic() - started
+
+        relay = threading.Thread(target=run, daemon=True)
+        relay.start()
+        # Mid-read: the relay is already waiting on the worker when the cancel lands.
+        self.assertTrue(self.reading.wait(5.0))
+        calls_before_cancel = self.select_calls
+        cancelled_at = time.monotonic()
+        cancel.set()
+        relay.join(timeout=self.GRACE_S + 10.0)
+        self.assertFalse(relay.is_alive(), "the relay kept waiting after its cancel grace")
+        self.assertGreater(calls_before_cancel, 0)
+        # Ended by the grace, not before it: the worker had that long to stop.
+        self.assertGreaterEqual(time.monotonic() - cancelled_at, self.GRACE_S)
+        self.assertEqual(result["code"], 1)
+        [worker] = self.workers
+        self.assertTrue(worker.killed)
+
+    def test_launch_registered_linux_returns_after_a_cancel_mid_read(self) -> None:
+        import asyncio
+
+        async def scenario() -> int:
+            cancel_event = asyncio.Event()
+
+            async def cancel_once_reading() -> None:
+                while not self.reading.is_set():
+                    await asyncio.sleep(0.01)
+                cancel_event.set()
+
+            canceller = asyncio.ensure_future(cancel_once_reading())
+            opened = self.launcher.LinuxOpenedLauncher("dayz-test-v1", Path("/bundle"))
+            try:
+                return await asyncio.wait_for(
+                    self.launcher.launch_registered_linux(
+                        opened,
+                        verified_bundle=self._bundle(),
+                        identity_json="{}",
+                        lease_token="lease-token-for-test",
+                        daemon_policy_json="{}",
+                        canonical_request=b"request",
+                        cancel_event=cancel_event,
+                    ),
+                    timeout=self.GRACE_S + 10.0,
+                )
+            finally:
+                canceller.cancel()
+
+        # An external bound wait_for cannot provide: wait_for cancels the
+        # launch task, but launch_registered_linux catches CancelledError and
+        # keeps waiting on the executor under asyncio.shield, and the stuck
+        # worker never exits unless that code kills it. Run asyncio.run on a
+        # daemon thread and join it with a deadline; if it is still alive,
+        # unblock the worker and fail instead of hanging the suite forever.
+        outcome: dict[str, object] = {}
+
+        def run() -> None:
+            try:
+                with patch.object(self.launcher.LinuxOpenedLauncher, "revalidate"):
+                    outcome["code"] = asyncio.run(scenario())
+            except BaseException as error:  # re-raised on the test thread below
+                outcome["error"] = error
+
+        runner = threading.Thread(target=run, daemon=True)
+        runner.start()
+        runner.join(timeout=self.GRACE_S + 10.0)
+        if runner.is_alive():
+            for worker in list(self.workers):
+                worker.kill()
+                worker.release()
+            runner.join(timeout=5.0)
+            self.fail(
+                "launch_registered_linux did not return after a cancel mid-read"
+                f" within {self.GRACE_S + 10.0:.1f}s"
+                f" (runner still alive: {runner.is_alive()})"
+            )
+        if "error" in outcome:
+            raise outcome["error"]  # type: ignore[misc]
+        self.assertEqual(outcome.get("code"), 1)
+        [worker] = self.workers
+        self.assertTrue(worker.killed)
+
+    def test_read_exact_reads_the_deadline_again_on_every_wait(self) -> None:
+        limits: list[float | None] = [None, None, time.monotonic() - 1.0]
+
+        def deadline() -> float | None:
+            return limits.pop(0) if len(limits) > 1 else limits[0]
+
+        read, write = os.pipe()
+        try:
+            with self.assertRaisesRegex(self.launcher.LinuxLauncherError, "relay_timeout"):
+                self.launcher._read_exact(read, 4, deadline=deadline, stop=lambda: False)
+        finally:
+            os.close(read)
+            os.close(write)
 
 
 if __name__ == "__main__":

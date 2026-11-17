@@ -68,6 +68,27 @@ class ArgumentTranslationTest(unittest.TestCase):
         self.assertIn("-filePatching", args)
         self.assertEqual(proton_client._resolution(args), "1600x900")
 
+    def test_server_mod_paths_are_translated_one_by_one(self) -> None:
+        # Sol #411 [P2]: dayz_test_worker emits -serverMod=/a/@One;/b/@Two for
+        # server_mods / server_only_mods; under Proton they need Z:\ paths too.
+        args = proton_client.translate_args(
+            ["-server", "-mod=/m/@CF", "-serverMod=/s/@One;/t/@Two", "-servermod=/u/@Three"]
+        )
+        self.assertIn("-serverMod=Z:\\s\\@One;Z:\\t\\@Two", args)
+        self.assertIn("-servermod=Z:\\u\\@Three", args)
+        self.assertIn("-mod=Z:\\m\\@CF", args)
+        self.assertFalse(any("/" in item for item in args if item.casefold().startswith("-servermod=")))
+
+    def test_game_argv_is_the_image_z_path_and_the_translated_arguments(self) -> None:
+        argv = proton_client.game_argv(
+            ["/policy/DayZDiag_x64.exe", "-server", "-serverMod=/s/@One"], "/s/steamapps/common/DayZ"
+        )
+        client = Path("/s/steamapps/common/DayZ").resolve() / "DayZDiag_x64.exe"
+        self.assertEqual(argv[0], proton_client.windows_path(str(client)))
+        self.assertTrue(argv[0].startswith("Z:\\"))
+        self.assertEqual(argv[1:], proton_client.translate_args(["-server", "-serverMod=/s/@One"]))
+        self.assertIn("-serverMod=Z:\\s\\@One", argv)
+
     def test_offline_mission_path_is_translated_and_flags_not_doubled(self) -> None:
         args = proton_client.translate_args(["-skipintro", "-mission=/dev/mpmissions/x.chernarusplus"])
         self.assertEqual(args.count("-skipintro"), 1)
