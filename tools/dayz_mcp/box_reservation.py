@@ -1,7 +1,8 @@
 """The DayZ Studio (M1) reservation of the DayZ test box.
 
 While ``C:\\tmp\\caja-dayz\\m1.espera`` exists the box is reserved: M1 goes
-first. M1's test runs chain several DayZ servers that its own harness launches
+first. The path is built from the system drive (``%SystemDrive%``), which is
+``C:`` on the development PC, so the package holds no literal drive letter. M1's test runs chain several DayZ servers that its own harness launches
 (DayZ this daemon does not manage), with gaps of a few seconds between them in
 which no DayZ holds a game port, so the box would read free. On 2026-11-17 two
 queued dayz_test_run calls launched in those gaps.
@@ -23,7 +24,13 @@ import os
 import time
 from typing import Any
 
-BOX_RESERVATION_PATH = "C:\\tmp\\caja-dayz\\m1.espera"
+def _system_drive() -> str:
+    """The Windows system drive, such as ``C:``; ``C:`` when it is not set."""
+    return (os.environ.get("SystemDrive") or "C:").rstrip("\\/")
+
+
+# \tmp\caja-dayz\m1.espera on the system drive: C:\tmp\... on the development PC.
+BOX_RESERVATION_PATH = _system_drive() + "\\tmp\\caja-dayz\\m1.espera"
 BOX_RESERVED = "box_reserved"
 
 
