@@ -333,10 +333,19 @@ _LATE_ANSWER_ABANDON_SOURCES = frozenset({"ai_group_spawn"})
 # unread answer. Evicting the answer from the result cache keeps the row. A
 # spawn without a deadline keeps main's path. Only ai_group_spawn.
 _UNREAD_ANSWER_RELEASE_SOURCES = frozenset({"ai_group_spawn"})
-# Releases decided for an abandoned spawn are audited as abandon_release
-# (the late answer keeps its own late_answer_abandon event). Only
-# ai_group_spawn: the other release sources keep their paths.
-_ABANDON_RELEASE_AUDIT_SOURCES = frozenset({"ai_group_spawn"})
+# Releases decided for an abandoned command are audited as abandon_release
+# (the late answer of a spawn keeps its own late_answer_abandon event).
+# Every source in RELEASE_REGISTRY: player_look_at, action_hold,
+# survivor_drive, camera_path_play and ai_group_spawn.
+_ABANDON_RELEASE_AUDIT_SOURCES = frozenset(
+    {
+        "player_look_at",
+        "action_hold",
+        "survivor_drive",
+        "camera_path_play",
+        "ai_group_spawn",
+    }
+)
 _FENCE_PEER_NAMES = frozenset({"server", "client"})
 _BROKER_FENCE_ERRORS = frozenset(
     {
@@ -8867,7 +8876,7 @@ class ServerState:
                 if "hold_cancel_unconfirmed" not in values:
                     values.append("hold_cancel_unconfirmed")
                 cleanup["cleanup_degraded"] = values
-                body = self.abandon_command(command_id, "cancelled")
+                body = self.abandon_command(command_id, "lease_end")
                 if isinstance(body, dict) and body.get("status") == "release_queued":
                     enqueued += 1
             if enqueued:
