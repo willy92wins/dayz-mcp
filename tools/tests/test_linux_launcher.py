@@ -666,10 +666,37 @@ class SuperviseWorkerCancelMidReadTest(unittest.TestCase):
             finally:
                 canceller.cancel()
 
-        with patch.object(self.launcher.LinuxOpenedLauncher, "revalidate"):
-            # A hang here is the lease never coming back: wait_for fails the test.
-            code = asyncio.run(scenario())
-        self.assertEqual(code, 1)
+        # An external bound wait_for cannot provide: wait_for cancels the
+        # launch task, but launch_registered_linux catches CancelledError and
+        # keeps waiting on the executor under asyncio.shield, and the stuck
+        # worker never exits unless that code kills it. Run asyncio.run on a
+        # daemon thread and join it with a deadline; if it is still alive,
+        # unblock the worker and fail instead of hanging the suite forever.
+        outcome: dict[str, object] = {}
+
+        def run() -> None:
+            try:
+                with patch.object(self.launcher.LinuxOpenedLauncher, "revalidate"):
+                    outcome["code"] = asyncio.run(scenario())
+            except BaseException as error:  # re-raised on the test thread below
+                outcome["error"] = error
+
+        runner = threading.Thread(target=run, daemon=True)
+        runner.start()
+        runner.join(timeout=self.GRACE_S + 10.0)
+        if runner.is_alive():
+            for worker in list(self.workers):
+                worker.kill()
+                worker.release()
+            runner.join(timeout=5.0)
+            self.fail(
+                "launch_registered_linux did not return after a cancel mid-read"
+                f" within {self.GRACE_S + 10.0:.1f}s"
+                f" (runner still alive: {runner.is_alive()})"
+            )
+        if "error" in outcome:
+            raise outcome["error"]  # type: ignore[misc]
+        self.assertEqual(outcome.get("code"), 1)
         [worker] = self.workers
         self.assertTrue(worker.killed)
 

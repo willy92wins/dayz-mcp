@@ -170,6 +170,7 @@ class _Box:
         self.image: RuntimePaths | None = None
         self.launches: list[list[str]] = []
         self._images = 0
+        self._lifecycle: ProcessLifecycle | None = None
 
     def paths(self, name: str) -> RuntimePaths:
         root = self.root / name
@@ -206,6 +207,7 @@ class _Box:
             game_path=self.game,
             launcher=self.launch,
         )
+        self._lifecycle = lifecycle
         lifecycle._launch_intent_clock = lambda: self.clock
         if bound:
             state = loopback.ServerState("k")
@@ -234,6 +236,21 @@ class _Box:
         assert status == 200, acquired
         return str(acquired["lease_token"]), str(acquired["lease_id"])
 
+    def effective_argv(self, argv: list[str]) -> list[str]:
+        """The argv the launched process shows: the effective argv on POSIX.
+
+        On Linux _effective_launch_argv rewrites the request argv (podman
+        container_argv / Proton game_argv), and the launch intent hashes that
+        list, so the simulated process must be published with it or
+        _match_launch_intent can never match it. On Windows it is the request.
+        """
+        if self._lifecycle is None:
+            return list(argv)
+        try:
+            return list(self._lifecycle._effective_launch_argv(list(argv)))
+        except ValueError:
+            return list(argv)
+
     def launch(self, argv: list[str], cwd: str, window_style: str) -> Handle:
         self.launches.append(list(argv))
         if self.crash_at == "before_popen":
@@ -241,7 +258,7 @@ class _Box:
             raise OSError("the daemon died before the Popen")
         pid = self.next_pid
         self.next_pid += 1
-        self.host.spawn(pid, list(argv), self.clock + self.spawn_delay_s)
+        self.host.spawn(pid, self.effective_argv(argv), self.clock + self.spawn_delay_s)
         if self.crash_at == "after_popen":
             self.image = self.crash_image()
         return Handle(pid)
@@ -683,6 +700,9 @@ class LaunchIntentWriteTest(unittest.TestCase):
         intent = seen["intent"]
         self.assertEqual(set(intent), INTENT_FIELDS)
         argv = seen["argv"]
+        # The intent hashes the effective argv (the transformed list the
+        # launched process shows on POSIX), not the request argv.
+        effective = self.lifecycle._effective_launch_argv(list(argv))
         self.assertEqual(
             intent,
             {
@@ -691,7 +711,9 @@ class LaunchIntentWriteTest(unittest.TestCase):
                 "role": "client",
                 "instance": seen["instance"],
                 "profiles": str(self.profiles),
-                "command_line_sha256": identity_hashes(argv[0], argv)["command_line_sha256"],
+                "command_line_sha256": identity_hashes(effective[0], effective)[
+                    "command_line_sha256"
+                ],
                 "owner_session_id": IDENTITY_A.session_id,
                 "owner_lease_id": self.lease_id,
                 "not_before_utc": format_creation_time_utc(self.box.clock),
@@ -967,7 +989,11 @@ class LaunchIntentRecoveryTest(unittest.TestCase):
 
     def test_two_processes_with_the_argv_are_never_adopted(self) -> None:
         self._crash_during_client_start("after_popen")
-        self.box.host.spawn(7100, self.box.client_argv(self.profiles), self.box.clock + 0.5)
+        self.box.host.spawn(
+            7100,
+            self.box.effective_argv(self.box.client_argv(self.profiles)),
+            self.box.clock + 0.5,
+        )
         restarted = self._restart()
 
         outcome = restarted.recover_launch_intent()
