@@ -2542,6 +2542,7 @@ class ProcessLifecycle:
         self._focus_decided: dict[str, str] = {}
         self._focus_guards: dict[str, launch_focus.FocusGuard] = {}
         self._focus_guards_retired: dict[str, list[launch_focus.FocusGuard]] = {}
+        self._focus_launch_at: dict[str, float] = {}
         self._launch_focus_lock = threading.Lock()
         self.focus_fns = focus_fns
         self.focus_start = None
@@ -5057,6 +5058,25 @@ class ProcessLifecycle:
                 return kind == "owned"
         return False
 
+    def _remember_focus_launch(self, run_id: str) -> None:
+        try:
+            with self._launch_focus_lock:
+                self._focus_launch_at.pop(run_id, None)
+        except Exception:
+            pass
+        try:
+            launched_at = self.focus_clock()
+        except Exception:
+            return
+        try:
+            with self._launch_focus_lock:
+                self._focus_launch_at.pop(run_id, None)
+                self._focus_launch_at[run_id] = launched_at
+                while len(self._focus_launch_at) > 64:
+                    self._focus_launch_at.pop(next(iter(self._focus_launch_at)))
+        except Exception:
+            pass
+
     def _arm_launch_focus(
         self,
         client: ClientIdentity,
@@ -5064,6 +5084,17 @@ class ProcessLifecycle:
         pid: int,
         foreground_before: int = 0,
     ) -> None:
+        arm_delay_s: float | None = None
+        try:
+            with self._launch_focus_lock:
+                launched_at = self._focus_launch_at.pop(run_id, None)
+        except Exception:
+            launched_at = None
+        if launched_at is not None:
+            try:
+                arm_delay_s = self.focus_clock() - launched_at
+            except Exception:
+                arm_delay_s = None
         try:
             with self._launch_focus_lock:
                 decided = self._focus_decided.pop(run_id, None)
@@ -5086,6 +5117,7 @@ class ProcessLifecycle:
                     if guard.extend(
                         {pid} | self._focus_live_pids(run_id),
                         foreground_before=foreground_before,
+                        arm_delay_s=arm_delay_s,
                     ):
                         new = False
                 if new:
@@ -5101,6 +5133,7 @@ class ProcessLifecycle:
                     guard.add_pids(
                         {pid} | self._focus_live_pids(run_id),
                         foreground_before=foreground_before,
+                        arm_delay_s=arm_delay_s,
                     )
             if new:
                 starter = self.focus_start or _start_focus_thread
@@ -5152,6 +5185,7 @@ class ProcessLifecycle:
                 decision,
                 run_id=run_id,
                 focus=summary,
+                focus_evidence=guard.evidence(),
             )
         except Exception:
             pass
@@ -5725,6 +5759,7 @@ class ProcessLifecycle:
                         cancel=cancel,
                     )
                 focus_before = self._focus_foreground()
+                self._remember_focus_launch(run_id)
                 self._launch_focus_for_run(client, run_id, authority[1])
                 launched_at = self._server_start_clock()
                 try:
