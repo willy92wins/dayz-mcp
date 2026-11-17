@@ -772,10 +772,11 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         clock: FakeClock | None = None,
     ) -> None:
         """Each poll in peers comes once without a pid (its socket was not
-        attributed this tick): it reads instance_unattributed and leaves the
-        binding as it is (loopback.py:7635-7639): same object, state and
-        epoch. With clock, the clock first moves 0.01 s, so these polls are
-        newer than every poll before them."""
+        attributed this tick), in that order and at one instant: it reads
+        instance_unattributed and leaves the binding as it is
+        (loopback.py:7635-7639): same object, state and epoch. With clock,
+        the clock first moves 0.01 s, so these polls are newer than every
+        poll before them; each poll is stamped with that instant."""
         if clock is not None and peers:
             clock.advance(0.01)
         for peer in peers:
@@ -784,6 +785,8 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
             self._poll_reads(state, peer, instance, None, "instance_unattributed")
             self.assertIs(state._bindings[instance], binding)
             self.assertEqual((binding.state, binding.epoch), before)
+            if clock is not None:
+                self.assertEqual(state._last_poll_at[peer], clock())
 
     def _keep_polling(
         self,
@@ -791,14 +794,17 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         instance: str,
         pid: int,
         other: str | None,
-        lose_pid: tuple[str, ...],
+        lose_pid: tuple[tuple[str, ...], ...],
         clock: FakeClock,
     ) -> None:
-        """Just before a fresh answer: the poll of other (when given) reads
-        BOUND again, then the polls in lose_pid come without a pid, newer."""
+        """Just before an answer: the poll of other (when given) reads BOUND
+        again; then the polls in lose_pid come without a pid, group by
+        group: the polls of one group at one instant, each group 0.01 s
+        after the polls before it."""
         if other is not None:
             self._poll_reads(state, other, instance, pid, instance_fence_mod.BINDING_BOUND)
-        self._without_a_pid(state, instance, lose_pid, clock)
+        for group in lose_pid:
+            self._without_a_pid(state, instance, group, clock)
 
     def _bound_again_with_a_fresh_command(
         self,
@@ -852,9 +858,11 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         # A poll that presents the offline instance with a pid reads BOUND or
         # AMBIGUOUS. One that comes without a pid reads instance_unattributed
         # and leaves the binding as it is; it can come on either poll, or on
-        # both, in any state (lose_pid: just before each answer, 0.01 s after
+        # both, in any state (lose_pid: just before each answer, newer than
         # the polls before it; with bound_again the old answer follows the
-        # fresh one with no poll between them). Over those
+        # fresh one with no poll between them). When both polls lose the
+        # pid, they do so at one instant or 0.01 s apart, either one first
+        # (review r3 of PR 424). Over those
         # three readings and "not polled yet", the old answer comes in every
         # combination an offline binding that moved on can be in, and the
         # fresh answer in every one with the binding BOUND again; the test
@@ -864,7 +872,8 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         # AMBIGUOUS (PR 421 review r1); for offline, the station epoch
         # deciding, or the station and binding epochs swapped in the line
         # (PR 421 review r2); for offline, no line for the old answer, or a
-        # line for the fresh one, in any one combination.
+        # line for the fresh one, in any one combination, and with both polls
+        # read without a pid, in any one of those four orders.
         # (role, instance, pid, peer of the command, command, peer of pid
         # 9999, follow: the process keeps polling, so within the gap its next
         # poll of the delivering peer reads AMBIGUOUS too, and once the
@@ -900,17 +909,29 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
             (ambiguous, bound, bound),
             (bound, bound, bound),
         }
-        losses = ((), ("server",), ("client",), ("server", "client"))
+        # The polls that come without a pid just before each answer, in
+        # groups (_keep_polling): the polls of one group at one instant, in
+        # that order, each group 0.01 s after the polls before it.
+        losses = (
+            (),
+            (("server",),),
+            (("client",),),
+            (("server", "client"),),
+            (("client", "server"),),
+            (("server",), ("client",)),
+            (("client",), ("server",)),
+        )
 
-        def lost(readings: tuple, peers: tuple[str, ...]) -> tuple:
+        def lost(readings: tuple, groups: tuple[tuple[str, ...], ...]) -> tuple:
             server, client, binding_state = readings
+            peers = {peer for group in groups for peer in group}
             return (
                 unattributed if "server" in peers else server,
                 unattributed if "client" in peers else client,
                 binding_state,
             )
 
-        reachable = {lost(readings, peers) for readings in with_a_pid for peers in losses}
+        reachable = {lost(readings, groups) for readings in with_a_pid for groups in losses}
         self.assertEqual(len(reachable), 24)
         visited = set()
         fresh_visited = set()
@@ -976,7 +997,7 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
                     )
                     self.assertEqual(self._lines(audit_file), [])
                 else:
-                    self._without_a_pid(state, instance, lose_pid, clock)
+                    self._keep_polling(state, instance, pid, None, lose_pid, clock)
                 if role == "offline":
                     visited.add(self._readings(state, instance))
                 binding_epoch = state._bindings[instance].epoch
