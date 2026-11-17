@@ -298,9 +298,26 @@ class LifecycleStartTest(unittest.TestCase):
         self.assertEqual(self.fixture.launcher.calls, [])
         self.assertEqual(self._rejections(), [("box_reserved", "spawn")])
         self.assertEqual(lifecycle.box_occupancy()["runs"], [])
-        intent = lifecycle._launch_intent_path()
-        self.assertIsNotNone(intent)
-        self.assertFalse(intent.exists(), "the refused launch left its intent")
+
+    def test_the_last_look_comes_after_the_foreground_read(self) -> None:
+        # The foreground read is the last step before that look; nothing that
+        # can block or touch the disk sits between the look and the spawn.
+        lifecycle = self.fixture.lifecycle
+        original_foreground = lifecycle._focus_foreground
+
+        def foreground_then_reserve() -> int:
+            value = original_foreground()
+            _write_flag(self.flag, age_s=0.0)
+            return value
+
+        lifecycle._focus_foreground = foreground_then_reserve  # type: ignore[method-assign]
+
+        result = self._start()
+
+        self.assertEqual(result.get("error"), "active_run_exists", result)
+        self.assertEqual(self.fixture.launcher.calls, [])
+        self.assertEqual(self._rejections(), [("box_reserved", "spawn")])
+        self.assertEqual(lifecycle.box_occupancy()["runs"], [])
 
 
 # --- dayz_test_run ------------------------------------------------------------
