@@ -18,14 +18,19 @@ reported and the guard disarms. "Returned" is best effort because Windows choose
 which window to activate.
 
 step() decides in this order: stop when disarmed or when the watch has elapsed;
-record a mouse button or a switch key seen down; a foreground window that is not
+record a mouse button or a switch key seen down, reading the window under the
+cursor at the press (a button seen down after it was not, or on the first poll)
+and not while the button stays down; a foreground window that is not
 one of the run's is not a steal and becomes the person window; a run window that
 takes the front is one steal, and then intent is checked first (a switch key seen
-within INTENT_S, or a mouse button seen within INTENT_S with the cursor over
-another window), then a previous window to give back to, then presence (idle_s
-greater than PRESENT_S), then the attempt limit, then identity (verify), and only
-then the give-back. Intent and presence are heuristics: PRESENT_S is a presence
-heuristic, not a promise that Windows grants the foreground.
+within INTENT_S, or a mouse button seen within INTENT_S with the window under the
+cursor read when the steal is detected not the person window), then a previous
+window to give back to, then presence (idle_s greater than PRESENT_S), then the
+attempt limit, then identity (verify), and only then the give-back. The window
+at the press is recorded with its provenance, for the evidence only, and what a
+rule based on the press would have decided is logged, never applied. Intent and
+presence are heuristics: PRESENT_S is a presence heuristic, not a promise that
+Windows grants the foreground.
 
 Win32 callables are injectable so tests never touch the desktop.
 """
@@ -53,6 +58,7 @@ SW_SHOWNOACTIVATE = 4
 GA_ROOT = 2
 MOUSE_BUTTONS = (0x01, 0x02, 0x04, 0x05, 0x06)
 SWITCH_KEYS = (0x12, 0x5B, 0x5C)
+LOG_MAX = 16
 
 
 class LASTINPUTINFO(ctypes.Structure):
@@ -217,6 +223,15 @@ class FocusGuard:
         self._person: int | None = None
         self._last_mouse: float | None = None
         self._last_key: float | None = None
+        self._press_at: float | None = None
+        self._press_window: int | None = None
+        self._press_person: int | None = None
+        self._press_released = False
+        self._press_longest_gap = 0.0
+        self._prev_poll_at: float | None = None
+        self._mouse_was_down = False
+        self._log: list[dict] = []
+        self._dropped = 0
         self._in_steal = False
         self._give_back_running = False
         self._fence: dict[int, dict] = {}
@@ -257,12 +272,32 @@ class FocusGuard:
                 result["disarmed"] = self._reason
             return result
 
-    def add_pids(self, pids: Iterable[int], *, foreground_before: int = 0) -> None:
+    def evidence(self) -> dict:
+        with self._lock:
+            return {
+                "entries": [dict(entry) for entry in self._log],
+                "dropped": self._dropped,
+            }
+
+    def add_pids(
+        self,
+        pids: Iterable[int],
+        *,
+        foreground_before: int = 0,
+        arm_delay_s: float | None = None,
+    ) -> None:
         now = self.clock()
         with self._lock:
             self._add_pids_locked(pids, now, foreground_before)
+            self._log_arm_locked(arm_delay_s)
 
-    def extend(self, pids: Iterable[int], *, foreground_before: int = 0) -> bool:
+    def extend(
+        self,
+        pids: Iterable[int],
+        *,
+        foreground_before: int = 0,
+        arm_delay_s: float | None = None,
+    ) -> bool:
         now = self.clock()
         with self._lock:
             with self._disarm_lock:
@@ -270,7 +305,52 @@ class FocusGuard:
                     return False
                 self._add_pids_locked(pids, now, foreground_before)
                 self._attempts = 0
+                self._log_arm_locked(arm_delay_s)
                 return True
+
+    def _at_s(self, now: float) -> float:
+        start = self._start if self._start is not None else now
+        return round(now - start, 2)
+
+    def _category(self, hwnd: int, person: int | None) -> str:
+        if not hwnd:
+            return "none"
+        if self._read_pid(hwnd) in self._pids:
+            return "run"
+        if person is not None and hwnd == person:
+            return "person"
+        return "other"
+
+    def _append_log(self, entry: dict) -> dict:
+        if len(self._log) < LOG_MAX:
+            self._log.append(entry)
+        else:
+            self._dropped += 1
+        return entry
+
+    def _log_arm_locked(self, arm_delay_s: float | None) -> None:
+        if arm_delay_s is None:
+            delay: float | None = None
+        else:
+            try:
+                delay = round(float(arm_delay_s), 2)
+            except (TypeError, ValueError):
+                delay = None
+        entry = {
+            "kind": "arm",
+            "at_s": self._at_s(self.clock()),
+            "arm_delay_s": delay,
+            "front_at_arm": self._category(
+                self._read_foreground(), self._person
+            ),
+        }
+        self._append_log(entry)
+
+    def _read_cursor(self) -> int:
+        try:
+            return int(self.fns.cursor_window() or 0)
+        except Exception:
+            return 0
 
     def _add_pids_locked(
         self, pids: Iterable[int], now: float, foreground_before: int
@@ -306,8 +386,23 @@ class FocusGuard:
             if self._end is not None and now >= self._end:
                 self.disarm("window_elapsed")
                 return
-            if self.fns.mouse_down():
+            gap = 0.0 if self._prev_poll_at is None else now - self._prev_poll_at
+            self._prev_poll_at = now
+            mouse_down = bool(self.fns.mouse_down())
+            is_press = mouse_down and not self._mouse_was_down
+            if is_press:
+                self._press_at = now
+                self._press_window = self._read_cursor()
+                self._press_person = self._person
+                self._press_released = False
+                self._press_longest_gap = 0.0
+            elif self._press_at is not None:
+                self._press_longest_gap = max(self._press_longest_gap, gap)
+                if not mouse_down:
+                    self._press_released = True
+            if mouse_down:
                 self._last_mouse = now
+            self._mouse_was_down = mouse_down
             if self.fns.switch_keys_down():
                 self._last_key = now
             fg = int(self.fns.foreground() or 0)
@@ -331,22 +426,83 @@ class FocusGuard:
             mouse_recent = (
                 self._last_mouse is not None and now - self._last_mouse <= self.intent_s
             )
-            if key_recent or (
-                mouse_recent and int(self.fns.cursor_window() or 0) != prev
-            ):
+            press_window = (
+                self._press_window if self._press_window is not None else 0
+            )
+            detect = self._read_cursor()
+            switched = key_recent or (mouse_recent and detect != prev)
+            press_rule_switched = key_recent or (
+                mouse_recent and press_window != prev
+            )
+            if key_recent:
+                input_kind = "key"
+            elif mouse_recent:
+                input_kind = "mouse"
+            else:
+                input_kind = "none"
+            steal_entry: dict = {
+                "kind": "steal",
+                "at_s": self._at_s(now),
+                "outcome": "pending",
+                "input": input_kind,
+                "key_age_s": (
+                    round(now - self._last_key, 2)
+                    if self._last_key is not None
+                    else None
+                ),
+                "mouse_age_s": (
+                    round(now - self._last_mouse, 2)
+                    if self._last_mouse is not None
+                    else None
+                ),
+                "click_age_s": (
+                    round(now - self._press_at, 2)
+                    if self._press_at is not None
+                    else None
+                ),
+                "click_window": (
+                    self._category(press_window, prev)
+                    if self._press_at is not None
+                    else None
+                ),
+                "click_held": (
+                    not self._press_released
+                    if self._press_at is not None
+                    else None
+                ),
+                "click_person_changed": (
+                    prev != self._press_person
+                    if self._press_at is not None
+                    else None
+                ),
+                "poll_gap_s": (
+                    round(self._press_longest_gap, 2)
+                    if self._press_at is not None
+                    else None
+                ),
+                "detect_window": self._category(detect, prev),
+                "press_rule_switched": bool(press_rule_switched),
+            }
+            self._append_log(steal_entry)
+            if switched:
+                steal_entry["outcome"] = "user_switched"
                 self._counters["user_switched"] += 1
                 return
             if prev is None or not self.fns.is_window(prev):
+                steal_entry["outcome"] = "no_previous"
                 self._counters["no_previous"] += 1
                 return
             if self.fns.idle_s() > self.present_s:
+                steal_entry["outcome"] = "away"
                 self._counters["away"] += 1
                 return
             if self._attempts >= self.max_returns:
+                steal_entry["outcome"] = "max_returns"
                 self.disarm("max_returns")
                 return
             pid = self.fns.window_pid(fg)
             if not self._verified(pid):
+                steal_entry["outcome"] = "unverified"
                 self._counters["unverified"] += 1
                 self._pids.discard(pid)
                 self._added_at.pop(pid, None)
@@ -367,6 +523,7 @@ class FocusGuard:
                 for window, info in fenced.items():
                     self._fence[window] = info
                 self._give_back_running = False
+                steal_entry["outcome"] = outcome
                 self._counters[outcome] += 1
                 if departed:
                     self._in_steal = False
