@@ -1379,6 +1379,9 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
         # late_answer_abandon, and the retry, the caller's abandon and the
         # reap that follow add no abandon_release. Mutant killed: an audit in
         # a path store_result shares, which writes two lines for one release.
+        # The line names the release it queued (review r3 of PR 428). Mutants
+        # killed: a late_answer_abandon line without release_id, or with
+        # another id.
         state, now, command_id = self._delivered_spawn()
         audit = self._real_audit(state)
         now[0] += 0.126
@@ -1388,11 +1391,17 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
             self._request_abandon(state, command_id, "tool_timeout"), (200, {"status": "noop"})
         )
         state.status_snapshot()
+        release_ids = self._queued_release_ids(state)
+        self.assertEqual(len(release_ids), 1)
         lines = self._release_lines(audit, command_id)
         self.assertEqual([e.get("event") for e in lines], ["late_answer_abandon"], self._lines(audit))
         self.assertEqual(
-            (lines[0].get("reason"), lines[0].get("decision"), lines[0].get("duration_s")),
-            ("late_answer", "release_queued", 0.0),
+            (
+                lines[0].get("reason"), lines[0].get("decision"), lines[0].get("duration_s"),
+                lines[0].get("release_id"),
+            ),
+            ("late_answer", "release_queued", 0.0, release_ids[0]),
+            lines[0],
         )
 
     def test_a_caller_holding_the_broker_lock_gets_no_audit_write_under_it(self) -> None:
@@ -1435,10 +1444,13 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
         # deadline too (review r3 of PR 427), whatever the error (review r1 of
         # PR 428), and when the caller already holds the broker lock, which is
         # re-entrant (review r2 of PR 428): the line then waits for the next
-        # lock-free point. Mutants killed: the audit written only after a
-        # flush that returned normally, on every path or on the reaper's
-        # alone; the line written on one error type only; the line dropped
-        # after a failure under an outer lock.
+        # lock-free point. The line is the one a flush that returned would
+        # write: it names the release it queued (review r3 of PR 428).
+        # Mutants killed: the audit written only after a flush that returned
+        # normally, on every path or on the reaper's alone; the line written
+        # on one error type only; the line dropped after a failure under an
+        # outer lock; after a failure, a line without release_id, with
+        # another id, or without its expected instance.
         shapes = ("abandon_command", "request_abandon", "late_answer", "deadline")
         for shape, error, outer_lock in itertools.product(
             shapes, (RuntimeError, OSError), (False, True)
@@ -1468,23 +1480,38 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
                     # Nothing written under the lock; the next lock-free point writes it.
                     self.assertEqual(self._release_lines(audit, command_id), [])
                     state.status_snapshot()
-                self.assertEqual(len(self._queued_release_ids(state)), 1)
+                release_ids = self._queued_release_ids(state)
+                self.assertEqual(len(release_ids), 1)
                 lines = self._release_lines(audit, command_id)
                 self.assertEqual(len(lines), 1, self._lines(audit))
-                want = {
-                    "abandon_command": ("abandon_release", "tool_cancelled"),
-                    "request_abandon": ("abandon_release", "cancelled"),
-                    "late_answer": ("late_answer_abandon", "late_answer"),
-                    "deadline": ("abandon_release", "deadline"),
-                }[shape]
-                self.assertEqual((lines[0].get("event"), lines[0].get("reason")), want, lines[0])
-                self.assertEqual(lines[0].get("decision"), "release_queued", lines[0])
+                if shape == "late_answer":
+                    self.assertEqual(
+                        (
+                            lines[0].get("event"), lines[0].get("reason"),
+                            lines[0].get("decision"), lines[0].get("release_id"),
+                        ),
+                        ("late_answer_abandon", "late_answer", "release_queued", release_ids[0]),
+                        lines[0],
+                    )
+                else:
+                    reason = {
+                        "abandon_command": "tool_cancelled",
+                        "request_abandon": "cancelled",
+                        "deadline": "deadline",
+                    }[shape]
+                    self._assert_release_line(
+                        lines[0], command_id=command_id, reason=reason, answered=False,
+                        decision="release_queued", release_id=release_ids[0],
+                    )
 
     def test_the_late_answer_line_survives_a_failure_inside_the_lock_section(self) -> None:
         # Sol r2 finding 1: the late abandon is decided inside store_result's
         # lock section. A step later in that same section raising must not
         # lose the line, and the error still reaches the caller. Mutant killed:
         # the audit guarded only around the flushes after the lock section.
+        # The line still names the release it queued (review r3 of PR 428).
+        # Mutant killed: the line's release_id dropped when one of these steps
+        # fails.
         for step in ("_note_hold_result_locked", "_publish_due_deferred_closes_locked"):
             with self.subTest(step=step):
                 self._writers = []
@@ -1494,11 +1521,12 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
                 with patch.object(state, step, side_effect=RuntimeError("injected")):
                     with self.assertRaises(RuntimeError):
                         state.store_result({"id": command_id, "ok": 1}, instance=INST_SERVER)
-                self.assertEqual(len(self._queued_release_ids(state)), 1)
+                release_ids = self._queued_release_ids(state)
+                self.assertEqual(len(release_ids), 1)
                 lines = self._release_lines(audit, command_id)
                 self.assertEqual(
-                    [(e.get("event"), e.get("decision")) for e in lines],
-                    [("late_answer_abandon", "release_queued")],
+                    [(e.get("event"), e.get("decision"), e.get("release_id")) for e in lines],
+                    [("late_answer_abandon", "release_queued", release_ids[0])],
                     self._lines(audit),
                 )
 
