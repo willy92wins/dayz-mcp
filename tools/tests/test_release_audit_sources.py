@@ -34,7 +34,12 @@ from tests.fence_helpers import (
     poll_census_query,
 )
 from tests.lease_helpers import SequentialIds
-from tests.test_camera_path_focus_hud import _three_keys
+
+# The three keys test_camera_path_focus_hud plays (_three_keys); built here, since
+# a test module imports from no other test module (test_suite_structure).
+CAMERA_KEYS = [
+    {"t": t, "cam_pos": [t, 2.0, 0.0], "cam_orientation": [0.0, 0.0, 0.0]} for t in (0, 3.0, 6.0)
+]
 
 OWNER = {
     "platform": "codex",
@@ -66,7 +71,7 @@ SOURCES = (
         "camera_path_play",
         "client",
         "camera_path_release",
-        {"mode": "play", "keys": _three_keys(), "easing": "linear", "path_id": "audit"},
+        {"mode": "play", "keys": CAMERA_KEYS, "easing": "linear", "path_id": "audit"},
     ),
 )
 HOLD = SOURCES[1]
