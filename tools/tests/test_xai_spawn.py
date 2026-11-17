@@ -1429,9 +1429,11 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
     def test_the_line_is_written_when_a_step_after_the_decision_fails(self) -> None:
         # Sol r1 finding 2: once the release is queued under the lock, a later
         # failure (finish_operation_exact raising) must not lose its line, and
-        # the error still reaches the caller. Mutant killed: the audit written
-        # only after a flush that returned normally.
-        for shape in ("abandon_command", "request_abandon", "late_answer"):
+        # the error still reaches the caller. The reaper's abandon at the
+        # deadline too (review r3 of PR 427). Mutants killed: the audit written
+        # only after a flush that returned normally, on every path or on the
+        # reaper's alone.
+        for shape in ("abandon_command", "request_abandon", "late_answer", "deadline"):
             with self.subTest(shape=shape):
                 self._writers = []
                 state, now, command_id = self._delivered_spawn()
@@ -1446,6 +1448,9 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
                             state.abandon_command(command_id, "tool_cancelled")
                         elif shape == "request_abandon":
                             self._request_abandon(state, command_id, "cancelled")
+                        elif shape == "deadline":
+                            now[0] += 0.06
+                            state.status_snapshot()
                         else:
                             now[0] += 0.126
                             state.store_result({"id": command_id, "ok": 1}, instance=INST_SERVER)
@@ -1456,6 +1461,7 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
                     "abandon_command": ("abandon_release", "tool_cancelled"),
                     "request_abandon": ("abandon_release", "cancelled"),
                     "late_answer": ("late_answer_abandon", "late_answer"),
+                    "deadline": ("abandon_release", "deadline"),
                 }[shape]
                 self.assertEqual((lines[0].get("event"), lines[0].get("reason")), want, lines[0])
                 self.assertEqual(lines[0].get("decision"), "release_queued", lines[0])
