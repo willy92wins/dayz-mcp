@@ -6396,7 +6396,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "refused as active_run_exists with reason box_reserved and a "
             "reservation and hint that name the file and its age, "
             "takeover=true evicts nothing, and on_busy=\"queue\" keeps waiting; "
-            "the daemon reads the file again right before the launch. The "
+            "the daemon reads the file again right before the launch, and a "
+            "queued call whose launch it refuses re-enters the FIFO each time, "
+            "within what is left of the wait budget (box_requeued: true). The "
             "file never expires on its own: a person removes it by hand when "
             "no M1 run is waiting for or using the box. "
             "A RUNNING run owned by another session is takeover_required "
@@ -6844,66 +6846,89 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             # The box read after a refusal, while this call still holds any
             # claim of its own: a holder seen here took the box during the call.
             box_now: dict[str, Any] | None = None
-            if (
+            # The one re-entry a box taken during the call gets (inbox 3997).
+            taken_requeued = False
+            while (
                 execute_error is None
                 and isinstance(result, dict)
                 and result.get("error_code") == "active_run_exists"
             ):
                 box_now = await peek_box()
-                if (
+                # The DayZ Studio (M1) reservation refused this launch: a call
+                # that waited in the FIFO keeps waiting for the file to go,
+                # after each such refusal and whatever the box read before
+                # this launch (box_reservation.py).
+                reserved_now = _box_reservation_of(box_now) is not None
+                if not (
                     on_busy == "queue"
                     and box_wait_deadline is not None
-                    and box_was_taken(admitted_box, box_now)
-                ):
-                    # inbox 3997. The launch was refused after the FIFO grant,
-                    # after any build (the worker builds before it starts
-                    # anything), and another holder of the box is in sight.
-                    # on_busy="queue" re-enters the FIFO ONCE, within what is
-                    # left of the wait budget, and launches with build, clean
-                    # and pack_only off. The retry runs no takeover: a run
-                    # that took the box meanwhile won it.
-                    await release_box()
-                    await report("queued", "box taken before launch")
-                    # Measured after the release and the notice, either of
-                    # which can take time; nothing left means no second join.
-                    remaining_s = box_wait_deadline - clock()
-                    if remaining_s > 0.0:
-                        requeued = True
-                        waited = await execute_wait_for_box(
-                            client,
-                            remaining_s,
-                            abort_if=abort,
-                            time_fn=clock,
-                            until=box_wait_deadline,
+                    and (
+                        reserved_now
+                        or (
+                            not taken_requeued
+                            and box_was_taken(admitted_box, box_now)
                         )
-                        ticket = waited.get("ticket")
-                        box_ticket = ticket if isinstance(ticket, str) else None
-                        if not waited.get("ok"):
-                            # Out of budget, wherever the end fell (asleep, on
-                            # a late join or a late claim): the refusal this
-                            # call proved. A wait that ended for a reason of
-                            # its own answers from what it saw. The finally
-                            # releases the ticket, claimed or not.
-                            seen = (
-                                box_now
-                                if waited.get("error") is None
-                                else _box_from_status({"box": waited.get("box")})
-                            )
-                            failed = wait_failed(
-                                waited, refused_answer(result, seen, admitted_box)
-                            )
-                            failed["box_requeued"] = True
-                            return annotated(failed)
-                        if box_ticket:
-                            claim_task = asyncio.create_task(
-                                _heartbeat_box_claim(client, box_ticket)
-                            )
-                        admitted_box = waited.get("box")
-                        box_now = None
-                        async with client.tool_lock:
-                            execute_error, result = await execute(
-                                dict(BOX_TAKEN_NO_REBUILD)
-                            )
+                    )
+                ):
+                    break
+                # inbox 3997. The launch was refused after the FIFO grant,
+                # after any build (the worker builds before it starts
+                # anything), and another holder of the box is in sight.
+                # on_busy="queue" re-enters the FIFO ONCE, within what is
+                # left of the wait budget, and launches with build, clean
+                # and pack_only off. The retry runs no takeover: a run
+                # that took the box meanwhile won it. A refusal over the M1
+                # reservation re-enters each time, within the same budget.
+                await release_box()
+                await report(
+                    "queued",
+                    "box reserved before launch"
+                    if reserved_now
+                    else "box taken before launch",
+                )
+                # Measured after the release and the notice, either of
+                # which can take time; nothing left means no second join.
+                remaining_s = box_wait_deadline - clock()
+                if remaining_s <= 0.0:
+                    break
+                requeued = True
+                if not reserved_now:
+                    taken_requeued = True
+                waited = await execute_wait_for_box(
+                    client,
+                    remaining_s,
+                    abort_if=abort,
+                    time_fn=clock,
+                    until=box_wait_deadline,
+                )
+                ticket = waited.get("ticket")
+                box_ticket = ticket if isinstance(ticket, str) else None
+                if not waited.get("ok"):
+                    # Out of budget, wherever the end fell (asleep, on
+                    # a late join or a late claim): the refusal this
+                    # call proved. A wait that ended for a reason of
+                    # its own answers from what it saw. The finally
+                    # releases the ticket, claimed or not.
+                    seen = (
+                        box_now
+                        if waited.get("error") is None
+                        else _box_from_status({"box": waited.get("box")})
+                    )
+                    failed = wait_failed(
+                        waited, refused_answer(result, seen, admitted_box)
+                    )
+                    failed["box_requeued"] = True
+                    return annotated(failed)
+                if box_ticket:
+                    claim_task = asyncio.create_task(
+                        _heartbeat_box_claim(client, box_ticket)
+                    )
+                admitted_box = waited.get("box")
+                box_now = None
+                async with client.tool_lock:
+                    execute_error, result = await execute(
+                        dict(BOX_TAKEN_NO_REBUILD)
+                    )
             if execute_error is not None:
                 if execute_error.code == "active_run_exists":
                     failed = _failed_active_run_result(

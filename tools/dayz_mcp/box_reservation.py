@@ -28,13 +28,15 @@ BOX_RESERVED = "box_reserved"
 
 
 def reservation_at(path: str, *, now: float | None = None) -> dict[str, Any] | None:
-    """The reservation the file at ``path`` makes, or None when it does not exist.
+    """The reservation the entry at ``path`` makes, or None when there is none.
 
-    ``age_s`` is the time since the file was last written, never negative,
-    and None when the path exists but cannot be examined.
+    Any entry counts, a link whose target is gone included: ``os.lstat`` reads
+    the entry itself and does not follow it. ``age_s`` is the time since the
+    entry was last written, never negative, and None when the path exists but
+    cannot be examined.
     """
     try:
-        stat = os.stat(path)
+        stat = os.lstat(path)
     except (FileNotFoundError, NotADirectoryError):
         return None
     except (OSError, ValueError):

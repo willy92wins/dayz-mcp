@@ -48,6 +48,8 @@ _OTHER_RUN = {
     "activity_state": "active",
     "last_activity_age_s": 0.0,
 }
+# One of M1's servers: its harness launches it, so it is foreign to the daemon.
+_M1_SERVER = {"pid": 4242, "port": 2302, "mods": ["@DayZSandbox_QA"], "age_s": 2.0}
 
 
 def _write_flag(path: Path, *, age_s: float = _AGE_S) -> None:
@@ -122,9 +124,29 @@ class ReservationPredicateTest(unittest.TestCase):
         reservation = box_reservation.reservation_at(str(self.flag))
         self.assertEqual(reservation, {"path": str(self.flag), "age_s": 0.0})
 
+    def test_the_entry_itself_counts_not_what_it_points_to(self) -> None:
+        # A reader that followed links would see no file here and free the box.
+        _write_flag(self.flag)
+        gone = FileNotFoundError(2, "The system cannot find the file specified")
+        with patch.object(box_reservation.os, "stat", side_effect=gone):
+            reservation = box_reservation.reservation_at(str(self.flag))
+        self.assertIsNotNone(reservation)
+        self.assertEqual(reservation["path"], str(self.flag))
+
+    def test_a_link_whose_target_is_gone_is_a_reservation(self) -> None:
+        self.flag.parent.mkdir(parents=True)
+        try:
+            os.symlink(str(self.flag.parent / "removed-target"), str(self.flag))
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"this host cannot create a symbolic link: {error}")
+        self.assertFalse(self.flag.exists())
+        reservation = box_reservation.reservation_at(str(self.flag))
+        self.assertIsNotNone(reservation)
+        self.assertEqual(reservation["path"], str(self.flag))
+
     def test_a_path_that_cannot_be_examined_is_a_reservation(self) -> None:
         denied = PermissionError(13, "Access is denied")
-        with patch.object(box_reservation.os, "stat", side_effect=denied):
+        with patch.object(box_reservation.os, "lstat", side_effect=denied):
             reservation = box_reservation.reservation_at(str(self.flag))
         self.assertEqual(reservation, {"path": str(self.flag), "age_s": None})
 
@@ -253,6 +275,33 @@ class LifecycleStartTest(unittest.TestCase):
         self.assertEqual(self._rejections(), [("box_reserved", "pre_launch")])
         self.assertEqual(self.fixture.lifecycle.box_occupancy()["runs"], [])
 
+    def test_the_file_is_read_once_more_right_before_the_spawn(self) -> None:
+        # M1 writes the file after the last socket-table read: the Steam check
+        # this client launch repeats after the storage rotation and before the
+        # launch intent is the last step before the spawn's own look.
+        lifecycle = self.fixture.lifecycle
+        gate = lifecycle.steam_gate
+        original_check = gate.final_check
+
+        def check_then_reserve(prepared: object) -> bool:
+            passed = original_check(prepared)
+            if gate.checks == 2:
+                _write_flag(self.flag, age_s=0.0)
+            return passed
+
+        gate.final_check = check_then_reserve
+
+        result = self._start()
+
+        self.assertEqual(gate.checks, 2)
+        self.assertEqual(result.get("error"), "active_run_exists", result)
+        self.assertEqual(self.fixture.launcher.calls, [])
+        self.assertEqual(self._rejections(), [("box_reserved", "spawn")])
+        self.assertEqual(lifecycle.box_occupancy()["runs"], [])
+        intent = lifecycle._launch_intent_path()
+        self.assertIsNotNone(intent)
+        self.assertFalse(intent.exists(), "the refused launch left its intent")
+
 
 # --- dayz_test_run ------------------------------------------------------------
 
@@ -304,6 +353,8 @@ class _DaemonBox:
     def __init__(self) -> None:
         self.seq = 0
         self.runs: list[dict[str, object]] = []
+        # DayZ this daemon does not manage, such as M1's own servers.
+        self.foreign: list[dict[str, object]] = []
         self.joins = 0
         self.busy_answers = 0
         self.coordinator = SessionCoordinator(
@@ -325,6 +376,12 @@ class _DaemonBox:
             occupancy.update(
                 occupied=True,
                 runs=[dict(run) for run in self.runs],
+                ports_in_use=[2302],
+            )
+        if self.foreign:
+            occupancy.update(
+                occupied=True,
+                foreign=[dict(item) for item in self.foreign],
                 ports_in_use=[2302],
             )
         return occupancy
@@ -424,6 +481,21 @@ class DayzTestRunReservationTest(unittest.IsolatedAsyncioTestCase):
     def _fifo_empty(self) -> bool:
         return self.box.coordinator.box_queue_public() == []
 
+    async def _end_reservation_once_waiting(self, joins: int) -> None:
+        """M1 ends once this call has joined the FIFO ``joins`` times with the
+        file there and waited on the reserved box: its server goes, then its file."""
+        await _until(
+            lambda: self.box.joins >= joins and self.flag.exists(),
+            message=f"the call did not join the FIFO {joins} times with the file there",
+        )
+        seen = self.box.busy_answers
+        await _until(
+            lambda: self.box.busy_answers > seen,
+            message="the call did not wait on the reserved box",
+        )
+        self.box.foreign = []
+        self.flag.unlink()
+
     async def test_without_the_file_the_call_launches(self) -> None:
         payload = await self._call(_launch_ok)
 
@@ -519,6 +591,78 @@ class DayzTestRunReservationTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(self.reserved_at_launch, [False, False])
+        self.assertEqual(payload["status"], "succeeded")
+        self.assertIs(payload["box_requeued"], True)
+        self.assertTrue(self._fifo_empty())
+
+    @slow_test
+    async def test_a_reserved_refusal_sends_the_call_back_whatever_the_box_read_before_it(
+        self,
+    ) -> None:
+        # M1 writes its file and starts its first server between this call's
+        # FIFO grant and the box read right before the launch, so that read
+        # is no longer free, and the daemon refuses the launch.
+        status = self.runtime.session_status
+        reads = 0
+
+        async def status_as_m1_starts() -> dict[str, object]:
+            nonlocal reads
+            reads += 1
+            if reads == 2:
+                _write_flag(self.flag, age_s=0.0)
+                self.box.foreign = [dict(_M1_SERVER)]
+            return await status()
+
+        self.runtime.session_status = status_as_m1_starts  # type: ignore[method-assign]
+
+        async def execute(attempt: int) -> dict[str, object]:
+            return _refused() if attempt == 1 else _launched()
+
+        payload, _ended = await asyncio.gather(
+            self._call(execute, build=True, on_busy="queue", wait_for_box_s=5.0),
+            self._end_reservation_once_waiting(2),
+        )
+
+        self.assertEqual(
+            self.launches,
+            [
+                {"build": True, "clean": False, "pack_only": False},
+                {"build": False, "clean": False, "pack_only": False},
+            ],
+        )
+        # The first attempt reached the worker with the file there, and the
+        # daemon refused it; the second ran after M1 ended.
+        self.assertEqual(self.reserved_at_launch, [True, False])
+        self.assertEqual(payload["status"], "succeeded")
+        self.assertIs(payload["box_requeued"], True)
+        self.assertTrue(self._fifo_empty())
+
+    @slow_test
+    async def test_each_reserved_refusal_sends_a_queued_call_back_to_wait(
+        self,
+    ) -> None:
+        async def execute(attempt: int) -> dict[str, object]:
+            if attempt < 3:
+                # M1 writes its file again after each of this call's grants.
+                _write_flag(self.flag, age_s=0.0)
+                return _refused()
+            return _launched()
+
+        async def end_each_reservation() -> None:
+            await self._end_reservation_once_waiting(2)
+            await self._end_reservation_once_waiting(3)
+
+        payload, _ended = await asyncio.gather(
+            self._call(execute, on_busy="queue", wait_for_box_s=10.0),
+            end_each_reservation(),
+        )
+
+        self.assertEqual(len(self.launches), 3)
+        self.assertEqual(
+            self.launches[1:],
+            [{"build": False, "clean": False, "pack_only": False}] * 2,
+        )
+        self.assertEqual(self.reserved_at_launch, [False, False, False])
         self.assertEqual(payload["status"], "succeeded")
         self.assertIs(payload["box_requeued"], True)
         self.assertTrue(self._fifo_empty())
