@@ -306,23 +306,35 @@ class ReleaseAuditSourcesTest(unittest.TestCase):
                 )
 
     def test_a_release_that_cannot_be_queued_is_audited_with_its_cause(self) -> None:
-        # Under retail quarantine no release is queued; the line says why.
-        # Mutant killed: auditing only a queued release.
+        # Under retail quarantine, or with the peer's queue full, no release
+        # is queued; the line says which (review r1 of PR 427: two causes).
+        # Mutants killed: auditing only a queued release; one cause audited
+        # for every refusal.
+        filler = {"server": "world_time_get", "client": "camera_get"}
         for source in SOURCES:
-            with self.subTest(source=source[0]):
-                state, _coordinator, _now, token = self._state()
-                audit = self._real_audit(state)
-                body = self._delivered(state, token, source)
-                state.retail_probe = lambda: {"known": True, "processes": [{"name": "DayZ_x64.exe"}]}
-                abandoned = state.abandon_command(body["id"], "cancelled")
-                self.assertEqual(abandoned, {"status": "cleanup_degraded", "cause": "quarantine"})
-                self.assertEqual(self._queued_releases(state, source), [])
-                lines = self._release_lines(audit)
-                self.assertEqual(len(lines), 1, self._lines(audit))
-                self._assert_line(
-                    lines[0], source, command_id=body["id"], reason="cancelled",
-                    decision="cleanup_degraded", cause="quarantine",
-                )
+            for cause in ("quarantine", "queue_full"):
+                with self.subTest(source=source[0], cause=cause):
+                    state, _coordinator, _now, token = self._state()
+                    audit = self._real_audit(state)
+                    body = self._delivered(state, token, source)
+                    if cause == "quarantine":
+                        state.retail_probe = lambda: {"known": True, "processes": [{"name": "DayZ_x64.exe"}]}
+                    else:
+                        for _ in range(loopback.MAX_QUEUE):
+                            status, queued = state.enqueue_command(
+                                filler[source[1]], {}, peer=source[1],
+                                identity_payload=OWNER, lease_token=token,
+                            )
+                            self.assertEqual(status, 200, queued)
+                    abandoned = state.abandon_command(body["id"], "cancelled")
+                    self.assertEqual(abandoned, {"status": "cleanup_degraded", "cause": cause})
+                    self.assertEqual(self._queued_releases(state, source), [])
+                    lines = self._release_lines(audit)
+                    self.assertEqual(len(lines), 1, self._lines(audit))
+                    self._assert_line(
+                        lines[0], source, command_id=body["id"], reason="cancelled",
+                        decision="cleanup_degraded", cause=cause,
+                    )
 
     def test_a_caller_holding_the_broker_lock_gets_no_audit_write_under_it(self) -> None:
         # The line waits for the next lock-free point. Mutant killed: the
@@ -348,11 +360,11 @@ class ReleaseAuditSourcesTest(unittest.TestCase):
         # cleanup_owner's path without a lease-end close round
         # (loopback.cleanup_owner, "else" of has_round) abandons each
         # delivered hold and publishes its action_hold_cancel. With the peers
-        # bound, the coordinator always opens a round once the lease
-        # delivered work, so this test takes the round away
-        # (lease_end_round answers None). The line names the lease end, not a
-        # cancel by the caller. Mutants killed: the hold left out; the reason
-        # "cancelled".
+        # still bound, the coordinator opens a round once the lease delivered
+        # work, so this test takes the round away (lease_end_round answers
+        # None) to see the cancel queued; the next test takes the real way
+        # there. The line names the lease end, not a cancel by the caller.
+        # Mutants killed: the hold left out; the reason "cancelled".
         state, coordinator, _now, token = self._state()
         audit = self._real_audit(state)
         body = self._delivered(state, token, HOLD)
@@ -367,6 +379,29 @@ class ReleaseAuditSourcesTest(unittest.TestCase):
         self._assert_line(
             lines[0], HOLD, command_id=body["id"], reason="lease_end",
             decision="release_queued", release_id=queued[0]["id"],
+        )
+
+    def test_a_hold_whose_run_retired_before_the_lease_end_is_audited_as_lease_end(self) -> None:
+        # The real way to a lease end without a close round (review r1 of PR
+        # 427): the run's processes are gone before the lease is released, so
+        # the coordinator opens no round, and cleanup_owner abandons the
+        # delivered hold. Its destination is gone, so the cancel cannot be
+        # queued, and the line says so. Mutants killed: the hold left out; the
+        # reason "cancelled".
+        state, coordinator, _now, token = self._state()
+        audit = self._real_audit(state)
+        body = self._delivered(state, token, HOLD)
+        state.retire_run("test-run", "processes_gone")
+        coordinator.note_processes_gone("test-run", None)
+        status, released = coordinator.release(ClientIdentity.from_payload(OWNER), token, "owner_release")
+        self.assertEqual(status, 200, released)
+        self.assertNotIn("hold_cancel_enqueued", released["cleanup"])
+        self.assertEqual(self._queued_releases(state, HOLD), [])
+        lines = self._release_lines(audit)
+        self.assertEqual(len(lines), 1, self._lines(audit))
+        self._assert_line(
+            lines[0], HOLD, command_id=body["id"], reason="lease_end",
+            decision="cleanup_degraded", cause="destination_changed",
         )
 
     # -- no release decided ------------------------------------------------
