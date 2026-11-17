@@ -307,34 +307,53 @@ class ReleaseAuditSourcesTest(unittest.TestCase):
 
     def test_a_release_that_cannot_be_queued_is_audited_with_its_cause(self) -> None:
         # Under retail quarantine, or with the peer's queue full, no release
-        # is queued; the line says which (review r1 of PR 427: two causes).
-        # Mutants killed: auditing only a queued release; one cause audited
-        # for every refusal.
+        # is queued; the line says which (review r1 of PR 427: two causes),
+        # whichever path decided it: the reaper at the deadline, the
+        # caller's /abandon or an in-process abandon (review r2 of PR 427).
+        # A second abandon and a reap add nothing. Mutants killed: auditing
+        # only a queued release; one cause audited for every refusal; no line
+        # for a refused release on one path.
         filler = {"server": "world_time_get", "client": "camera_get"}
         for source in SOURCES:
             for cause in ("quarantine", "queue_full"):
-                with self.subTest(source=source[0], cause=cause):
-                    state, _coordinator, _now, token = self._state()
-                    audit = self._real_audit(state)
-                    body = self._delivered(state, token, source)
-                    if cause == "quarantine":
-                        state.retail_probe = lambda: {"known": True, "processes": [{"name": "DayZ_x64.exe"}]}
-                    else:
-                        for _ in range(loopback.MAX_QUEUE):
-                            status, queued = state.enqueue_command(
-                                filler[source[1]], {}, peer=source[1],
-                                identity_payload=OWNER, lease_token=token,
+                for path in ("deadline", "http", "in_process"):
+                    with self.subTest(source=source[0], cause=cause, path=path):
+                        state, _coordinator, now, token = self._state()
+                        audit = self._real_audit(state)
+                        body = self._delivered(state, token, source)
+                        if cause == "quarantine":
+                            state.retail_probe = lambda: {"known": True, "processes": [{"name": "DayZ_x64.exe"}]}
+                        else:
+                            for _ in range(loopback.MAX_QUEUE):
+                                status, queued = state.enqueue_command(
+                                    filler[source[1]], {}, peer=source[1],
+                                    identity_payload=OWNER, lease_token=token,
+                                )
+                                self.assertEqual(status, 200, queued)
+                        refused = {"status": "cleanup_degraded", "cause": cause}
+                        if path == "deadline":
+                            now[0] += 6.0
+                            state.status_snapshot()
+                            reason = "deadline"
+                        elif path == "http":
+                            self.assertEqual(
+                                self._request_abandon(state, token, body["id"], "cancelled"), (200, refused)
                             )
-                            self.assertEqual(status, 200, queued)
-                    abandoned = state.abandon_command(body["id"], "cancelled")
-                    self.assertEqual(abandoned, {"status": "cleanup_degraded", "cause": cause})
-                    self.assertEqual(self._queued_releases(state, source), [])
-                    lines = self._release_lines(audit)
-                    self.assertEqual(len(lines), 1, self._lines(audit))
-                    self._assert_line(
-                        lines[0], source, command_id=body["id"], reason="cancelled",
-                        decision="cleanup_degraded", cause=cause,
-                    )
+                            reason = "cancelled"
+                        else:
+                            self.assertEqual(state.abandon_command(body["id"], "cancelled"), refused)
+                            reason = "cancelled"
+                        self.assertEqual(self._queued_releases(state, source), [])
+                        lines = self._release_lines(audit)
+                        self.assertEqual(len(lines), 1, self._lines(audit))
+                        self._assert_line(
+                            lines[0], source, command_id=body["id"], reason=reason,
+                            decision="cleanup_degraded", cause=cause,
+                        )
+                        self.assertEqual(state.abandon_command(body["id"], "cancelled"), {"status": "noop"})
+                        now[0] += 6.0
+                        state.status_snapshot()
+                        self.assertEqual(len(self._release_lines(audit)), 1, self._lines(audit))
 
     def test_a_caller_holding_the_broker_lock_gets_no_audit_write_under_it(self) -> None:
         # The line waits for the next lock-free point. Mutant killed: the
