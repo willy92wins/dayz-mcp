@@ -1534,7 +1534,9 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
         # Sol r2 finding 3: a batch, not one deferred line. Two spawns reach
         # their deadline while a caller holds the broker lock; each line is
         # written exactly once at the next lock-free point. Mutant killed: a
-        # flush that writes only the first pending line.
+        # flush that writes only the first pending line. Each line names its
+        # own spawn's release (review r3 of PR 428). Mutant killed: the
+        # deferred lines written with the last queued release's id.
         now = [1000.0]
         state = _bound_state(clock=lambda: now[0])
         _announce(state)
@@ -1555,11 +1557,17 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
             state.status_snapshot()
         state.status_snapshot()
         self.assertEqual(len(self._queued_release_ids(state)), 2)
-        for command_id in ids:
+        releases = {
+            c["args"]["spawn_token"]: c["id"]
+            for c in bound_queue(state, "server")
+            if c.get("cmd") == RELEASE
+        }
+        self.assertEqual(sorted(releases), sorted((TOKEN, "c" * 32)))
+        for command_id, token in zip(ids, (TOKEN, "c" * 32)):
             lines = self._release_lines(audit, command_id)
             self.assertEqual(
-                [(e.get("event"), e.get("reason")) for e in lines],
-                [("abandon_release", "deadline")],
+                [(e.get("event"), e.get("reason"), e.get("release_id")) for e in lines],
+                [("abandon_release", "deadline", releases[token])],
                 self._lines(audit),
             )
 
