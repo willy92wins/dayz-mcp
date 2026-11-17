@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from dayz_mcp import box_holder
+from dayz_mcp import box_holder, box_reservation
 from dayz_mcp.process_lifecycle import (
     ADOPTION_REVERT_PENDING,
     caller_launched_row,
@@ -277,6 +277,31 @@ def _name_foreign_holder(payload: dict[str, Any], box: object) -> dict[str, Any]
     return payload
 
 
+def _box_reservation_of(box: object) -> dict[str, Any] | None:
+    """The DayZ Studio (M1) reservation the box read shows, or None."""
+    if not isinstance(box, dict):
+        return None
+    return box_reservation.public_reservation(box.get("reservation"))
+
+
+def _apply_box_reservation(payload: dict[str, Any], box: object) -> dict[str, Any]:
+    """A refusal over a reserved box names the file and its age.
+
+    The reservation outlasts any DayZ in the box, so its reason replaces the
+    others (a foreign DayZ on the requested port included); the hint keeps
+    what was said before after the reservation sentence.
+    """
+    reservation = _box_reservation_of(box)
+    if reservation is None:
+        return payload
+    payload["reason"] = box_reservation.BOX_RESERVED
+    payload["reservation"] = reservation
+    sentence = box_reservation.reservation_hint(reservation)
+    hint = payload.get("hint")
+    payload["hint"] = f"{sentence}; {hint}" if isinstance(hint, str) and hint else sentence
+    return payload
+
+
 def _box_queue_offer(
     box: object,
     *,
@@ -535,7 +560,9 @@ def _apply_takeover_required(
     *,
     caller_session: str | None = None,
 ) -> dict[str, Any]:
-    if payload.get("reason") == "port_in_use_foreign":
+    # A reserved box is not taken over: dayz_test_run evicts nothing while the
+    # M1 reservation exists, since the launch after the eviction is refused.
+    if payload.get("reason") in {"port_in_use_foreign", box_reservation.BOX_RESERVED}:
         return payload
     target = takeover_target_run_id(box, caller_session=caller_session)
     if target is None:
@@ -572,6 +599,7 @@ def _enrich_active_run_result(
     payload["run_id"] = None
     payload["status"] = "failed"
     payload["error_code"] = "active_run_exists"
+    payload = _apply_box_reservation(payload, box)
     payload = _apply_takeover_required(payload, box, caller_session=caller_session)
     return _attach_queue_offer(
         _name_foreign_holder(payload, box),
@@ -640,7 +668,8 @@ def _box_held_by_another(box: object, caller_session: str | None) -> bool:
     """Positive proof that someone other than this caller holds the box now.
 
     A registered run this caller does not own (or, ownerless, did not launch),
-    the box claim of another session, or a DayZ this daemon does not manage.
+    the box claim of another session, a DayZ this daemon does not manage, or
+    the DayZ Studio (M1) reservation file.
     A box that reads free, holds only this caller's own claim, shows a held
     port and no occupant, or cannot be read proves nothing: what refused the
     launch, a port holder that has exited for one, may not be observable any
@@ -648,6 +677,8 @@ def _box_held_by_another(box: object, caller_session: str | None) -> bool:
     """
     if not isinstance(box, dict):
         return False
+    if _box_reservation_of(box) is not None:
+        return True
     foreign = box.get("foreign")
     if isinstance(foreign, list) and any(isinstance(item, dict) for item in foreign):
         return True
@@ -746,6 +777,7 @@ def _box_taken_result(
     if not conflict.get("reason"):
         payload["reason"] = reason
         payload["hint"] = _BOX_TAKEN_HINT[reason]
+    payload = _apply_box_reservation(payload, box)
     payload = _attach_queue_offer(
         _name_foreign_holder(payload, box),
         box,

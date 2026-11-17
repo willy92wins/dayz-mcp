@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `dayz_test_run` respects the DayZ Studio (M1) reservation of the box (2026-11-17): while `C:\tmp\caja-dayz\m1.espera` exists the daemon reads the box as occupied (`session_status.box.reservation` `{path, age_s}`, the age counted from the file's last write), refuses a launch at admission (`lifecycle_start_rejected` reason `box_reserved`) and again right before the spawn, after the last socket-table read (stage `pre_launch`), and a call queued with `on_busy="queue"` keeps waiting; if the file appears after its FIFO grant, the daemon refuses the launch and the call re-enters the FIFO once. An immediate call answers `active_run_exists` with `reason: "box_reserved"`, `reservation` and a hint naming the file and its age, without starting the worker (so without a build), and `takeover=true` evicts nothing. Fail-closed: the file never expires on its own, and a path that exists but cannot be examined counts as a reservation; a forgotten file is removed by hand. M1's harness launches its DayZ servers itself, not through `dayz_test_run`, so it needs no exception. Windows only. Tests: `tools/tests/test_box_reservation_m1.py`; `tools/tests/__init__.py` gives every other test a reader that finds no reservation. Python only: no addon, PBO, sealed launcher or packaged-module change.
+
 ## [1.5] - 2026-11-11
 
 Verified on DayZ 1.30.164289: `dayz_test_run` starts the server and the client with this release's PBO, the bridge (version 12) passes its handshake, and `dayz_test_close` closes both in order. 20 new public tools, 107 in all, and the eight addon defects of the in-game round of 2026-11-09 fixed. This release changes Python modules sealed in the native launcher: after updating, build the launcher again and register it (`build_native_launcher.py --offline --verify-reproducible`, then `python -m dayz_mcp.launcher_registry_update replace-dayz-test-v1`; `tools/README-mcp.md`).

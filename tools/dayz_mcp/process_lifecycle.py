@@ -24,7 +24,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
 
-from dayz_mcp import box_holder, dayz_test_storage, window_close, window_foreground
+from dayz_mcp import box_holder, box_reservation, dayz_test_storage, window_close, window_foreground
 from dayz_mcp.box_admission import box_admission
 from dayz_mcp.child_environment import whitelisted_child_environment
 from dayz_mcp.input_activity import InputAttributor, InputSample
@@ -4307,6 +4307,15 @@ class ProcessLifecycle:
                     "active_run_exists",
                     audit_reason="box_claimed",
                 )
+            # The DayZ Studio (M1) reservation file (box_reservation.py). Read
+            # again right before the spawn, beside the last socket-table read.
+            if box_reservation.current_reservation() is not None:
+                return self._start_rejection(
+                    client,
+                    authority,
+                    "active_run_exists",
+                    audit_reason=box_reservation.BOX_RESERVED,
+                )
             registered_pids = {
                 record.pid for run in active for record in run.processes
             }
@@ -4553,6 +4562,13 @@ class ProcessLifecycle:
                 pre_launch_reason = self._foreign_port_reason(
                     registered_pids, requested_port
                 )
+                # The M1 reservation file, read after the socket table: the
+                # last look before the spawn (box_reservation.py).
+                if (
+                    pre_launch_reason is None
+                    and box_reservation.current_reservation() is not None
+                ):
+                    pre_launch_reason = box_reservation.BOX_RESERVED
                 if pre_launch_reason is not None:
                     audited = self._audit(
                         "lifecycle_start_rejected",

@@ -30,6 +30,7 @@ import mcp_capture
 from dayz_mcp import (
     accredited_daemon_transport,
     accredited_keepalive,
+    box_reservation,
     core,
     daemon,
     daemon_credential,
@@ -339,6 +340,7 @@ from dayz_mcp.box_occupancy import (
     _DAYZ_GAME_PORT_MIN,
     _annotate_box_foreign_ports,
     _annotate_foreign_port_list,
+    _apply_box_reservation,
     _apply_takeover_required,
     _attach_queue_offer,
     _box_from_status,
@@ -347,6 +349,7 @@ from dayz_mcp.box_occupancy import (
     _box_queue_offer,
     _box_queue_position,
     _box_ready_for,
+    _box_reservation_of,
     _box_run,
     _box_session_is,
     _box_taken_result,
@@ -5294,6 +5297,7 @@ def _failed_active_run_result(
     extra = occupancy_error_fields(box, caller_session=caller_session)
     extra.update(_port_conflict_fields(box, port, caller_session=caller_session))
     _name_foreign_holder(extra, box)
+    _apply_box_reservation(extra, box)
     return _attach_queue_offer(
         _apply_takeover_required(
             {
@@ -6386,6 +6390,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "(active_run_exists; reason port_in_use_foreign names the port) "
             "by a socket-table read repeated right before the launch; the "
             "only window left is between that read and DayZ's own bind. "
+            f"While {box_reservation.BOX_RESERVATION_PATH} exists the box is "
+            "reserved for DayZ Studio (M1) and reads occupied "
+            "(session_status.box.reservation {path, age_s}): a launch is "
+            "refused as active_run_exists with reason box_reserved and a "
+            "reservation and hint that name the file and its age, "
+            "takeover=true evicts nothing, and on_busy=\"queue\" keeps waiting; "
+            "the daemon reads the file again right before the launch. The "
+            "file never expires on its own: a person removes it by hand when "
+            "no M1 run is waiting for or using the box. "
             "A RUNNING run owned by another session is takeover_required "
             "unless takeover=true (evicts that registered run, then launches; "
             "names evicted_run_id). An ownerless RUNNING_IDLE that this "
@@ -6762,6 +6775,26 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 # after the same blockers the queue checked.
                 if target is not None and extension_exempt(box) and target == run_id:
                     target = None
+                # The DayZ Studio (M1) reservation (box_reservation.py): no
+                # launch and no eviction while its file exists, and no worker
+                # (or build) for a launch the daemon would refuse. A call that
+                # waited in the FIFO with on_busy="queue" goes on instead: the
+                # daemon refuses its launch, and the re-queue below waits for
+                # the file to go.
+                queued_launch = on_busy == "queue" and box_wait_deadline is not None
+                if _box_reservation_of(box) is not None and (
+                    not queued_launch or (target is not None and takeover)
+                ):
+                    return annotated(
+                        _failed_active_run_result(
+                            project=project,
+                            mode=mode,
+                            box=box,
+                            started=started,
+                            caller_session=caller_session,
+                            port=port,
+                        )
+                    )
                 if target is not None and _row_is_protected(
                     _box_run(box, target), caller_session
                 ):
