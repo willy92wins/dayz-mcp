@@ -772,10 +772,11 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         clock: FakeClock | None = None,
     ) -> None:
         """Each poll in peers comes once without a pid (its socket was not
-        attributed this tick): it reads instance_unattributed and leaves the
-        binding as it is (loopback.py:7635-7639): same object, state and
-        epoch. With clock, the clock first moves 0.01 s, so these polls are
-        newer than every poll before them."""
+        attributed this tick), in that order and at one instant: it reads
+        instance_unattributed and leaves the binding as it is
+        (loopback.py:7635-7639): same object, state and epoch. With clock,
+        the clock first moves 0.01 s, so these polls are newer than every
+        poll before them; each poll is stamped with that instant."""
         if clock is not None and peers:
             clock.advance(0.01)
         for peer in peers:
@@ -784,6 +785,8 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
             self._poll_reads(state, peer, instance, None, "instance_unattributed")
             self.assertIs(state._bindings[instance], binding)
             self.assertEqual((binding.state, binding.epoch), before)
+            if clock is not None:
+                self.assertEqual(state._last_poll_at[peer], clock())
 
     def _keep_polling(
         self,
@@ -791,14 +794,17 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         instance: str,
         pid: int,
         other: str | None,
-        lose_pid: tuple[str, ...],
+        lose_pid: tuple[tuple[str, ...], ...],
         clock: FakeClock,
     ) -> None:
-        """Just before a fresh answer: the poll of other (when given) reads
-        BOUND again, then the polls in lose_pid come without a pid, newer."""
+        """Just before an answer: the poll of other (when given) reads BOUND
+        again; then the polls in lose_pid come without a pid, group by
+        group: the polls of one group at one instant, each group 0.01 s
+        after the polls before it."""
         if other is not None:
             self._poll_reads(state, other, instance, pid, instance_fence_mod.BINDING_BOUND)
-        self._without_a_pid(state, instance, lose_pid, clock)
+        for group in lose_pid:
+            self._without_a_pid(state, instance, group, clock)
 
     def _bound_again_with_a_fresh_command(
         self,
@@ -809,13 +815,15 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         peer: str,
         cmd: str,
         before_answer: Callable[[], None] | None = None,
+        wait: float = 0.0,
     ) -> tuple:
         """Past the reconnect gap, a poll from the bound pid makes the binding
         BOUND again (its epoch stays the new one). A command sealed after the
         move is delivered; the station epoch moves before it is answered, its
-        own binding's epoch does not; before_answer runs just before the
-        answer, which is kept for /await. Returns the readings (_readings)
-        when the answer came."""
+        own binding's epoch does not. before_answer runs, then the answer
+        comes wait seconds later, with no poll between them; it is kept for
+        /await. Returns the readings (_readings) when the answer came, and
+        how long after the last poll it came (_age_band)."""
         clock.advance(loopback.PEER_RECONNECT_GAP_S + 1.0)
         state.record_poll(peer, instance=instance, source_pid=pid)
         self.assertEqual(state._bindings[instance].state, instance_fence_mod.BINDING_BOUND)
@@ -829,14 +837,36 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         self.assertNotEqual(state._station_epoch, sealed)
         if before_answer is not None:
             before_answer()
+        clock.advance(wait)
         self.assertEqual(state._bindings[instance].epoch, sealed)
         readings = self._readings(state, instance)
+        band = self._age_band(state, clock)
         result_status, result = state.store_result(
             {"id": fresh["id"], "ok": 1, "value": 6}, instance=instance
         )
         self.assertEqual((result_status, result.get("discarded")), (200, None), result)
         self.assertEqual((state.take_result(fresh["id"]) or {}).get("value"), 6)
-        return readings
+        return readings, band
+
+    # The daemon's time limits an answer can come past, in seconds after the
+    # last poll: the reconnect gap, the liveness window (PEER_STALE_S), and
+    # the TTL of a queued command. WAITS puts one answer in each band.
+    AGE_LIMITS = (
+        loopback.PEER_RECONNECT_GAP_S,
+        loopback.PEER_STALE_S,
+        loopback.COMMAND_TTL_S,
+    )
+    WAITS = (0.0,) + tuple(limit + 1.0 for limit in AGE_LIMITS)
+
+    def _band(self, since: float) -> int:
+        """How many AGE_LIMITS since is past: 0 within the reconnect gap, 3
+        past the command TTL."""
+        return sum(since > limit for limit in self.AGE_LIMITS)
+
+    def _age_band(self, state: loopback.ServerState, clock: FakeClock) -> int:
+        """_band of the time since the newer of the two polls (_last_poll_at;
+        a peer that never polled does not count)."""
+        return self._band(clock() - max(t for t in state._last_poll_at.values() if t is not None))
 
     def test_a_late_result_of_a_server_or_offline_binding_is_audited(self) -> None:
         # The other positive tests here use a client binding (last review of
@@ -852,19 +882,28 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         # A poll that presents the offline instance with a pid reads BOUND or
         # AMBIGUOUS. One that comes without a pid reads instance_unattributed
         # and leaves the binding as it is; it can come on either poll, or on
-        # both, in any state (lose_pid: just before each answer, 0.01 s after
+        # both, in any state (lose_pid: just before each answer, newer than
         # the polls before it; with bound_again the old answer follows the
-        # fresh one with no poll between them). Over those
+        # fresh one with no poll between them). When both polls lose the
+        # pid, they do so at one instant or 0.01 s apart, either one first
+        # (review r3 of PR 424). Each answer comes right after the polls
+        # before it, or wait seconds later, past the reconnect gap, the
+        # liveness window or the command TTL (WAITS), with no poll between
+        # them (reviews r1 and r2 of PR 426). Over those
         # three readings and "not polled yet", the old answer comes in every
         # combination an offline binding that moved on can be in, and the
-        # fresh answer in every one with the binding BOUND again; the test
-        # checks it visited each one (reviews of PR 423). Mutants killed: the
+        # fresh answer in every one with the binding BOUND again, each at
+        # every wait; the test checks it visited each one, with the time
+        # since the last poll read from the poll stamps (reviews of PR 423).
+        # Mutants killed: the
         # trigger limited to client bindings; offline bindings left out;
         # server bindings left out; the other roles audited only while
         # AMBIGUOUS (PR 421 review r1); for offline, the station epoch
         # deciding, or the station and binding epochs swapped in the line
         # (PR 421 review r2); for offline, no line for the old answer, or a
-        # line for the fresh one, in any one combination.
+        # line for the fresh one, in any one combination, and with both polls
+        # read without a pid, in any one of those four orders; for either
+        # role, the same only when the answer comes past one of those limits.
         # (role, instance, pid, peer of the command, command, peer of pid
         # 9999, follow: the process keeps polling, so within the gap its next
         # poll of the delivering peer reads AMBIGUOUS too, and once the
@@ -900,29 +939,54 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
             (ambiguous, bound, bound),
             (bound, bound, bound),
         }
-        losses = ((), ("server",), ("client",), ("server", "client"))
+        # The polls that come without a pid just before each answer, in
+        # groups (_keep_polling): the polls of one group at one instant, in
+        # that order, each group 0.01 s after the polls before it.
+        losses = (
+            (),
+            (("server",),),
+            (("client",),),
+            (("server", "client"),),
+            (("client", "server"),),
+            (("server",), ("client",)),
+            (("client",), ("server",)),
+        )
 
-        def lost(readings: tuple, peers: tuple[str, ...]) -> tuple:
+        def lost(readings: tuple, groups: tuple[tuple[str, ...], ...]) -> tuple:
             server, client, binding_state = readings
+            peers = {peer for group in groups for peer in group}
             return (
                 unattributed if "server" in peers else server,
                 unattributed if "client" in peers else client,
                 binding_state,
             )
 
-        reachable = {lost(readings, peers) for readings in with_a_pid for peers in losses}
+        reachable = {lost(readings, groups) for readings in with_a_pid for groups in losses}
         self.assertEqual(len(reachable), 24)
+        # Each wait lands in its own band: 0, 1, 2 and 3.
+        bands = range(len(self.AGE_LIMITS) + 1)
+        self.assertEqual([self._band(wait) for wait in self.WAITS], list(bands))
         visited = set()
         fresh_visited = set()
         setups = [
-            case + (lose_pid, when)
+            case + (lose_pid, when, wait)
             for case in cases
             for lose_pid in (losses if case[0] == "offline" else ((),))
             for when in ("ambiguous", "bound_again")
+            for wait in self.WAITS
         ]
-        for role, instance, pid, peer, cmd, conflict_peer, follow, lose_pid, answered_while in (
-            setups
-        ):
+        for (
+            role,
+            instance,
+            pid,
+            peer,
+            cmd,
+            conflict_peer,
+            follow,
+            lose_pid,
+            answered_while,
+            wait,
+        ) in setups:
             with self.subTest(
                 role=role,
                 peer=peer,
@@ -930,6 +994,7 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
                 follow=follow,
                 lose_pid=lose_pid,
                 answered_while=answered_while,
+                wait=wait,
             ), TemporaryDirectory() as tmp:
                 clock = FakeClock()
                 state, writer, audit_file = self._state(tmp, clock)
@@ -970,15 +1035,17 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
                 )
                 if answered_while == "bound_again":
                     # The old answer comes right after the fresh one, with no
-                    # poll between them.
+                    # poll between them: both come wait seconds after the
+                    # last poll.
                     fresh = self._bound_again_with_a_fresh_command(
-                        state, clock, instance, pid, peer, cmd, before_fresh
+                        state, clock, instance, pid, peer, cmd, before_fresh, wait
                     )
                     self.assertEqual(self._lines(audit_file), [])
                 else:
-                    self._without_a_pid(state, instance, lose_pid, clock)
+                    self._keep_polling(state, instance, pid, None, lose_pid, clock)
+                    clock.advance(wait)
                 if role == "offline":
-                    visited.add(self._readings(state, instance))
+                    visited.add((self._readings(state, instance), self._age_band(state, clock)))
                 binding_epoch = state._bindings[instance].epoch
                 station_epoch = state._station_epoch
                 self.assertEqual(len({sealed_epoch, binding_epoch, station_epoch}), 3)
@@ -1001,7 +1068,7 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
                 self.assertEqual((state.take_result(command_id) or {}).get("value"), 9)
                 if answered_while == "ambiguous":
                     fresh = self._bound_again_with_a_fresh_command(
-                        state, clock, instance, pid, peer, cmd, before_fresh
+                        state, clock, instance, pid, peer, cmd, before_fresh, wait
                     )
                     self.assertEqual(len(self._lines(audit_file)), 1, _audit_lines(audit_file))
                 if role == "offline":
@@ -1009,8 +1076,10 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
                 self.assertEqual(writer.attempted.count(self.EVENT), 1, writer.attempted)
                 self.assertNotIn(instance, audit_file.read_text(encoding="utf-8"))
                 self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
-        self.assertEqual(visited, reachable)
-        self.assertEqual(fresh_visited, {r for r in reachable if r[2] == bound})
+        # Each combination, with the answer in each band of time since the
+        # last poll.
+        self.assertEqual(visited, {(r, b) for r in reachable for b in bands})
+        self.assertEqual(fresh_visited, {(r, b) for r in reachable if r[2] == bound for b in bands})
 
     def test_an_offline_late_answer_when_a_poll_lost_its_pid_before_the_other_polled(
         self,
@@ -1023,18 +1092,22 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         # binding BOUND again and delivers a fresh command. The clock moves
         # between the polls, so the reading without a pid is the older one.
         # The old answer still writes its one line, and the fresh one none.
-        # Mutants killed: for offline, no line for the old answer, or a line
-        # for the fresh one, when the poll that read no pid is the older.
+        # Each answer comes right after the last poll, or wait seconds later,
+        # past the reconnect gap, the liveness window or the command TTL
+        # (WAITS; reviews r1 and r2 of PR 426). Mutants killed: for offline,
+        # no line for the old answer, or a line for the fresh one, when the
+        # poll that read no pid is the older.
         ambiguous = instance_fence_mod.BINDING_AMBIGUOUS
         bound = instance_fence_mod.BINDING_BOUND
         directions = (
             ("server", "world_time_get", "client", "camera_get"),
             ("client", "camera_get", "server", "world_time_get"),
         )
+        answers = [(a, w) for a in ("ambiguous", "bound_again") for w in self.WAITS]
         for peer, cmd, other, other_cmd in directions:
-            for answered_while in ("ambiguous", "bound_again"):
+            for answered_while, wait in answers:
                 with self.subTest(
-                    peer=peer, other=other, answered_while=answered_while
+                    peer=peer, other=other, answered_while=answered_while, wait=wait
                 ), TemporaryDirectory() as tmp:
                     clock = FakeClock()
                     state, writer, audit_file = self._state(tmp, clock)
@@ -1054,7 +1127,7 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
                         self._poll_reads(state, other, INST_OFF, 3003, ambiguous)
                     else:
                         fresh = self._bound_again_with_a_fresh_command(
-                            state, clock, INST_OFF, 3003, other, other_cmd
+                            state, clock, INST_OFF, 3003, other, other_cmd, wait=wait
                         )
                         self.assertEqual(self._lines(audit_file), [])
                     binding_state = ambiguous if answered_while == "ambiguous" else bound
@@ -1064,8 +1137,14 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
                         (readings["server"], readings["client"], binding_state),
                     )
                     if answered_while == "bound_again":
-                        self.assertEqual(fresh, self._readings(state, INST_OFF))
+                        # The old answer comes right after the fresh one.
+                        self.assertEqual(
+                            fresh, (self._readings(state, INST_OFF), self._band(wait))
+                        )
+                    else:
+                        clock.advance(wait)
                     self.assertLess(state._last_poll_at[peer], state._last_poll_at[other])
+                    self.assertEqual(self._age_band(state, clock), self._band(wait))
                     binding_epoch = state._bindings[INST_OFF].epoch
                     station_epoch = state._station_epoch
                     self.assertEqual(len({sealed_epoch, binding_epoch, station_epoch}), 3)
