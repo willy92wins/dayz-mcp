@@ -1002,9 +1002,10 @@ class AIGroupSpawnLateAnswerTest(unittest.TestCase):
             self.assertEqual(status, 200, body)
         now[0] += 0.126
         self.assertTrue(self._answer(state, command_id).get("discarded"))
+        # No release was queued, so the line names none (review r1 of PR 429).
         self.assertEqual(
-            [(e["event"], e["status"], e["cause"]) for e in events],
-            [("late_answer_abandon", "cleanup_degraded", "queue_full")],
+            [(e["event"], e["status"], e["cause"], "release_id" in e) for e in events],
+            [("late_answer_abandon", "cleanup_degraded", "queue_full", False)],
         )
         self.assertNotIn(RELEASE, [cmd for cmd, _args in self._queued(state)])
 
@@ -1038,6 +1039,15 @@ class AIGroupSpawnLateAnswerTest(unittest.TestCase):
                 self.assertEqual(len(late), 1, lines)
                 self.assertEqual(late[0]["command_id"], command_id)
                 self.assertEqual((late[0]["decision"], late[0].get("cause")), expected)
+                # The line names the release it queued, and none when none was
+                # queued (review r1 of PR 429).
+                queued = [c["id"] for c in bound_queue(state, "server") if c.get("cmd") == RELEASE]
+                if fill_queue:
+                    self.assertEqual(queued, [])
+                    self.assertNotIn("release_id", late[0])
+                else:
+                    self.assertEqual(len(queued), 1)
+                    self.assertEqual(late[0].get("release_id"), queued[0])
 
     def test_a_late_answer_under_retail_quarantine_queues_no_release(self) -> None:
         # Mutant killed: the late abandon not reading the retail quarantine
@@ -1049,15 +1059,19 @@ class AIGroupSpawnLateAnswerTest(unittest.TestCase):
         now[0] += 0.126
         self.assertTrue(self._answer(state, command_id).get("discarded"))
         self.assertNotIn(RELEASE, [cmd for cmd, _args in self._queued(state)])
+        # No release was queued, so the line names none (review r1 of PR 429).
         self.assertEqual(
-            [(e["event"], e["status"], e.get("cause")) for e in events],
-            [("late_answer_abandon", "cleanup_degraded", "quarantine")],
+            [(e["event"], e["status"], e.get("cause"), "release_id" in e) for e in events],
+            [("late_answer_abandon", "cleanup_degraded", "quarantine", False)],
         )
 
     def test_a_late_failed_answer_also_queues_the_release_once(self) -> None:
         # Mutant killed: abandoning only on ok=1. A spawn that created part of
-        # its group and then failed answers ok=0 with created set.
+        # its group and then failed answers ok=0 with created set. Its line
+        # names the release it queued (review r2 of PR 429). Mutant killed:
+        # the late line of a failed answer without release_id.
         state, now, command_id = self._delivered_spawn()
+        events = self._audit(state)
         now[0] += 0.126
         failed = {
             "id": command_id,
@@ -1068,6 +1082,16 @@ class AIGroupSpawnLateAnswerTest(unittest.TestCase):
         for retry in (False, True):
             status, stored = state.store_result(dict(failed), instance=INST_SERVER, retry=retry)
             self.assertEqual(status, 200, stored)
+        queued = [c["id"] for c in bound_queue(state, "server") if c.get("cmd") == RELEASE]
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(
+            [
+                (e["status"], e.get("release_id"))
+                for e in events
+                if e.get("event") == "late_answer_abandon"
+            ],
+            [("release_queued", queued[0])],
+        )
         releases = self._releases(state) + self._releases(state)
         self.assertEqual(releases, [(RELEASE, {"spawn_token": TOKEN})])
 
@@ -1379,6 +1403,9 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
         # late_answer_abandon, and the retry, the caller's abandon and the
         # reap that follow add no abandon_release. Mutant killed: an audit in
         # a path store_result shares, which writes two lines for one release.
+        # The line names the release it queued (review r3 of PR 428). Mutants
+        # killed: a late_answer_abandon line without release_id, or with
+        # another id.
         state, now, command_id = self._delivered_spawn()
         audit = self._real_audit(state)
         now[0] += 0.126
@@ -1388,11 +1415,17 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
             self._request_abandon(state, command_id, "tool_timeout"), (200, {"status": "noop"})
         )
         state.status_snapshot()
+        release_ids = self._queued_release_ids(state)
+        self.assertEqual(len(release_ids), 1)
         lines = self._release_lines(audit, command_id)
         self.assertEqual([e.get("event") for e in lines], ["late_answer_abandon"], self._lines(audit))
         self.assertEqual(
-            (lines[0].get("reason"), lines[0].get("decision"), lines[0].get("duration_s")),
-            ("late_answer", "release_queued", 0.0),
+            (
+                lines[0].get("reason"), lines[0].get("decision"), lines[0].get("duration_s"),
+                lines[0].get("release_id"),
+            ),
+            ("late_answer", "release_queued", 0.0, release_ids[0]),
+            lines[0],
         )
 
     def test_a_caller_holding_the_broker_lock_gets_no_audit_write_under_it(self) -> None:
@@ -1400,7 +1433,9 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
         # already holds it (re-entrant) still holds it after the method's own
         # section. The line must not be written while it is held, and it is
         # written at the next lock-free point (status_snapshot). Mutant
-        # killed: writing right after the method's own lock section.
+        # killed: writing right after the method's own lock section. The line
+        # names the one queued release (review r1 of PR 429). Mutant killed:
+        # the late answer's line deferred without its release_id.
         for shape in ("deadline", "request_abandon", "late_answer"):
             with self.subTest(shape=shape):
                 self._writers = []
@@ -1422,11 +1457,14 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
                         self.assertTrue(self._answer(state, command_id).get("discarded"))
                     event, reason = "late_answer_abandon", "late_answer"
                 state.status_snapshot()
+                release_ids = self._queued_release_ids(state)
+                self.assertEqual(len(release_ids), 1)
                 lines = self._release_lines(audit, command_id)
                 self.assertEqual(
-                    [(e.get("event"), e.get("reason")) for e in lines], [(event, reason)], self._lines(audit)
+                    [(e.get("event"), e.get("reason"), e.get("release_id")) for e in lines],
+                    [(event, reason, release_ids[0])],
+                    self._lines(audit),
                 )
-                self.assertEqual(len(self._queued_release_ids(state)), 1)
 
     def test_the_line_is_written_when_a_step_after_the_decision_fails(self) -> None:
         # Sol r1 finding 2: once the release is queued under the lock, a later
@@ -1435,10 +1473,13 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
         # deadline too (review r3 of PR 427), whatever the error (review r1 of
         # PR 428), and when the caller already holds the broker lock, which is
         # re-entrant (review r2 of PR 428): the line then waits for the next
-        # lock-free point. Mutants killed: the audit written only after a
-        # flush that returned normally, on every path or on the reaper's
-        # alone; the line written on one error type only; the line dropped
-        # after a failure under an outer lock.
+        # lock-free point. The line is the one a flush that returned would
+        # write: it names the release it queued (review r3 of PR 428).
+        # Mutants killed: the audit written only after a flush that returned
+        # normally, on every path or on the reaper's alone; the line written
+        # on one error type only; the line dropped after a failure under an
+        # outer lock; after a failure, a line without release_id, with
+        # another id, or without its expected instance.
         shapes = ("abandon_command", "request_abandon", "late_answer", "deadline")
         for shape, error, outer_lock in itertools.product(
             shapes, (RuntimeError, OSError), (False, True)
@@ -1468,23 +1509,38 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
                     # Nothing written under the lock; the next lock-free point writes it.
                     self.assertEqual(self._release_lines(audit, command_id), [])
                     state.status_snapshot()
-                self.assertEqual(len(self._queued_release_ids(state)), 1)
+                release_ids = self._queued_release_ids(state)
+                self.assertEqual(len(release_ids), 1)
                 lines = self._release_lines(audit, command_id)
                 self.assertEqual(len(lines), 1, self._lines(audit))
-                want = {
-                    "abandon_command": ("abandon_release", "tool_cancelled"),
-                    "request_abandon": ("abandon_release", "cancelled"),
-                    "late_answer": ("late_answer_abandon", "late_answer"),
-                    "deadline": ("abandon_release", "deadline"),
-                }[shape]
-                self.assertEqual((lines[0].get("event"), lines[0].get("reason")), want, lines[0])
-                self.assertEqual(lines[0].get("decision"), "release_queued", lines[0])
+                if shape == "late_answer":
+                    self.assertEqual(
+                        (
+                            lines[0].get("event"), lines[0].get("reason"),
+                            lines[0].get("decision"), lines[0].get("release_id"),
+                        ),
+                        ("late_answer_abandon", "late_answer", "release_queued", release_ids[0]),
+                        lines[0],
+                    )
+                else:
+                    reason = {
+                        "abandon_command": "tool_cancelled",
+                        "request_abandon": "cancelled",
+                        "deadline": "deadline",
+                    }[shape]
+                    self._assert_release_line(
+                        lines[0], command_id=command_id, reason=reason, answered=False,
+                        decision="release_queued", release_id=release_ids[0],
+                    )
 
     def test_the_late_answer_line_survives_a_failure_inside_the_lock_section(self) -> None:
         # Sol r2 finding 1: the late abandon is decided inside store_result's
         # lock section. A step later in that same section raising must not
         # lose the line, and the error still reaches the caller. Mutant killed:
         # the audit guarded only around the flushes after the lock section.
+        # The line still names the release it queued (review r3 of PR 428).
+        # Mutant killed: the line's release_id dropped when one of these steps
+        # fails.
         for step in ("_note_hold_result_locked", "_publish_due_deferred_closes_locked"):
             with self.subTest(step=step):
                 self._writers = []
@@ -1494,11 +1550,12 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
                 with patch.object(state, step, side_effect=RuntimeError("injected")):
                     with self.assertRaises(RuntimeError):
                         state.store_result({"id": command_id, "ok": 1}, instance=INST_SERVER)
-                self.assertEqual(len(self._queued_release_ids(state)), 1)
+                release_ids = self._queued_release_ids(state)
+                self.assertEqual(len(release_ids), 1)
                 lines = self._release_lines(audit, command_id)
                 self.assertEqual(
-                    [(e.get("event"), e.get("decision")) for e in lines],
-                    [("late_answer_abandon", "release_queued")],
+                    [(e.get("event"), e.get("decision"), e.get("release_id")) for e in lines],
+                    [("late_answer_abandon", "release_queued", release_ids[0])],
                     self._lines(audit),
                 )
 
@@ -1506,34 +1563,82 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
         # Sol r2 finding 3: a batch, not one deferred line. Two spawns reach
         # their deadline while a caller holds the broker lock; each line is
         # written exactly once at the next lock-free point. Mutant killed: a
-        # flush that writes only the first pending line.
-        now = [1000.0]
-        state = _bound_state(clock=lambda: now[0])
-        _announce(state)
-        audit = self._real_audit(state)
-        status, first = _enqueue_spawn(state, operation_timeout_s=0.05)
-        self.assertEqual(status, 200, first)
-        status, second = state.enqueue_command(
-            SPAWN, dict(SPAWN_WIRE, spawn_token="c" * 32), peer="server",
-            identity_payload=self._identity_payload(state),
-            lease_token=state._spawn_lease["lease_token"],  # type: ignore[attr-defined]
-            operation_timeout_s=0.05,
-        )
-        self.assertEqual(status, 200, second)
-        ids = (first["id"], second["id"])
-        self.assertEqual(sorted(c["id"] for c in _delivered(state)), sorted(ids))
-        now[0] += 0.06
-        with state._lock:  # type: ignore[attr-defined]
-            state.status_snapshot()
-        state.status_snapshot()
-        self.assertEqual(len(self._queued_release_ids(state)), 2)
-        for command_id in ids:
-            lines = self._release_lines(audit, command_id)
-            self.assertEqual(
-                [(e.get("event"), e.get("reason")) for e in lines],
-                [("abandon_release", "deadline")],
-                self._lines(audit),
-            )
+        # flush that writes only the first pending line. Each line names its
+        # own spawn's release (review r3 of PR 428), also when each flush
+        # fails (review r1 of PR 429): the reaper stops at a failed flush, so
+        # each status_snapshot under the lock abandons one spawn. The same
+        # for two late answers stored under the lock (review r2 of PR 429).
+        # Mutants killed: the deferred lines written with the last queued
+        # release's id; a line deferred during a failure giving its id to the
+        # lines deferred before it; the late lines given the last late id.
+        for kind, failure in itertools.product(("deadline", "late_answer"), (False, True)):
+            with self.subTest(kind=kind, failure=failure):
+                self._writers = []
+                now = [1000.0]
+                state = _bound_state(clock=lambda: now[0])
+                _announce(state)
+                audit = self._real_audit(state)
+                status, first = _enqueue_spawn(state, operation_timeout_s=0.05)
+                self.assertEqual(status, 200, first)
+                status, second = state.enqueue_command(
+                    SPAWN, dict(SPAWN_WIRE, spawn_token="c" * 32), peer="server",
+                    identity_payload=self._identity_payload(state),
+                    lease_token=state._spawn_lease["lease_token"],  # type: ignore[attr-defined]
+                    operation_timeout_s=0.05,
+                )
+                self.assertEqual(status, 200, second)
+                ids = (first["id"], second["id"])
+                self.assertEqual(sorted(c["id"] for c in _delivered(state)), sorted(ids))
+                coordination = state.coordination
+                self.assertIsNotNone(coordination)
+                injected = (
+                    patch.object(
+                        coordination, "finish_operation_exact", side_effect=RuntimeError("injected")
+                    )
+                    if failure
+                    else contextlib.nullcontext()
+                )
+                if kind == "deadline":
+                    now[0] += 0.06
+                    with injected, state._lock:  # type: ignore[attr-defined]
+                        if failure:
+                            for _ in ids:
+                                with self.assertRaises(RuntimeError):
+                                    state.status_snapshot()
+                        else:
+                            state.status_snapshot()
+                    event, reason = "abandon_release", "deadline"
+                else:
+                    now[0] += 0.126
+                    with injected, state._lock:  # type: ignore[attr-defined]
+                        for command_id in ids:
+                            if failure:
+                                with self.assertRaises(RuntimeError):
+                                    state.store_result(
+                                        {"id": command_id, "ok": 1}, instance=INST_SERVER
+                                    )
+                            else:
+                                self.assertTrue(self._answer(state, command_id).get("discarded"))
+                    event, reason = "late_answer_abandon", "late_answer"
+                # Nothing is written under the lock; the next lock-free point writes both.
+                self.assertEqual(
+                    [e for command_id in ids for e in self._release_lines(audit, command_id)], []
+                )
+                state.status_snapshot()
+                self.assertEqual(len(self._queued_release_ids(state)), 2)
+                releases = {
+                    c["args"]["spawn_token"]: c["id"]
+                    for c in bound_queue(state, "server")
+                    if c.get("cmd") == RELEASE
+                }
+                self.assertEqual(sorted(releases), sorted((TOKEN, "c" * 32)))
+                for command_id, token in zip(ids, (TOKEN, "c" * 32)):
+                    lines = self._release_lines(audit, command_id)
+                    self.assertEqual(
+                        [(e.get("event"), e.get("reason"), e.get("release_id")) for e in lines],
+                        [(event, reason, releases[token])],
+                        self._lines(audit),
+                    )
 
     def test_no_line_when_no_release_is_decided(self) -> None:
         # Guard (passes on main): a spawn dropped before delivery, and an
