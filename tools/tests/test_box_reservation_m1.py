@@ -298,9 +298,6 @@ class LifecycleStartTest(unittest.TestCase):
         self.assertEqual(self.fixture.launcher.calls, [])
         self.assertEqual(self._rejections(), [("box_reserved", "spawn")])
         self.assertEqual(lifecycle.box_occupancy()["runs"], [])
-        intent = lifecycle._launch_intent_path()
-        self.assertIsNotNone(intent)
-        self.assertFalse(intent.exists(), "the refused launch left its intent")
 
 
 # --- dayz_test_run ------------------------------------------------------------

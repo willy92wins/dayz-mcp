@@ -4688,9 +4688,12 @@ class ProcessLifecycle:
                         attempt_started_at=attempt_started_at,
                         cancel=cancel,
                     )
-                # The M1 reservation file once more, right before the spawn:
-                # the storage rotation and the launch intent above write to
-                # disk, and the file may appear while they do. The refusal is
+                # The M1 reservation file once more, the last look before the
+                # spawn: the storage rotation and the launch intent above
+                # write to disk, and the file may appear while they do. What
+                # is left until the process starts is in-memory work.
+                # Closing that window too would need M1 to hold the box
+                # admission lock while it writes the file. The refusal is
                 # settled like a launcher failure (box_reservation.py).
                 if box_reservation.current_reservation() is not None:
                     audited = self._audit(
