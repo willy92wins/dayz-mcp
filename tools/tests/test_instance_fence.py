@@ -769,9 +769,14 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
     ) -> None:
         """Each poll in peers comes once without a pid (its socket was not
         attributed this tick): it reads instance_unattributed and leaves the
-        binding as it is (loopback.py:7635-7639)."""
+        binding as it is (loopback.py:7635-7639): same object, state and
+        epoch."""
         for peer in peers:
+            binding = state._bindings[instance]
+            before = (binding.state, binding.epoch)
             self._poll_reads(state, peer, instance, None, "instance_unattributed")
+            self.assertIs(state._bindings[instance], binding)
+            self.assertEqual((binding.state, binding.epoch), before)
 
     def _keep_polling(
         self,
@@ -992,6 +997,86 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
                 self.assertEqual(writer.under_lock, [], "audit written under the broker lock")
         self.assertEqual(visited, reachable)
         self.assertEqual(fresh_visited, {r for r in reachable if r[2] == bound})
+
+    def test_an_offline_late_answer_when_a_poll_lost_its_pid_before_the_other_polled(
+        self,
+    ) -> None:
+        # The readings do not say in which order the polls came (review r1 of
+        # PR 424, P3). In the test above a poll without a pid comes last,
+        # just before the answer. Here the poll that delivered the command
+        # comes without a pid first; then the other poll comes with the pid:
+        # within the gap it reads AMBIGUOUS, past the gap it makes the
+        # binding BOUND again and delivers a fresh command. The clock moves
+        # between the polls, so the reading without a pid is the older one.
+        # The old answer still writes its one line, and the fresh one none.
+        # Mutants killed: for offline, no line for the old answer, or a line
+        # for the fresh one, when the poll that read no pid is the older.
+        ambiguous = instance_fence_mod.BINDING_AMBIGUOUS
+        bound = instance_fence_mod.BINDING_BOUND
+        directions = (
+            ("server", "world_time_get", "client", "camera_get"),
+            ("client", "camera_get", "server", "world_time_get"),
+        )
+        for peer, cmd, other, other_cmd in directions:
+            for answered_while in ("ambiguous", "bound_again"):
+                with self.subTest(
+                    peer=peer, other=other, answered_while=answered_while
+                ), TemporaryDirectory() as tmp:
+                    clock = FakeClock()
+                    state, writer, audit_file = self._state(tmp, clock)
+                    _bind(state, INST_OFF, "offline", 3003)
+                    status, payload = state.enqueue_command(cmd, {}, peer=peer)
+                    self.assertEqual(status, 200, payload)
+                    command_id = payload["id"]
+                    _status, poll = state.record_poll(peer, instance=INST_OFF, source_pid=3003)
+                    self.assertEqual([c.get("id") for c in poll["commands"]], [command_id])
+                    sealed_epoch = state._bindings[INST_OFF].epoch
+                    self._poll_reads(state, other, INST_OFF, 9999, ambiguous)
+                    clock.advance(0.01)
+                    self._without_a_pid(state, INST_OFF, (peer,))
+                    self._move_the_station_epoch(state)
+                    clock.advance(0.01)
+                    if answered_while == "ambiguous":
+                        self._poll_reads(state, other, INST_OFF, 3003, ambiguous)
+                    else:
+                        fresh = self._bound_again_with_a_fresh_command(
+                            state, clock, INST_OFF, 3003, other, other_cmd
+                        )
+                        self.assertEqual(self._lines(audit_file), [])
+                    binding_state = ambiguous if answered_while == "ambiguous" else bound
+                    readings = {peer: "instance_unattributed", other: binding_state}
+                    self.assertEqual(
+                        self._readings(state, INST_OFF),
+                        (readings["server"], readings["client"], binding_state),
+                    )
+                    if answered_while == "bound_again":
+                        self.assertEqual(fresh, self._readings(state, INST_OFF))
+                    self.assertLess(state._last_poll_at[peer], state._last_poll_at[other])
+                    binding_epoch = state._bindings[INST_OFF].epoch
+                    station_epoch = state._station_epoch
+                    self.assertEqual(len({sealed_epoch, binding_epoch, station_epoch}), 3)
+                    result_status, result = state.store_result(
+                        {"id": command_id, "ok": 1, "value": 9}, instance=INST_OFF
+                    )
+                    self.assertEqual(
+                        (result_status, result),
+                        (200, {"ok": True, "id": command_id, "ok_value": 1}),
+                    )
+                    lines = self._lines(audit_file)
+                    self.assertEqual(len(lines), 1, _audit_lines(audit_file))
+                    self._assert_line(
+                        lines[0],
+                        command_id,
+                        (sealed_epoch, station_epoch, binding_epoch),
+                        "accepted",
+                        instance=INST_OFF,
+                    )
+                    self.assertEqual((state.take_result(command_id) or {}).get("value"), 9)
+                    self.assertEqual(writer.attempted.count(self.EVENT), 1, writer.attempted)
+                    self.assertNotIn(INST_OFF, audit_file.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        writer.under_lock, [], "audit written under the broker lock"
+                    )
 
     def test_a_late_result_after_the_binding_is_gone_has_no_binding_epoch(self) -> None:
         # The binding was retired, then RETIRED_INSTANCE_LIMIT later
