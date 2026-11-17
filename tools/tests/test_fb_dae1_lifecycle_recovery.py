@@ -1188,6 +1188,7 @@ class LinuxEffectiveArgvRecoveryTest(unittest.TestCase):
         with patch.object(process_lifecycle.os, "name", "nt"):
             self.assertEqual(ProcessLifecycle._effective_launch_argv(self.lifecycle, argv), argv)
 
+    @unittest.skipIf(os.name == "nt", "a POSIX game path")
     def test_the_podman_server_argv_is_its_container_argv(self) -> None:
         argv = [
             "/srv/DayZServer/DayZServer", "-server", "-config=/c/serverDZ.cfg",
