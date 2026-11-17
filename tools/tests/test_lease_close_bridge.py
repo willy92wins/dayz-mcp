@@ -641,7 +641,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
     def _client_census(self, source, *, active=(), conn_gen=7, mutant_clean=False, emote_mcp=False, emote_playing=False, mutant_emote=None, emote_pending=False, emote_queued=False, emote_no_mgr=False, look_release_pending=False, look_generation=3, look_floor=None, pause_queued_mark=None, pause_menu_mark=None, pause_queued=None, open_pause_menu=None, map_menu_mark=None, open_map_menu=None):
         # Translate the real client census builder against controller doubles.
         flags = {name: (name in active) for name in (
-            "vehicle_drive", "input_trigger", "player_move", "weapon", "look_at",
+            "vehicle_drive", "input_trigger", "player_move", "weapon", "look_at", "player_stance",
             "camera", "camera_path", "dialog", "action_hold", "samplers", "action_input_in_flight")}
         class _Ctl:
             def __init__(self, fn):
@@ -656,6 +656,8 @@ class LeaseCloseCensusTests(unittest.TestCase):
         player = type("P", (), {
             "GetNetworkID": lambda self, low, high: None,
             "MCPConnGenValue": lambda self: conn_gen,
+            "MCPStanceActiveNow": lambda self: flags.get("player_stance", False),
+            "MCPStanceCancel": lambda self, reason: None,
             "GetActionManager": lambda self: manager,
             "GetEmoteManager": lambda self: emote_mgr,
         })()
@@ -1012,7 +1014,8 @@ class LeaseCloseCensusTests(unittest.TestCase):
         source = _read(SERVER_PATH)
         body = method_body(source, "protected bool DispatchLeaseClose(MCPCommand command, MCPResult result)")
         for step in ("MCPBotControl.ShutdownAll(this)", "MCPSurvivorDrive.ShutdownAll(this)", "MCPMoveCloseServer(carried.move_id, carried.conn_gen)",
-                     "MCPWeaponCloseServer(carried.weapon_id, carried.conn_gen)", "MCPLookCloseServer(carried.look_id, carried.conn_gen)", "PostJobTimeout(job)",
+                     "MCPWeaponCloseServer(carried.weapon_id, carried.conn_gen)", "MCPLookCloseServer(carried.look_id, carried.conn_gen)",
+                     "MCPStanceCloseServer(carried.conn_gen)", "PostJobTimeout(job)",
                      "LeaseCloseExtensionStop()", "BuildLeaseCloseCensus(command.args)"):
             self.assertIn(step, body, step)
         self.assertIn('job.kind != "server_perf"', body, "server_perf is kept")
@@ -1020,7 +1023,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertIn('closeJob.kind = "lease_close";', body)
         self.assertIn("m_ElapsedS + 25.0", body)
         census = method_body(source, "protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)")
-        for name in ("bots", "survivor_drive", "infected_drive", "move_copy", "look_copy", "weapon", "jobs", "rpc_in_flight", "deletion_pending"):
+        for name in ("bots", "survivor_drive", "infected_drive", "move_copy", "look_copy", "stance_copy", "weapon", "jobs", "rpc_in_flight", "deletion_pending"):
             self.assertIn(f'"{name}"', census, name)
         self.assertIn("LeaseCloseExtensionCensus(census);", census)
         # H7: registration sits at the real send, not in Dispatch.
@@ -1283,6 +1286,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         flags = flags or {}
         state = {"bots": bool(flags.get("bots")), "move": bool(flags.get("move")),
                  "look": bool(flags.get("look")),
+                 "stance": bool(flags.get("stance")),
                  "weapon": bool(flags.get("weapon")), "hold": bool(flags.get("hold")),
                  "bots_reason": flags.get("bots_reason", "bot_stop_rejected")}
 
@@ -1318,6 +1322,9 @@ class LeaseCloseCensusTests(unittest.TestCase):
 
             def MCPLookActiveNow(self):
                 return state["look"]
+
+            def MCPStanceActiveNow(self):
+                return state["stance"]
 
             def GetActionManager(self):
                 return _Mgr()
@@ -1392,6 +1399,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
             ({"rpc_kinds": ("inventory_move",)}, "rpc_in_flight", "unverified"),
             ({"jobs": ("spawn",)}, "jobs", "residue"),
             ({"flags": {"move": True}}, "move_copy", "residue"),
+            ({"flags": {"stance": True}}, "stance_copy", "residue"),
             ({"flags": {"weapon": True}}, "weapon", "residue"),
             ({"flags": {"bots": True}}, "bots", "residue"),
             ({"flags": {"survivor_drive": True}}, "survivor_drive", "residue"),
@@ -2782,6 +2790,8 @@ class LeaseCloseDeliverable5Tests(unittest.TestCase):
             IsAlive=lambda: True,
             GetNetworkID=lambda low, high: None,
             MCPConnGenValue=lambda: 7,
+            MCPStanceActiveNow=lambda: False,
+            MCPStanceCancel=lambda reason: None,
             GetActionManager=lambda: mgr,
             GetEmoteManager=lambda: None,
             GetCurrentCommandID=lambda: 0,

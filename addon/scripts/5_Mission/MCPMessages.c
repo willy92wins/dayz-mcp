@@ -308,6 +308,14 @@ class MCPArgs
 	// player_view_set: first or third. An absent key reads "", which the
 	// bridge refuses (bad_args). Empty on every other command.
 	string view;
+	// player_set_stance: erect, crouch or prone. The tool always sends it;
+	// an absent key reads "", which the bridge refuses (bad_args).
+	string stance;
+	// player_set_stance: if true, request the vanilla unconsciousness
+	// juncture (DayZPlayerSyncJunctures.SendPlayerUnconsciousness, false)
+	// before the stance change. The tool always sends it; an absent key
+	// reads false, which refuses a still-unconscious body.
+	bool recover;
 	// inventory_move (fb-20261024-212316-17fa). 0 means no target.
 	int item_object_id;
 	int target_object_id;
@@ -1104,6 +1112,23 @@ class MCPPlayerGodmode
 	bool after;
 };
 
+
+// player_set_stance reply. requested is the closed stance name that was
+// queued (erect, crouch or prone). applied is true when the two-sided
+// apply was accepted (RPC/queue), not when GetMovementState already
+// matches: that only updates on the next CommandHandler. before is the
+// pre-apply snapshot. recover_requested echoes the request. The later
+// observed= line is printed from CommandHandler, not this reply. Primitives
+// only: no entity reference.
+class MCPPlayerSetStance
+{
+	string uid;
+	string requested;
+	bool applied;
+	bool recover_requested;
+	string before;
+};
+
 // player_kill reply. health_* is GetHealth("", "") around SetHealth(0).
 // alive_* is IsAlive() at those same reads. killed is true only when the body
 // is dead and its health is not above zero. godmode_policy_preserved is true
@@ -1654,6 +1679,8 @@ class MCPResult
 	ref MCPPlayerKill player_kill;
 	// bot_start / bot_stop reply. Unassigned on their refusals and on other commands.
 	ref MCPBotReport bot;
+	// player_set_stance reply. Unassigned on its refusals and on other commands.
+	ref MCPPlayerSetStance player_set_stance;
 	// player_heal reply. Unassigned on its refusals and on other commands.
 	ref MCPPlayerHeal player_heal;
 	// player_godmode reply. Unassigned on its refusals and on other commands.

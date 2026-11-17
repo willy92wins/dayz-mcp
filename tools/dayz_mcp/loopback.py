@@ -104,6 +104,7 @@ SERVER_COMMANDS = {
     "player_heal",
     "player_godmode",
     "player_kill",
+    "player_set_stance",
     "bot_start",
     "bot_stop",
     "object_anim",
@@ -1575,6 +1576,7 @@ SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG = 360.0
 # arg-contract hash.
 _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "player_kill",
+    "player_set_stance",
     "bot_start",
     "bot_stop",
     "object_resolve",
@@ -1861,6 +1863,16 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={
                 "godmode": _is_strict_bool,
                 "uid": _is_uid,
+            },
+        )
+    ),
+    "player_set_stance": _command_schema(
+        _schema_variant(
+            required=("uid", "stance", "recover"),
+            validators={
+                "uid": _is_uid,
+                "stance": _one_of("erect", "crouch", "prone"),
+                "recover": _is_strict_bool,
             },
         )
     ),
@@ -5331,24 +5343,6 @@ class ServerState:
         except Exception:
             return None
 
-    def _audit_fence(
-        self,
-        event: str,
-        command_id: int,
-        expected: str | None,
-        origin: str | None,
-        extra: dict[str, object] | None = None,
-    ) -> None:
-        payload: dict[str, object] = {
-            "event": event,
-            "command_id": command_id,
-            "expected_instance_prefix": instance_prefix(expected),
-            "origin_instance_prefix": instance_prefix(origin),
-        }
-        if extra:
-            payload.update(extra)
-        self._write_audit_payload(payload)
-
     def _flush_pending_audits(self) -> None:
         if not self._pending_audits:
             return
@@ -5940,12 +5934,29 @@ class ServerState:
         if self.version_validator is not None:
             with self._lock:
                 poll_version = self._poll_versions.get(peer)
+                client_polled = (
+                    cmd == "player_set_stance"
+                    and self._last_poll_at.get("client") is not None
+                    and any(
+                        binding.state == BINDING_BOUND
+                        and self._peer_covers(binding, "client")
+                        for binding in self._bindings.values()
+                    )
+                )
+                client_version = self._poll_versions.get("client") if client_polled else None
             state = self.version_validator(poll_version)
             if state in BLOCKED_VERSION_STATES:
                 blocked = self._version_block_fields(peer)
                 payload: dict[str, object] = {"error": "version_blocked", "state": state}
                 payload.update(blocked)
                 return 409, payload
+            if client_polled:
+                client_state = self.version_validator(client_version)
+                if client_state in BLOCKED_VERSION_STATES:
+                    blocked = self._version_block_fields("client")
+                    payload = {"error": "version_blocked", "state": client_state}
+                    payload.update(blocked)
+                    return 409, payload
 
         if cmd == "exec_enforce":
             return self._enqueue_exec_enforce(
@@ -8208,6 +8219,7 @@ class ServerState:
 
         owner_operation: tuple[ClientIdentity, str, int] | None = None
         discarded = False
+        same_instance_audit: dict[str, object] | None = None
         close_handled = False
         coordination = self.coordination
         deferred_quarantine = self._deferred_close_quarantine(any_close=True)
@@ -8251,21 +8263,26 @@ class ServerState:
                         "ok_value": None,
                         "discarded": True,
                     }
+                binding = self._bindings.get(target_instance)
                 if (
                     target_instance
                     and presented == target_instance
-                    and target_epoch != self._station_epoch
+                    and (binding is None or binding.epoch != target_epoch)
                 ):
-                    self._audit_fence(
-                        "late_result_same_instance",
-                        command_id,
-                        target_instance,
-                        instance,
-                        extra={
-                            "expected_epoch": target_epoch,
-                            "origin_epoch": self._station_epoch,
-                        },
-                    )
+                    same_instance_audit = {
+                        "event": "late_result_same_instance",
+                        "command_id": command_id,
+                        "expected_instance_prefix": instance_prefix(target_instance),
+                        "origin_instance_prefix": instance_prefix(instance),
+                        "expected_epoch": target_epoch,
+                        "origin_epoch": self._station_epoch,
+                        "binding_epoch": (
+                            binding.epoch if binding is not None else None
+                        ),
+                        "reason": "binding_epoch_changed",
+                        "decision": "accepted",
+                        "duration_s": 0.0,
+                    }
             kept_row = self._broker_rows.get(command_id)
             if retry and (
                 command_id in self._results
@@ -8288,6 +8305,8 @@ class ServerState:
                     "ok_value": None,
                     "duplicate": True,
                 }
+            if same_instance_audit is not None:
+                pending_fence_audits.append(same_instance_audit)
             # Past the fence and the retry check: the reaper's abandon for a
             # late-answered spawn. Its row leaves here, so the answer below is
             # discarded as unknown and its release is published at most once.
@@ -8320,6 +8339,8 @@ class ServerState:
                 if close_row.get("state") != "delivered":
                     # No poll delivered it, so the game did not run it.
                     discarded = True
+                    if same_instance_audit is not None:
+                        same_instance_audit["decision"] = "discarded"
                     self._lease_close_ignored += 1
                 else:
                     self._lease_closes.pop(command_id, None)
@@ -8335,6 +8356,8 @@ class ServerState:
                 )
                 if not known or (deadline is not None and t_result >= deadline):
                     discarded = True
+                    if same_instance_audit is not None:
+                        same_instance_audit["decision"] = "discarded"
                     self._fire_and_forget_ids.discard(command_id)
                     self._results.pop(command_id, None)
                     self._enqueued_at.pop(command_id, None)
