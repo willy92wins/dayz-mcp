@@ -765,12 +765,19 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         self.assertEqual((poll["bind"], poll["commands"]), (reading, []))
 
     def _without_a_pid(
-        self, state: loopback.ServerState, instance: str, peers: tuple[str, ...]
+        self,
+        state: loopback.ServerState,
+        instance: str,
+        peers: tuple[str, ...],
+        clock: FakeClock | None = None,
     ) -> None:
         """Each poll in peers comes once without a pid (its socket was not
         attributed this tick): it reads instance_unattributed and leaves the
         binding as it is (loopback.py:7635-7639): same object, state and
-        epoch."""
+        epoch. With clock, the clock first moves 0.01 s, so these polls are
+        newer than every poll before them."""
+        if clock is not None and peers:
+            clock.advance(0.01)
         for peer in peers:
             binding = state._bindings[instance]
             before = (binding.state, binding.epoch)
@@ -785,12 +792,13 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         pid: int,
         other: str | None,
         lose_pid: tuple[str, ...],
+        clock: FakeClock,
     ) -> None:
         """Just before a fresh answer: the poll of other (when given) reads
-        BOUND again, then the polls in lose_pid come without a pid."""
+        BOUND again, then the polls in lose_pid come without a pid, newer."""
         if other is not None:
             self._poll_reads(state, other, instance, pid, instance_fence_mod.BINDING_BOUND)
-        self._without_a_pid(state, instance, lose_pid)
+        self._without_a_pid(state, instance, lose_pid, clock)
 
     def _bound_again_with_a_fresh_command(
         self,
@@ -844,7 +852,9 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
         # A poll that presents the offline instance with a pid reads BOUND or
         # AMBIGUOUS. One that comes without a pid reads instance_unattributed
         # and leaves the binding as it is; it can come on either poll, or on
-        # both, in any state (lose_pid, just before each answer). Over those
+        # both, in any state (lose_pid: just before each answer, 0.01 s after
+        # the polls before it; with bound_again the old answer follows the
+        # fresh one with no poll between them). Over those
         # three readings and "not polled yet", the old answer comes in every
         # combination an offline binding that moved on can be in, and the
         # fresh answer in every one with the binding BOUND again; the test
@@ -956,13 +966,17 @@ class ResultSameInstanceAuditTest(unittest.TestCase):
                     pid,
                     conflict_peer if follow else None,
                     lose_pid,
+                    clock,
                 )
                 if answered_while == "bound_again":
+                    # The old answer comes right after the fresh one, with no
+                    # poll between them.
                     fresh = self._bound_again_with_a_fresh_command(
                         state, clock, instance, pid, peer, cmd, before_fresh
                     )
                     self.assertEqual(self._lines(audit_file), [])
-                self._without_a_pid(state, instance, lose_pid)
+                else:
+                    self._without_a_pid(state, instance, lose_pid, clock)
                 if role == "offline":
                     visited.add(self._readings(state, instance))
                 binding_epoch = state._bindings[instance].epoch
