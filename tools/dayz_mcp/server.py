@@ -3894,12 +3894,14 @@ class _LogWorkStop:
 
 
 class _LogWorkPool:
-    """Private bounded pool for wait_for(log_matches) synchronous work.
+    """Private bounded pool for wait_for(log_matches) status and file work.
 
-    At most ``max_workers`` workers may be live at once. A call acquires a slot
-    before submitting to the executor, and the slot stays held until the worker
-    actually finishes (or its pending submission is cancelled before starting),
-    so abandoned workers never starve the default executor or queue unboundedly.
+    At most ``max_workers`` slots may be live at once across async status tasks
+    and synchronous file workers. A call acquires a slot before starting its
+    task or submitting to the executor, and the slot stays held until the task
+    or worker actually finishes (or a pending submission is cancelled before
+    starting), so abandoned work never starves the default executor or queues
+    unboundedly.
     """
 
     def __init__(self, max_workers: int = _LOG_WORKER_LIMIT) -> None:
@@ -3907,6 +3909,7 @@ class _LogWorkPool:
         self._lock = threading.Lock()
         self._active = 0
         self._waiters: list[concurrent.futures.Future[bool]] = []
+        self._tasks: set[asyncio.Task[Any]] = set()
         self._executor: concurrent.futures.ThreadPoolExecutor | None = None
 
     def _ensure_executor(self) -> concurrent.futures.ThreadPoolExecutor:
@@ -4034,6 +4037,89 @@ class _LogWorkPool:
             raise payload
         return payload
 
+    async def run_async(
+        self,
+        fn: Callable[[], Awaitable[Any]],
+        deadline: float | None,
+        *,
+        unawaited: object = None,
+    ) -> Any:
+        awaited = False
+
+        def _close_unawaited() -> None:
+            if not awaited and inspect.iscoroutine(unawaited):
+                unawaited.close()
+
+        try:
+            await self._acquire_slot(deadline)
+            remaining: float | None = None
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    self._release_slot()
+                    raise TimeoutError
+        except BaseException:
+            _close_unawaited()
+            raise
+
+        slot_lock = threading.Lock()
+        slot_released = False
+
+        def _release_once() -> None:
+            nonlocal slot_released
+            with slot_lock:
+                if slot_released:
+                    return
+                slot_released = True
+            self._release_slot()
+
+        async def _runner() -> tuple[Any, float]:
+            nonlocal awaited
+            try:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError
+                awaitable = fn()
+                awaited = True
+                return await awaitable, time.monotonic()
+            finally:
+                _release_once()
+
+        def _on_done(done_task: asyncio.Task[Any]) -> None:
+            with self._lock:
+                self._tasks.discard(done_task)
+            _close_unawaited()
+            _release_once()
+            if not done_task.cancelled():
+                try:
+                    done_task.exception()
+                except BaseException:
+                    pass
+
+        coro = _runner()
+        try:
+            task: asyncio.Task[Any] = asyncio.create_task(coro)
+        except BaseException:
+            coro.close()
+            _close_unawaited()
+            _release_once()
+            raise
+        with self._lock:
+            self._tasks.add(task)
+        task.add_done_callback(_on_done)
+
+        shielded = asyncio.shield(task)
+        if remaining is None:
+            value, finished_at = await shielded
+        else:
+            value, finished_at = await asyncio.wait_for(
+                shielded, timeout=remaining
+            )
+        if deadline is not None and (
+            finished_at > deadline or time.monotonic() >= deadline
+        ):
+            raise TimeoutError
+        return value
+
 
 _LOG_WORK_POOL = _LogWorkPool(_LOG_WORKER_LIMIT)
 
@@ -4058,16 +4144,16 @@ async def _script_log_source(
     status_fn = getattr(runtime, "lifecycle_status", None)
     if status_fn is None:
         raise ToolError("no_active_run")
-    if inspect.iscoroutinefunction(status_fn):
-        coro = status_fn()
-        status = await coro if deadline is None else await _bound(coro, deadline)
+    if inspect.iscoroutinefunction(status_fn) or inspect.iscoroutinefunction(
+        getattr(status_fn, "__call__", None)
+    ):
+        status = await _LOG_WORK_POOL.run_async(status_fn, deadline)
     else:
         status = await _LOG_WORK_POOL.run(lambda _stop: status_fn(), deadline)
         if inspect.isawaitable(status):
-            status = (
-                await status
-                if deadline is None
-                else await _bound(status, deadline)
+            awaitable = status
+            status = await _LOG_WORK_POOL.run_async(
+                lambda: awaitable, deadline, unawaited=awaitable
             )
     if deadline is not None and time.monotonic() >= deadline:
         raise TimeoutError
