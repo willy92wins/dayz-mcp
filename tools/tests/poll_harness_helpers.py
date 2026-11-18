@@ -21,6 +21,7 @@ from tests.enforce_subset_helpers import (
     method_body,
     translate,
 )
+from tests.rest_holder_harness import make_forwarder, make_holder
 
 
 _MISSION = addon_root() / "scripts" / "5_Mission"
@@ -234,36 +235,12 @@ def _bridge_harness(name: str, *, source: str | None = None) -> dict:
         clock.ticks += command.duration_ticks
         ns["PostResult"](command)
 
-    class ClientRestHolder:
-        """MCPClientRestHolder (4_World): Hold dedups, Drop is idempotent."""
+    # Real Hold/Drop/Count and Disconnect/IsConnected/IsPollActive,
+    # translated from the addon sources (rest_holder_harness), not copies.
+    rest_holder = make_holder()
 
-        def __init__(self) -> None:
-            self.callbacks: list = []
-
-        def Hold(self, cb) -> None:
-            if cb is None:
-                return
-            if any(held is cb for held in self.callbacks):
-                return
-            self.callbacks.append(cb)
-
-        def Drop(self, cb) -> None:
-            for index, held in enumerate(self.callbacks):
-                if held is cb:
-                    del self.callbacks[index]
-                    return
-
-        def Count(self) -> int:
-            return len(self.callbacks)
-
-    rest_holder = ClientRestHolder()
-
-    def rest_forwarder(owner) -> SimpleNamespace:
-        return SimpleNamespace(
-            owner=owner,
-            Disconnect=lambda: None,
-            IsConnected=lambda: True,
-        )
+    def rest_forwarder(owner):
+        return make_forwarder(owner, bridge_source=source)
 
     ns.update(
         _S=WireString,

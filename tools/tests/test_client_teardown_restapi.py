@@ -110,14 +110,24 @@ class ClientTeardownRestApiTest(unittest.TestCase):
                     )
 
     def test_disconnected_sink_delivers_nothing(self) -> None:
-        for name in ("MCPClientPollCallback", "MCPClientResultCallback"):
+        for name, kind in (("MCPClientPollCallback", "poll"), ("MCPClientResultCallback", "result")):
             cls = _class(self.world, name)
             for event in ("OnSuccess", "OnError", "OnTimeout"):
                 with self.subTest(name=name, event=event):
                     body = _body(cls, f"override void {event}(")
                     guard = _body(body, "if (!m_Sink || !m_Sink.IsConnected())")
-                    # Only the holder drop above the guard may run.
-                    self.assertEqual(guard.strip(), "return;")
+                    # Only the holder drop above the guard and one log
+                    # line inside it may run; nothing is delivered.
+                    lines = [line.strip() for line in guard.strip().splitlines() if line.strip()]
+                    self.assertEqual(len(lines), 2, guard)
+                    self.assertTrue(lines[0].startswith('Print("[MCP-CLIENT] REST '), lines[0])
+                    self.assertIn(f"REST {kind} completed after shutdown: {event}", lines[0])
+                    self.assertIn(", dropped\");", lines[0])
+                    if event == "OnSuccess":
+                        self.assertIn('" + dataSize + " bytes, dropped"', lines[0])
+                    if event == "OnError":
+                        self.assertIn('" + errorCode + ", dropped"', lines[0])
+                    self.assertEqual(lines[1], "return;")
         forwarder = _class(self.client, "MCPClientRestForwarder")
         self.assertIn("class MCPClientRestForwarder : MCPClientRestSink", self.client_clean)
         self.assertEqual(_body(forwarder, "void Disconnect()").strip(), "m_Owner = null;")

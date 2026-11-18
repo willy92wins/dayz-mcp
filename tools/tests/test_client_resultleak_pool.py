@@ -35,6 +35,7 @@ from tests.enforce_subset_helpers import (
     python_source,
     translate,
 )
+from tests.rest_holder_harness import make_forwarder, make_holder
 
 CLIENT_PATH = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
 WORLD_PATH = addon_root() / "scripts" / "4_World" / "MCP_ClientRestCallbacks.c"
@@ -101,58 +102,9 @@ def _class_text(source: str) -> str:
     return text[start:end]
 
 
-class RestHolder:
-    """MCPClientRestHolder: Hold dedups by identity, Drop is idempotent."""
-
-    def __init__(self) -> None:
-        self.callbacks: list = []
-
-    def Hold(self, cb) -> None:
-        if cb is None:
-            return
-        if any(held is cb for held in self.callbacks):
-            return
-        self.callbacks.append(cb)
-
-    def Drop(self, cb) -> None:
-        for index, held in enumerate(self.callbacks):
-            if held is cb:
-                del self.callbacks[index]
-                return
-
-    def Count(self) -> int:
-        return len(self.callbacks)
-
-
-class RestSink:
-    """MCPClientRestForwarder: delegates to the bridge until Disconnect."""
-
-    def __init__(self) -> None:
-        self.owner: object = None
-
-    def Disconnect(self) -> None:
-        self.owner = None
-
-    def IsConnected(self) -> bool:
-        return self.owner is not None
-
-    def IsPollActive(self, cb) -> bool:
-        return False
-
-    def SinkReleaseCallback(self, cb) -> None:
-        self.owner.ReleaseCallback(cb)
-
-    def SinkRecycleResultCallback(self, cb) -> None:
-        self.owner.RecycleResultCallback(cb)
-
-    def SinkOnResultSuccess(self, data, size) -> None:
-        self.owner.OnResultSuccess(data, size)
-
-    def SinkOnResultError(self, code) -> None:
-        self.owner.OnResultError(code)
-
-    def SinkOnResultTimeout(self) -> None:
-        self.owner.OnResultTimeout()
+# MCPClientRestHolder and MCPClientRestForwarder are the real bodies,
+# translated from the addon sources by tests.rest_holder_harness (the
+# hand-written copies here let an inverted Drop comparison stay green).
 
 
 def _without_logs(source: str, signature: str) -> str:
@@ -237,8 +189,9 @@ class ClientModel:
         self.allocations: list[Callback] = []
         self.serializable = True
         self.terminal_posts: list[int] = []
-        self.holder = RestHolder()
-        self.sink = RestSink()
+        self.printed: list[str] = []
+        self.holder = make_holder(callback_source)
+        self.sink = make_forwarder(None, bridge_source=source)
         model = self
 
         class Factory:
@@ -332,6 +285,9 @@ class ClientModel:
             name: self.ns[name] for name in ("_S", "_string_copy", "_bounded", "_vector")
         }
         self.helpers["MCPClientRestHolder"] = self.holder
+        self.helpers["Print"] = lambda line: self.printed.append(
+            line.text if isinstance(line, EnforceString) else str(line)
+        )
         self.ctx = Rest(self)
         self.ns["m_Ctx"] = self.ctx
         self.ns["m_PollCtx"] = self.ctx

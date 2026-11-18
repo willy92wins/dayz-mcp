@@ -124,6 +124,7 @@ class MCPClientPollCallback : RestCallback
 		MCPClientRestHolder.Drop(this);
 		if (!m_Sink || !m_Sink.IsConnected())
 		{
+			Print("[MCP-CLIENT] REST poll completed after shutdown: OnSuccess " + dataSize + " bytes, dropped");
 			return;
 		}
 		m_Sink.SinkReleaseCallback(this);
@@ -140,6 +141,7 @@ class MCPClientPollCallback : RestCallback
 		MCPClientRestHolder.Drop(this);
 		if (!m_Sink || !m_Sink.IsConnected())
 		{
+			Print("[MCP-CLIENT] REST poll completed after shutdown: OnError code=" + errorCode + ", dropped");
 			return;
 		}
 		m_Sink.SinkReleaseCallback(this);
@@ -157,6 +159,7 @@ class MCPClientPollCallback : RestCallback
 		MCPClientRestHolder.Drop(this);
 		if (!m_Sink || !m_Sink.IsConnected())
 		{
+			Print("[MCP-CLIENT] REST poll completed after shutdown: OnTimeout, dropped");
 			return;
 		}
 		m_Sink.SinkReleaseCallback(this);
@@ -195,6 +198,7 @@ class MCPClientResultCallback : RestCallback
 		MCPClientRestHolder.Drop(this);
 		if (!m_Sink || !m_Sink.IsConnected())
 		{
+			Print("[MCP-CLIENT] REST result completed after shutdown: OnSuccess " + dataSize + " bytes, dropped");
 			return;
 		}
 		m_Sink.SinkReleaseCallback(this);
@@ -209,6 +213,7 @@ class MCPClientResultCallback : RestCallback
 		MCPClientRestHolder.Drop(this);
 		if (!m_Sink || !m_Sink.IsConnected())
 		{
+			Print("[MCP-CLIENT] REST result completed after shutdown: OnError code=" + errorCode + ", dropped");
 			return;
 		}
 		m_Sink.SinkReleaseCallback(this);
@@ -222,6 +227,7 @@ class MCPClientResultCallback : RestCallback
 		MCPClientRestHolder.Drop(this);
 		if (!m_Sink || !m_Sink.IsConnected())
 		{
+			Print("[MCP-CLIENT] REST result completed after shutdown: OnTimeout, dropped");
 			return;
 		}
 		m_Sink.SinkReleaseCallback(this);
