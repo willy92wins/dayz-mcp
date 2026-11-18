@@ -36,6 +36,17 @@ What each class pins (C6 is the rest of the wait_for suite, left untouched):
 * C7 _profile_dirs_from_runs loads the sealed policy at most once per call,
   returns what the per-run algorithm returned, and still fails closed.
 
+Added after the review of the first implementation:
+
+* P1 #1 listing the profile folders is bounded by the deadline too, before
+  polling (lines and launch scans) and on a later probe.
+* P1 #2 resolutions abandoned at their deadline do not starve the event
+  loop's default executor, and at most 2 of their workers are live at once.
+* P2 #3 a profiles folder created during the wait is read on a later probe,
+  with no other lifecycle_status call or sealed-policy load.
+* P2 #4 scanned.truncated is true when lines the call asked for were lost and
+  false after a complete read; file_matches does not publish it.
+
 Seams these tests rely on, shared with the rest of the suite: the deadline and
 elapsed_s come from time.monotonic and the wait sleeps between probes with
 asyncio.sleep (the fake clocks patch both, as _ExactWaitClock users do); a
@@ -92,6 +103,8 @@ SLOW_STATUS_S = 4.0
 # load is synchronous code (dayz_test_tool.py:4352-4358): asyncio can bound it
 # only if it runs off the event loop's thread.
 SLOW_LOAD_S = 4.0
+# How long a slow listing of a profiles folder blocks the thread it runs on.
+SLOW_LIST_S = 4.0
 # Measured on the live host on 2026-11-18: one sealed-policy load, 0.28-0.35 s.
 MEASURED_LOAD_S = 0.3
 # Measured on the same day: EXITED rows in LIVE's store, one mod, one profiles.
@@ -127,13 +140,16 @@ def _append(path: Path, *lines: str) -> None:
 class _Project:
     """One project as its sealed policy names it, with a live launch's logs."""
 
-    def __init__(self, root: Path, mod: str = "ExampleMod") -> None:
+    def __init__(
+        self, root: Path, mod: str = "ExampleMod", *, with_client: bool = True
+    ) -> None:
         self.mod = mod
         self.dev_root = root / f"{mod}_Suite"
         self.server = self.dev_root / "_server" / _leaf()
         self.client = self.dev_root / "_client" / _leaf()
         self.server.mkdir(parents=True)
-        self.client.mkdir(parents=True)
+        if with_client:
+            self.client.mkdir(parents=True)
         self.rpt = self.server / "DayZDiag_x64_2026-11-18_10-00-00.RPT"
         self.script_log = self.server / "script_2026-11-18_10-00-00.log"
         _append(self.rpt, "10:00:00 Mission read.", "10:00:01 Server started.")
@@ -300,8 +316,16 @@ class _SealedPolicyStore:
         self.bundles = 0
         self.release = threading.Event()
         self.blocked_threads: list[int] = []
+        self.max_in_flight = 0
         self._in_flight = 0
         self._lock = threading.Lock()
+
+    @property
+    def in_flight(self) -> int:
+        """Threads inside a blocked load right now."""
+
+        with self._lock:
+            return self._in_flight
 
     def try_open_approved_launcher(self, launcher_id: str) -> _OpenedLauncher:
         with self._lock:
@@ -309,6 +333,7 @@ class _SealedPolicyStore:
             blocked = self.block_s > 0 and self.opens >= self.block_from
             if blocked:
                 self._in_flight += 1
+                self.max_in_flight = max(self.max_in_flight, self._in_flight)
                 self.blocked_threads.append(threading.get_ident())
         if self.clock is not None:
             self.clock.now += self.load_cost_s
@@ -381,6 +406,65 @@ class _PollClock(_ExactWaitClock):
             patch("dayz_mcp.server.time.monotonic", self),
             patch("dayz_mcp.server.asyncio.sleep", self.sleep),
         ):
+            yield self
+
+
+class _SlowListing:
+    """log_tail.resolve_log_files that blocks its thread, then lists for real.
+
+    _current_launch_logs looks the lister up on log_tail at call time
+    (launch_logs.py:99), so every listing of a profiles folder for its logs
+    passes here, on whatever thread runs it. A listing that starts ``after_s``
+    or more after ``started_at`` blocks for ``block_s``, synchronously, as a
+    slow disk or a busy synced folder would; ``release`` cuts the block short
+    and ``drained`` says when no listing is left inside the fake.
+    """
+
+    def __init__(self, block_s: float, *, after_s: float = 0.0) -> None:
+        self._real = log_tail.resolve_log_files
+        self.block_s = block_s
+        self.after_s = after_s
+        self.started_at: float | None = None
+        self.release = threading.Event()
+        self.listings = 0
+        self.blocked_threads: list[int] = []
+        self._in_flight = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, profiles_dir: str) -> list[str]:
+        with self._lock:
+            self.listings += 1
+            blocked = (
+                self.started_at is not None
+                and time.monotonic() - self.started_at >= self.after_s
+            )
+            if blocked:
+                self._in_flight += 1
+                self.blocked_threads.append(threading.get_ident())
+        try:
+            if blocked:
+                self.release.wait(self.block_s)
+            return self._real(profiles_dir)
+        finally:
+            if blocked:
+                with self._lock:
+                    self._in_flight -= 1
+
+    async def drained(self, timeout_s: float) -> bool:
+        """Whether every blocked listing left the fake within ``timeout_s``."""
+
+        deadline = time.monotonic() + timeout_s
+        while True:
+            with self._lock:
+                if self._in_flight == 0:
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.01)
+
+    @contextmanager
+    def installed(self) -> Iterator["_SlowListing"]:
+        with patch.object(log_tail, "resolve_log_files", self):
             yield self
 
 
@@ -593,6 +677,75 @@ class SlowResolutionKeepsTheDeadlineTest(
                     # Only the resolution before polling is owed by every design;
                     # one that resolves once per call never makes a later load.
                     self.assertEqual(result.get("last_error"), LOG_PATHS_TIMEOUT)
+
+    async def _timed_with_a_slow_listing(
+        self, listing: _SlowListing, **kwargs: Any
+    ) -> tuple[float, dict[str, Any], bool]:
+        """Run the wait with quick status and policy and ``listing``'s slow lister.
+
+        Returns the real elapsed time, the answer, and whether a blocked
+        listing ran on the event loop's own thread. A listing left blocked in a
+        worker thread is released and drained here, with the fakes installed.
+        """
+
+        runtime = _StatusRuntime(_status_rows([_launched_run(self.project)]))
+        store = _SealedPolicyStore(self.project.policy)
+        loop_thread = threading.get_ident()
+        self.addCleanup(listing.release.set)
+        with store.installed(), listing.installed():
+            started = time.monotonic()
+            listing.started_at = started
+            try:
+                result = await server.execute_wait_for(
+                    runtime, "log_matches", pattern=NEEDLE, **kwargs
+                )
+            finally:
+                elapsed = time.monotonic() - started
+                listing.release.set()
+                drained = await listing.drained(5.0)
+        self.assertTrue(
+            drained, "a thread was still inside a listing 5 s after its release"
+        )
+        return elapsed, result, loop_thread in listing.blocked_threads
+
+    @slow_test
+    async def test_a_slow_listing_before_polling_stops_at_the_deadline(self) -> None:
+        # Review P1 #1: status and policy answer at once, listing the profile
+        # folders blocks. The listing is part of the log path resolution, so
+        # it ends the call like any other slow part of it; in the launch scan
+        # a match read after the deadline is not a success.
+        _append(self.project.script_log, f"SCRIPT : {NEEDLE}")
+        for scan, kwargs in (
+            ("lines", {"lookback_lines": 200}),
+            ("launch", {"lookback_from": "launch"}),
+        ):
+            with self.subTest(scan=scan):
+                listing = _SlowListing(SLOW_LIST_S)
+                elapsed, result, on_loop = await self._timed_with_a_slow_listing(
+                    listing, timeout_s=self.TIMEOUT_S, **kwargs
+                )
+                where = "the event loop's thread" if on_loop else "a worker thread"
+                cause = f"a profiles listing blocked {SLOW_LIST_S:g} s on {where}"
+                self._assert_inside_the_deadline(
+                    elapsed, result, self.TIMEOUT_S, cause
+                )
+                self.assertEqual(result.get("last_error"), LOG_PATHS_TIMEOUT)
+
+    @slow_test
+    async def test_a_slow_listing_on_a_later_probe_does_not_stretch_the_call(
+        self,
+    ) -> None:
+        # Review P1 #1, second half: listings in the first 0.25 s (before
+        # polling and the first probe) are quick; a later one, such as the
+        # re-listing of the known profile folders on the second probe, blocks.
+        timeout_s = 1.5
+        listing = _SlowListing(SLOW_LIST_S, after_s=0.25)
+        elapsed, result, on_loop = await self._timed_with_a_slow_listing(
+            listing, timeout_s=timeout_s, poll_interval_s=0.5, lookback_lines=0
+        )
+        where = "the event loop's thread" if on_loop else "a worker thread"
+        cause = f"a later listing blocked {SLOW_LIST_S:g} s on {where}"
+        self._assert_inside_the_deadline(elapsed, result, timeout_s, cause)
 
 
 class ToolDescriptionNamesTheResolutionTimeoutTest(unittest.TestCase):
@@ -1072,6 +1225,324 @@ class OneSealedPolicyLoadPerCallTest(unittest.TestCase):
             "earlier call loaded",
         )
         self.assertEqual(third, expected)
+
+
+class AbandonedResolutionsTest(_ProjectCase, unittest.IsolatedAsyncioTestCase):
+    """Review P1 #2: a resolution abandoned at its deadline holds no shared thread.
+
+    Every sealed-policy load blocks. A run of short waits, more than any
+    default executor has threads (min(32, cpu count + 4)), gives up at its
+    deadline one after the other. The event loop's default executor must
+    still run an unrelated job; the workers inside the blocked load stay
+    within MAX_LIVE_WORKERS, because an abandoned resolution keeps its slot
+    until its worker really finishes; and once the loads are released the
+    next wait resolves again, so no slot is kept for good.
+    """
+
+    CALLS = 40
+    BLOCK_S = 6.0
+    SHORT_TIMEOUT_S = 0.05
+    MAX_LIVE_WORKERS = 2
+
+    @slow_test
+    async def test_abandoned_resolutions_do_not_starve_the_default_executor(
+        self,
+    ) -> None:
+        _append(self.project.script_log, f"SCRIPT : {NEEDLE}")
+        store = _SealedPolicyStore(self.project.policy, block_s=self.BLOCK_S)
+        self.addCleanup(store.release.set)
+        runtime = _StatusRuntime(_status_rows([_launched_run(self.project)]))
+        answers: list[tuple[float, dict[str, Any]]] = []
+        with store.installed():
+            try:
+                for _ in range(self.CALLS):
+                    started = time.monotonic()
+                    result = await server.execute_wait_for(
+                        runtime,
+                        "log_matches",
+                        pattern=NEEDLE,
+                        timeout_s=self.SHORT_TIMEOUT_S,
+                        lookback_lines=200,
+                    )
+                    answers.append((time.monotonic() - started, result))
+                live = store.in_flight
+                probe_started = time.monotonic()
+                try:
+                    probe = await asyncio.wait_for(
+                        asyncio.to_thread(lambda: 1), timeout=1.0
+                    )
+                except TimeoutError:
+                    probe = None
+                probe_s = time.monotonic() - probe_started
+            finally:
+                store.release.set()
+                drained = await store.drained(10.0)
+            store.block_s = 0.0
+            recovered = await server.execute_wait_for(
+                runtime,
+                "log_matches",
+                pattern=NEEDLE,
+                timeout_s=2.0,
+                lookback_lines=200,
+            )
+
+        late = [
+            (index, round(elapsed, 2))
+            for index, (elapsed, _result) in enumerate(answers)
+            if elapsed > self.SHORT_TIMEOUT_S + DEADLINE_SLACK_S
+        ]
+        wrong = [
+            (index, result.get("satisfied"), result.get("last_error"))
+            for index, (_elapsed, result) in enumerate(answers)
+            if result.get("satisfied") or result.get("last_error") != LOG_PATHS_TIMEOUT
+        ]
+        self.assertEqual(late, [], "short waits overran their deadline (call, s)")
+        self.assertEqual(
+            wrong, [], "short waits on a blocked load must end in log_paths_timeout"
+        )
+        self.assertEqual(
+            probe,
+            1,
+            f"after {self.CALLS} waits gave up on a blocked sealed-policy load, an "
+            f"unrelated asyncio.to_thread job did not run within 1 s "
+            f"({probe_s:.2f} s): {live} workers were still inside the load",
+        )
+        self.assertLessEqual(
+            store.max_in_flight,
+            self.MAX_LIVE_WORKERS,
+            f"{store.max_in_flight} workers were inside the blocked sealed-policy "
+            "load at once; an abandoned resolution keeps its slot until its worker "
+            f"finishes, so at most {self.MAX_LIVE_WORKERS} may be live",
+        )
+        self.assertTrue(
+            drained, "a worker was still inside the load 10 s after its release"
+        )
+        self.assertTrue(
+            recovered["satisfied"],
+            "once the blocked loads were released the next wait did not resolve: "
+            f"last_error={recovered.get('last_error')!r}",
+        )
+
+
+class ProfileFolderCreatedDuringTheWaitTest(unittest.IsolatedAsyncioTestCase):
+    """Review P2 #3: a side's profiles folder created during the wait is read.
+
+    Only _server/<leaf> exists when the wait starts; the client creates
+    _client/<leaf> and its script log after the second poll. A later probe
+    finds it from the run's approved folders, before the 5 s refresh, with no
+    other lifecycle_status call and no other sealed-policy load. role is left
+    unset: with role="client" a run that has no client folder yet answers
+    profile_unresolved at once (tests/test_fb_33c3_wait_for_role.py:148-155).
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.project = _Project(Path(temp.name), with_client=False)
+
+    async def test_a_client_folder_created_during_the_wait_is_read(self) -> None:
+        clock = _PollClock()
+        store = _SealedPolicyStore(self.project.policy)
+        rows = _status_rows([_launched_run(self.project)])
+        runtime = _StatusRuntime(rows, clock=clock)
+        new_log = self.project.client / "script_2026-11-18_10-00-20.log"
+        at_creation: dict[str, int] = {}
+
+        def client_starts() -> None:
+            self.project.client.mkdir(parents=True)
+            _append(new_log, f"SCRIPT : {NEEDLE}", "SCRIPT : client ready")
+            at_creation["status_calls"] = runtime.status_calls
+            at_creation["loads"] = store.opens
+
+        clock.between_probes.extend([lambda: None, client_starts])
+        with store.installed(), clock.installed():
+            result = await server.execute_wait_for(
+                runtime,
+                "log_matches",
+                pattern=NEEDLE,
+                timeout_s=4.0,
+                poll_interval_s=0.5,
+                lookback_lines=0,
+            )
+
+        summary = (
+            f"probes={result['probes']}, scanned files={_file_names(result)}, "
+            f"lifecycle_status calls={runtime.status_calls}, "
+            f"sealed-policy loads={store.opens}, at creation={at_creation}"
+        )
+        self.assertTrue(
+            result["satisfied"],
+            "the client profiles folder created during the wait was never read "
+            f"before the deadline: {summary}",
+        )
+        self.assertIn("_client/" + new_log.name, _file_names(result))
+        self.assertEqual(
+            runtime.status_calls,
+            at_creation["status_calls"],
+            f"the new folder took another lifecycle_status call: {summary}",
+        )
+        self.assertEqual(
+            store.opens,
+            at_creation["loads"],
+            f"the new folder took another sealed-policy load: {summary}",
+        )
+
+
+class TruncatedSaysWhetherLinesWereLostTest(
+    _ProjectCase, unittest.IsolatedAsyncioTestCase
+):
+    """Review P2 #4: scanned.truncated is true exactly when lines asked for were lost.
+
+    A lookback window cut by the tail byte cap loses lines the call asked for;
+    a complete small read loses none, which an "always true" report would get
+    wrong. In the lines scan the field is part of the answer and must be false
+    there; the launch and marker scans may leave it out when nothing was lost.
+    """
+
+    async def _wait(self, pattern: str = NEEDLE, **kwargs: Any) -> dict[str, Any]:
+        clock = _PollClock()
+        store = _SealedPolicyStore(self.project.policy)
+        rows = _status_rows([_launched_run(self.project)])
+        runtime = _StatusRuntime(rows, clock=clock)
+        with store.installed(), clock.installed():
+            return await server.execute_wait_for(
+                runtime,
+                "log_matches",
+                pattern=pattern,
+                timeout_s=2.0,
+                poll_interval_s=1.0,
+                **kwargs,
+            )
+
+    async def test_a_lookback_window_cut_by_the_byte_cap_is_reported(self) -> None:
+        # The needle, then 199 lines of 2 KiB: the last 200 lines take about
+        # 400 KiB and the rewind reads only the last log_tail.MAX_TAIL_BYTES.
+        long_lines = [
+            f"SCRIPT : long {index:03d} " + "y" * 2030 for index in range(199)
+        ]
+        _append(self.project.script_log, f"SCRIPT : {NEEDLE}", *long_lines)
+        result = await self._wait(lookback_lines=200)
+
+        scanned = result["scanned"]
+        self.assertTrue(
+            result["satisfied"] or scanned.get("truncated") is True,
+            "lookback_lines=200 asked for the needle's line, the read lost it and "
+            f"scanned says truncated={scanned.get('truncated')!r} "
+            f"(lines_total={scanned.get('lines_total')})",
+        )
+
+    async def test_a_complete_read_is_not_called_truncated(self) -> None:
+        _append(self.project.script_log, f"SCRIPT : {NEEDLE}")
+        path = str(self.project.script_log)
+        at_end = log_tail.encode_marker(
+            {path: log_tail.read_since(path, None)["marker"]}
+        )
+        cases = (
+            ("lines, matched", NEEDLE, {"lookback_lines": 200}, True),
+            ("lines, no match", "ABSENT-ON-PURPOSE", {"lookback_lines": 200}, True),
+            ("launch, matched", NEEDLE, {"lookback_from": "launch"}, False),
+            ("marker, no match", NEEDLE, {"marker": at_end}, False),
+        )
+        for label, pattern, kwargs, field_required in cases:
+            with self.subTest(case=label):
+                scanned = (await self._wait(pattern, **kwargs))["scanned"]
+                if field_required:
+                    self.assertIs(
+                        scanned.get("truncated"),
+                        False,
+                        f"nothing was lost, so truncated must be false: {scanned}",
+                    )
+                else:
+                    self.assertIs(scanned.get("truncated", False), False, str(scanned))
+
+
+_FILE_SESSION = "session-file-matches-0001"
+_FILE_LEASE = "lease-file-matches"
+
+
+class _LeaseRuntime:
+    """What file_matches touches: the held lease, its heartbeat, one owned run."""
+
+    def __init__(self, run: dict[str, Any]) -> None:
+        self.identity = SimpleNamespace(session_id=_FILE_SESSION)
+        self.tool_lock = asyncio.Lock()
+        self._control = SimpleNamespace(
+            active_lease_token="token", active_lease_id=_FILE_LEASE
+        )
+        self._run = run
+
+    async def lifecycle_status(self) -> dict[str, Any]:
+        return {"runs": [dict(self._run)]}
+
+    async def session_heartbeat(self, token: str) -> dict[str, Any]:
+        return {"ok": True}
+
+
+class FileMatchesScanReportTest(unittest.IsolatedAsyncioTestCase):
+    """Review P2 #4, file_matches: scanned.truncated is a log_matches field.
+
+    file_matches does not carry a cut read into its report, so it does not
+    publish the field at all, matched or timed out. Reporting it correctly
+    would be the other way out; this pins the omission.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        leaf = _leaf()
+        self.server = root / "_server" / leaf
+        self.server.mkdir(parents=True)
+        (root / "_client" / leaf).mkdir(parents=True)
+        self.run = {
+            "run_id": "run-file-matches",
+            "state": "RUNNING",
+            "owner_session_id": _FILE_SESSION,
+            "owner_lease_id": _FILE_LEASE,
+            "mod": "@ExampleMod",
+            "profiles": str(self.server),
+            "processes": [{"role": "server", "pid": 1}, {"role": "client", "pid": 2}],
+        }
+
+        def folder(policy: Any, role: str, _roots: Any, run: Any = None) -> str:
+            side = "_client" if role in {"client", "offline"} else "_server"
+            return str(Path(policy.dev_root) / side / leaf)
+
+        policy = SimpleNamespace(mod="ExampleMod", dev_root=str(root))
+        roots = {"server": "_server", "client": "_client"}
+        for name, kwargs in (
+            ("_close_project_policy", {"return_value": policy}),
+            ("_start_role_roots", {"return_value": roots}),
+            ("_close_role_folder", {"side_effect": folder}),
+        ):
+            patcher = patch.object(dayz_test_tool, name, **kwargs)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    async def test_file_matches_does_not_publish_truncated(self) -> None:
+        _append(self.server / "mission.log", "mission start", f"SCRIPT : {NEEDLE}")
+        for label, pattern in (("matched", NEEDLE), ("timed out", "ABSENT-ON-PURPOSE")):
+            with self.subTest(case=label):
+                clock = _PollClock()
+                with clock.installed():
+                    result = await server.execute_wait_for(
+                        _LeaseRuntime(self.run),
+                        "file_matches",
+                        pattern=pattern,
+                        profile_file="mission.log",
+                        timeout_s=2.0,
+                        poll_interval_s=0.5,
+                        lookback_lines=50,
+                    )
+                self.assertEqual(result["satisfied"], label == "matched")
+                self.assertNotIn(
+                    "truncated",
+                    result["scanned"],
+                    "file_matches publishes scanned.truncated without tracking a cut "
+                    f"read: {result['scanned']}",
+                )
 
 
 if __name__ == "__main__":
