@@ -156,14 +156,17 @@ def _recorded_anchor_in_sealed_project(run: dict[str, Any]) -> bool:
 
 
 def _profile_dirs_from_runs(runs: list[dict[str, Any]]) -> list[str]:
+    from dayz_mcp.dayz_test_tool import _close_policy_memo_scope
+
     allowed: list[str] = []
-    for item in runs:
-        profiles = item.get("profiles")
-        if not log_tail.is_allowed_profiles_dir(profiles):
-            continue
-        if not _recorded_anchor_in_sealed_project(item):
-            continue
-        allowed.append(str(profiles))
+    with _close_policy_memo_scope():
+        for item in runs:
+            profiles = item.get("profiles")
+            if not log_tail.is_allowed_profiles_dir(profiles):
+                continue
+            if not _recorded_anchor_in_sealed_project(item):
+                continue
+            allowed.append(str(profiles))
     return _sibling_profile_dirs(sorted(set(allowed)))
 
 
@@ -302,7 +305,7 @@ def _log_markers_with_lookback(
 
 def _new_log_lines(
     paths: list[str], markers: dict[str, log_tail.TailMarker]
-) -> tuple[list[str], dict[str, log_tail.TailMarker], dict[str, int]]:
+) -> tuple[list[str], dict[str, log_tail.TailMarker], dict[str, int], bool]:
     """New lines since ``markers``, plus how many each file contributed.
 
     A path missing from the returned counts could not be read at all. That is
@@ -312,6 +315,7 @@ def _new_log_lines(
     lines: list[str] = []
     updated = dict(markers)
     counts: dict[str, int] = {}
+    truncated = False
     for path in paths:
         try:
             result = log_tail.read_since(path, markers.get(path))
@@ -320,7 +324,8 @@ def _new_log_lines(
         updated[path] = result["marker"]
         lines.extend(result["lines"])
         counts[path] = len(result["lines"])
-    return lines, updated, counts
+        truncated = truncated or bool(result["truncated"])
+    return lines, updated, counts, truncated
 
 
 def _log_label(path: str) -> str:
@@ -355,6 +360,7 @@ def _scanned_report(
     unreadable: set[str],
     lookback_from: str,
     scan_truncated: bool,
+    truncated: bool = False,
 ) -> dict[str, Any]:
     """What wait_for actually read, so a no-match is visible as a no-match.
 
@@ -376,6 +382,7 @@ def _scanned_report(
         "lookback_from": lookback_from,
         "files": files,
         "lines_total": sum(int(item["lines"]) for item in files),
+        "truncated": truncated,
     }
     if lookback_from == "launch":
         report["scan_truncated"] = scan_truncated
