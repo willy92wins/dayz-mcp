@@ -320,12 +320,14 @@ from dayz_mcp.world_results import (
     _spawn_batch_reply,
     _world_time_reply,
 )
+from dayz_mcp import launch_logs
 from dayz_mcp.launch_logs import (
     _coerce_logs_since_marker,
     _current_launch_logs,
     _log_label,
     _log_markers_at_end,
     _log_markers_with_lookback,
+    _log_markers_with_lookback_status,
     _marker_rewound,
     _marker_rewound_handle,
     _new_log_lines,
@@ -3859,61 +3861,269 @@ _CAPTURE_LIVE_RUN_STATES = frozenset({"STARTING", "RUNNING", "RUNNING_IDLE", "ST
 
 _LOG_PATHS_TIMEOUT = "log_paths_timeout"
 _LOG_RESOLUTION_REFRESH_S = 5.0
+_LOG_WORKER_LIMIT = 2
+
+
+class _LogSlotTimeoutError(TimeoutError):
+    """No worker slot became free before the call's deadline."""
+
+
+class _LogWorkStop:
+    """Cooperative stop signal for a wait_for(log_matches) worker."""
+
+    def __init__(self, deadline: float | None) -> None:
+        self._event = threading.Event()
+        self._deadline = deadline
+
+    def stop(self) -> None:
+        self._event.set()
+
+    @property
+    def stopped(self) -> bool:
+        return self._event.is_set() or (
+            self._deadline is not None and time.monotonic() >= self._deadline
+        )
+
+    def wait(self, timeout: float) -> bool:
+        if self._deadline is None:
+            return self._event.wait(max(timeout, 0.0))
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0.0:
+            return True
+        return self._event.wait(min(max(timeout, 0.0), remaining))
+
+
+class _LogWorkPool:
+    """Private bounded pool for wait_for(log_matches) synchronous work.
+
+    At most ``max_workers`` workers may be live at once. A call acquires a slot
+    before submitting to the executor, and the slot stays held until the worker
+    actually finishes (or its pending submission is cancelled before starting),
+    so abandoned workers never starve the default executor or queue unboundedly.
+    """
+
+    def __init__(self, max_workers: int = _LOG_WORKER_LIMIT) -> None:
+        self._max_workers = max_workers
+        self._lock = threading.Lock()
+        self._active = 0
+        self._waiters: list[concurrent.futures.Future[bool]] = []
+        self._executor: concurrent.futures.ThreadPoolExecutor | None = None
+
+    def _ensure_executor(self) -> concurrent.futures.ThreadPoolExecutor:
+        executor = self._executor
+        if executor is not None:
+            return executor
+        with self._lock:
+            if self._executor is None:
+                # Avoid the dayz-mcp- prefix: fixture teardown joins threads
+                # with that prefix, while these workers stay up for the process.
+                self._executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=self._max_workers,
+                    thread_name_prefix="wait-for-log",
+                )
+            return self._executor
+
+    def _release_slot(self) -> None:
+        with self._lock:
+            while self._waiters:
+                waiter = self._waiters.pop(0)
+                try:
+                    waiter.set_result(True)
+                    return
+                except concurrent.futures.InvalidStateError:
+                    continue
+            self._active -= 1
+
+    async def _acquire_slot(self, deadline: float | None) -> None:
+        if deadline is not None and deadline - time.monotonic() <= 0.0:
+            raise _LogSlotTimeoutError
+        waiter: concurrent.futures.Future[bool] | None = None
+        with self._lock:
+            if self._active < self._max_workers and not self._waiters:
+                self._active += 1
+                return
+            waiter = concurrent.futures.Future()
+            self._waiters.append(waiter)
+        try:
+            wrapped = asyncio.wrap_future(waiter)
+            if deadline is None:
+                await wrapped
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    raise _LogSlotTimeoutError
+                try:
+                    await asyncio.wait_for(wrapped, timeout=remaining)
+                except TimeoutError as exc:
+                    raise _LogSlotTimeoutError from exc
+        except BaseException:
+            handed_off = False
+            with self._lock:
+                waiter.cancel()
+                try:
+                    self._waiters.remove(waiter)
+                except ValueError:
+                    pass
+                if waiter.done() and not waiter.cancelled():
+                    handed_off = True
+            if handed_off:
+                self._release_slot()
+            raise
+
+    async def run(
+        self, fn: Callable[[_LogWorkStop], Any], deadline: float | None
+    ) -> Any:
+        await self._acquire_slot(deadline)
+        if deadline is not None and deadline - time.monotonic() <= 0.0:
+            self._release_slot()
+            raise TimeoutError
+        stop = _LogWorkStop(deadline)
+        slot_lock = threading.Lock()
+        slot_released = False
+
+        def _release_once(_done: object = None) -> None:
+            nonlocal slot_released
+            with slot_lock:
+                if slot_released:
+                    return
+                slot_released = True
+            self._release_slot()
+
+        def _worker() -> tuple[bool, Any, float]:
+            try:
+                if stop.stopped:
+                    return False, TimeoutError(), time.monotonic()
+                value = fn(stop)
+                return True, value, time.monotonic()
+            except BaseException as exc:
+                return False, exc, time.monotonic()
+            finally:
+                _release_once()
+
+        try:
+            executor = self._ensure_executor()
+            cf_future = executor.submit(_worker)
+            cf_future.add_done_callback(_release_once)
+        except BaseException:
+            _release_once()
+            raise
+
+        wrapped = asyncio.wrap_future(cf_future)
+        try:
+            if deadline is None:
+                ok, payload, finished_at = await wrapped
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    raise TimeoutError
+                ok, payload, finished_at = await asyncio.wait_for(
+                    wrapped, timeout=remaining
+                )
+        except BaseException:
+            stop.stop()
+            cf_future.cancel()
+            raise
+
+        if not ok and not isinstance(payload, Exception):
+            raise payload
+        if deadline is not None and (
+            finished_at > deadline or time.monotonic() >= deadline
+        ):
+            raise TimeoutError
+        if not ok:
+            raise payload
+        return payload
+
+
+_LOG_WORK_POOL = _LogWorkPool(_LOG_WORKER_LIMIT)
+
+
+def _filter_profiles_for_role(
+    profiles: list[str], role: str | None
+) -> list[str]:
+    if role is None:
+        return list(profiles)
+    side = _PROFILE_ROLE_PARENT[role]
+    filtered = [
+        item for item in profiles if Path(item).parent.name.casefold() == side
+    ]
+    if not filtered:
+        raise ToolError("profile_unresolved")
+    return filtered
 
 
 async def _script_log_source(
-    runtime: Any, role: str | None = None
+    runtime: Any, role: str | None = None, *, deadline: float | None = None
 ) -> tuple[list[str], list[str], float]:
     status_fn = getattr(runtime, "lifecycle_status", None)
     if status_fn is None:
         raise ToolError("no_active_run")
-    status = await asyncio.to_thread(status_fn)
-    if inspect.isawaitable(status):
-        status = await status
+    if inspect.iscoroutinefunction(status_fn):
+        coro = status_fn()
+        status = await coro if deadline is None else await _bound(coro, deadline)
+    else:
+        status = await _LOG_WORK_POOL.run(lambda _stop: status_fn(), deadline)
+        if inspect.isawaitable(status):
+            status = (
+                await status
+                if deadline is None
+                else await _bound(status, deadline)
+            )
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError
     if not isinstance(status, dict):
         raise ToolError("no_active_run")
     runs = [item for item in (status.get("runs") or []) if isinstance(item, dict)]
-    profiles = await asyncio.to_thread(_profile_dirs_from_runs, runs)
-    if not profiles:
-        raise ToolError("no_active_run")
-    start_epoch = _run_start_epoch(runs)
-    if start_epoch is None:
-        # No live run: the newest-file fallback would scan a dead launch
-        # and wait_for could report satisfied:true on a line hours old.
-        raise ToolError("no_active_run")
-    if role is not None:
-        # fb-20261026-203149-33c3: without this, role=server read the client's
-        # logs too, and a server check passed on the client's line.
-        side = _PROFILE_ROLE_PARENT[role]
-        profiles = [item for item in profiles if Path(item).parent.name.casefold() == side]
-        if not profiles:
-            raise ToolError("profile_unresolved")
-    paths: list[str] = []
-    for profiles_dir in profiles:
-        paths.extend(_current_launch_logs(profiles_dir, start_epoch))
-    return paths, profiles, start_epoch
+
+    def _resolve_sync(stop: _LogWorkStop) -> tuple[list[str], list[str], float]:
+        if stop.stopped:
+            raise TimeoutError
+        profile_dirs_fn = _profile_dirs_from_runs
+        if profile_dirs_fn is launch_logs._profile_dirs_from_runs:
+            anchors = profile_dirs_fn(runs, stop=stop)
+        else:
+            anchors = profile_dirs_fn(runs)
+        if stop.stopped:
+            raise TimeoutError
+        if not anchors:
+            raise ToolError("no_active_run")
+        start_epoch = _run_start_epoch(runs)
+        if start_epoch is None:
+            # No live run: the newest-file fallback would scan a dead launch
+            # and wait_for could report satisfied:true on a line hours old.
+            raise ToolError("no_active_run")
+        profiles = _filter_profiles_for_role(anchors, role)
+        paths: list[str] = []
+        lister = _current_launch_logs
+        for profiles_dir in profiles:
+            if stop.stopped:
+                raise TimeoutError
+            if lister is launch_logs._current_launch_logs:
+                paths.extend(lister(profiles_dir, start_epoch, stop=stop))
+            else:
+                paths.extend(lister(profiles_dir, start_epoch))
+        return paths, anchors, start_epoch
+
+    return await _LOG_WORK_POOL.run(_resolve_sync, deadline)
 
 
 async def _bounded_script_log_source(
     runtime: Any, role: str | None, deadline: float
 ) -> tuple[list[str], list[str], float]:
-    remaining = deadline - time.monotonic()
-    if remaining <= 0.0:
+    if deadline - time.monotonic() <= 0.0:
         raise TimeoutError
-    return await asyncio.wait_for(
-        _script_log_source(runtime, role), timeout=remaining
-    )
+    return await _script_log_source(runtime, role, deadline=deadline)
 
 
 async def _wait_for_script_log_paths(
     runtime: Any, role: str | None = None
 ) -> list[str]:
-    paths, _profiles, _start_epoch = await _script_log_source(runtime, role)
+    paths, _anchors, _start_epoch = await _script_log_source(runtime, role)
     return paths
 
 
 def _scan_log_for_pattern(
-    path: str, pattern: str, max_bytes: int
+    path: str, pattern: str, max_bytes: int, *, stop: Any = None
 ) -> tuple[str | None, int, bool]:
     """First line of ``path`` containing ``pattern``, scanning from byte 0.
 
@@ -3929,15 +4139,22 @@ def _scan_log_for_pattern(
     consumed = 0
     carry = b""
     truncated = False
+    chunk_limit = (
+        min(_LAUNCH_SCAN_CHUNK_BYTES, log_tail.READ_CHUNK_BYTES)
+        if stop is not None
+        else _LAUNCH_SCAN_CHUNK_BYTES
+    )
     try:
         with open(path, "rb") as handle:
             while True:
+                if stop is not None and stop.stopped:
+                    raise TimeoutError
                 budget = max_bytes - consumed
                 if budget <= 0:
                     # Measured, not assumed: only truncated if bytes remain.
                     truncated = bool(handle.read(1))
                     break
-                chunk = handle.read(min(_LAUNCH_SCAN_CHUNK_BYTES, budget))
+                chunk = handle.read(min(chunk_limit, budget))
                 if not chunk:
                     break
                 consumed += len(chunk)
@@ -3952,16 +4169,25 @@ def _scan_log_for_pattern(
                     start = end + 1
                     scanned += 1
                     if pattern in line:
+                        if stop is not None and stop.stopped:
+                            raise TimeoutError
                         return line, scanned, False
                 carry = carry[start:]
+    except TimeoutError:
+        raise
     except OSError as error:
         raise log_tail.LogTailError("log_unavailable") from error
+    if stop is not None and stop.stopped:
+        raise TimeoutError
     if carry:
         line = carry.decode("utf-8", errors="replace").rstrip("\r")
         scanned += 1
         if pattern in line:
             return line, scanned, truncated
     return None, scanned, truncated
+
+
+_DEFAULT_SCAN_LOG_FOR_PATTERN = _scan_log_for_pattern
 
 
 def _steam_auth_login(line: str) -> tuple[str, str | None] | None:
@@ -5062,10 +5288,10 @@ async def execute_wait_for(
     scan_truncated = False
     tail_truncated = False
     probe_paths: list[str] = []
-    log_profiles: list[str] = []
+    log_anchors: list[str] = []
     log_start_epoch: float | None = None
     log_resolved_at: float | None = None
-    log_resolution_timed_out = False
+    log_probe_aborted = False
     scan_mode = "marker" if marker_state is not None else lookback_from
     # players_at_least only (fb-20261112-163422-f09e): watch this launch's
     # server RPT for a kick in WaitAuthPlayerLoginState. Resolving the logs
@@ -5226,7 +5452,7 @@ async def execute_wait_for(
                 )
             log_resolved_at = time.monotonic()
             try:
-                probe_paths, log_profiles, log_start_epoch = (
+                probe_paths, log_anchors, log_start_epoch = (
                     await _bounded_script_log_source(runtime, role, deadline)
                 )
             except TimeoutError:
@@ -5244,35 +5470,117 @@ async def execute_wait_for(
             if marker_state is not None:
                 log_markers = marker_state
             else:
-                log_markers = (
-                    _log_markers_at_end(probe_paths)
-                    if lookback_from == "launch"
-                    else _log_markers_with_lookback(probe_paths, lookback_lines)
-                )
-            if marker_state is None and lookback_from == "launch":
-                for path in probe_paths:
-                    try:
-                        line, count, cut = _scan_log_for_pattern(
-                            path, pattern, WAIT_FOR_LAUNCH_SCAN_MAX_BYTES
+                def _prepare_initial_log_scan(
+                    stop: _LogWorkStop,
+                ) -> tuple[
+                    dict[str, log_tail.TailMarker],
+                    bool,
+                    list[tuple[str, dict[str, int]]],
+                    bool,
+                    str | None,
+                ]:
+                    if lookback_from == "launch":
+                        markers_end_fn = _log_markers_at_end
+                        if markers_end_fn is launch_logs._log_markers_at_end:
+                            markers = markers_end_fn(probe_paths, stop=stop)
+                        else:
+                            markers = markers_end_fn(probe_paths)
+                        lookback_cut = False
+                    elif (
+                        _log_markers_with_lookback
+                        is launch_logs._log_markers_with_lookback
+                    ):
+                        markers, lookback_cut = _log_markers_with_lookback_status(
+                            probe_paths, lookback_lines, stop=stop
                         )
-                    except log_tail.LogTailError:
-                        _record_scan(
-                            [path], {}, seen_paths, scanned_lines, unreadable
+                    else:
+                        markers = _log_markers_with_lookback(
+                            probe_paths, lookback_lines
                         )
-                        continue
-                    _record_scan(
-                        [path], {path: count}, seen_paths, scanned_lines, unreadable
+                        lookback_cut = False
+                    launch_records: list[tuple[str, dict[str, int]]] = []
+                    launch_cut = False
+                    matched_line: str | None = None
+                    if lookback_from == "launch":
+                        scanner = _scan_log_for_pattern
+                        for path in probe_paths:
+                            if stop.stopped:
+                                raise TimeoutError
+                            try:
+                                if scanner is _DEFAULT_SCAN_LOG_FOR_PATTERN:
+                                    line, count, cut = scanner(
+                                        path,
+                                        pattern,
+                                        WAIT_FOR_LAUNCH_SCAN_MAX_BYTES,
+                                        stop=stop,
+                                    )
+                                else:
+                                    line, count, cut = scanner(
+                                        path,
+                                        pattern,
+                                        WAIT_FOR_LAUNCH_SCAN_MAX_BYTES,
+                                    )
+                            except log_tail.LogTailError:
+                                launch_records.append((path, {}))
+                                continue
+                            launch_records.append((path, {path: count}))
+                            launch_cut = launch_cut or cut
+                            if line is not None:
+                                matched_line = line
+                                break
+                    return (
+                        markers,
+                        lookback_cut,
+                        launch_records,
+                        launch_cut,
+                        matched_line,
                     )
-                    scan_truncated = scan_truncated or cut
-                    if line is not None:
-                        return _wait_for_response(
-                            condition=condition,
-                            started=started,
-                            probes=1,
-                            observed=line,
-                            satisfied=True,
-                            scanned=scan_summary(),
-                        )
+
+                try:
+                    (
+                        log_markers,
+                        lookback_cut,
+                        launch_records,
+                        launch_cut,
+                        matched_line,
+                    ) = await _LOG_WORK_POOL.run(
+                        _prepare_initial_log_scan, deadline
+                    )
+                except _LogSlotTimeoutError:
+                    return _wait_for_response(
+                        condition=condition,
+                        started=started,
+                        probes=0,
+                        observed=observed,
+                        satisfied=False,
+                        scanned=scan_summary(),
+                        last_error=_LOG_PATHS_TIMEOUT,
+                    )
+                except TimeoutError:
+                    return _wait_for_response(
+                        condition=condition,
+                        started=started,
+                        probes=0,
+                        observed=observed,
+                        satisfied=False,
+                        scanned=scan_summary(),
+                    )
+                tail_truncated = tail_truncated or lookback_cut
+                for path, counts in launch_records:
+                    _record_scan(
+                        [path], counts, seen_paths, scanned_lines, unreadable
+                    )
+                scan_truncated = scan_truncated or launch_cut
+                tail_truncated = tail_truncated or launch_cut
+                if matched_line is not None:
+                    return _wait_for_response(
+                        condition=condition,
+                        started=started,
+                        probes=1,
+                        observed=matched_line,
+                        satisfied=True,
+                        scanned=scan_summary(),
+                    )
 
     while time.monotonic() < deadline or (
         steam_auth_force_first_probe and probes == 0
@@ -5371,47 +5679,164 @@ async def execute_wait_for(
                         else observed <= value
                     )
             else:
+                log_probe_aborted = False
                 refresh = probes == 1 or (
                     log_resolved_at is not None
                     and time.monotonic() - log_resolved_at
                     >= _LOG_RESOLUTION_REFRESH_S
                 )
+                lines: list[str] = []
+                next_markers = log_markers
+                counts: dict[str, int] = {}
+                read_truncated = False
                 if refresh:
                     log_resolved_at = time.monotonic()
                     try:
-                        probe_paths, log_profiles, log_start_epoch = (
+                        probe_paths, log_anchors, log_start_epoch = (
                             await _bounded_script_log_source(
                                 runtime, role, deadline
                             )
                         )
                     except TimeoutError:
                         last_error = _LOG_PATHS_TIMEOUT
-                        log_resolution_timed_out = True
+                        log_probe_aborted = True
                         satisfied = False
-                if log_resolution_timed_out:
-                    lines = []
-                else:
-                    if not refresh and log_profiles:
-                        probe_paths = [
-                            path
-                            for profiles_dir in log_profiles
-                            for path in _current_launch_logs(
-                                profiles_dir, log_start_epoch
+                    if not log_probe_aborted:
+                        def _read_refreshed_probe(
+                            stop: _LogWorkStop,
+                        ) -> tuple[
+                            list[str],
+                            dict[str, log_tail.TailMarker],
+                            dict[str, int],
+                            bool,
+                        ]:
+                            reader = _new_log_lines
+                            if reader is launch_logs._new_log_lines:
+                                return reader(
+                                    probe_paths, log_markers, stop=stop
+                                )
+                            return reader(probe_paths, log_markers)
+
+                        try:
+                            (
+                                lines,
+                                next_markers,
+                                counts,
+                                read_truncated,
+                            ) = await _LOG_WORK_POOL.run(
+                                _read_refreshed_probe, deadline
                             )
-                        ]
-                    lines, log_markers, counts, read_truncated = _new_log_lines(
-                        probe_paths, log_markers
-                    )
-                    tail_truncated = tail_truncated or read_truncated
-                    _record_scan(
-                        probe_paths, counts, seen_paths, scanned_lines, unreadable
-                    )
-                # Substring, not regex. A caller who sends an escaped pattern
-                # gets a silent no-match, which is why scanned exists and why
-                # the tool description names the contract.
-                matched = next((line for line in lines if pattern in line), None)
-                satisfied = matched is not None
-                observed = matched if matched is not None else (lines[-1] if lines else "")
+                        except _LogSlotTimeoutError:
+                            last_error = _LOG_PATHS_TIMEOUT
+                            log_probe_aborted = True
+                            satisfied = False
+                        except TimeoutError:
+                            log_probe_aborted = True
+                            satisfied = False
+                else:
+                    phase = "paths"
+
+                    def _relist_and_read_probe(
+                        stop: _LogWorkStop,
+                    ) -> tuple[
+                        list[str],
+                        list[str],
+                        dict[str, log_tail.TailMarker],
+                        dict[str, int],
+                        bool,
+                    ]:
+                        nonlocal phase
+                        if log_anchors:
+                            siblings_fn = _sibling_profile_dirs
+                            if siblings_fn is launch_logs._sibling_profile_dirs:
+                                derived = siblings_fn(log_anchors, stop=stop)
+                            else:
+                                derived = siblings_fn(log_anchors)
+                            profiles = _filter_profiles_for_role(derived, role)
+                            lister = _current_launch_logs
+                            relisted: list[str] = []
+                            for profiles_dir in profiles:
+                                if stop.stopped:
+                                    raise TimeoutError
+                                if lister is launch_logs._current_launch_logs:
+                                    relisted.extend(
+                                        lister(
+                                            profiles_dir,
+                                            log_start_epoch,
+                                            stop=stop,
+                                        )
+                                    )
+                                else:
+                                    relisted.extend(
+                                        lister(profiles_dir, log_start_epoch)
+                                    )
+                        else:
+                            relisted = list(probe_paths)
+                        if stop.stopped:
+                            raise TimeoutError
+                        phase = "read"
+                        reader = _new_log_lines
+                        if reader is launch_logs._new_log_lines:
+                            read_lines, updated_markers, read_counts, cut = (
+                                reader(relisted, log_markers, stop=stop)
+                            )
+                        else:
+                            read_lines, updated_markers, read_counts, cut = (
+                                reader(relisted, log_markers)
+                            )
+                        return (
+                            relisted,
+                            read_lines,
+                            updated_markers,
+                            read_counts,
+                            cut,
+                        )
+
+                    try:
+                        (
+                            probe_paths,
+                            lines,
+                            next_markers,
+                            counts,
+                            read_truncated,
+                        ) = await _LOG_WORK_POOL.run(
+                            _relist_and_read_probe, deadline
+                        )
+                    except _LogSlotTimeoutError:
+                        last_error = _LOG_PATHS_TIMEOUT
+                        log_probe_aborted = True
+                        satisfied = False
+                    except TimeoutError:
+                        if phase == "paths":
+                            last_error = _LOG_PATHS_TIMEOUT
+                        log_probe_aborted = True
+                        satisfied = False
+                if not log_probe_aborted:
+                    if time.monotonic() >= deadline:
+                        log_probe_aborted = True
+                        satisfied = False
+                    else:
+                        log_markers = next_markers
+                        tail_truncated = tail_truncated or read_truncated
+                        _record_scan(
+                            probe_paths,
+                            counts,
+                            seen_paths,
+                            scanned_lines,
+                            unreadable,
+                        )
+                        # Substring, not regex. A caller who sends an escaped pattern
+                        # gets a silent no-match, which is why scanned exists and why
+                        # the tool description names the contract.
+                        matched = next(
+                            (line for line in lines if pattern in line), None
+                        )
+                        satisfied = matched is not None
+                        observed = (
+                            matched
+                            if matched is not None
+                            else (lines[-1] if lines else "")
+                        )
         if satisfied:
             return _wait_for_response(
                 condition=condition,
@@ -5423,7 +5848,7 @@ async def execute_wait_for(
                 not_ready_probes=not_ready_probes,
                 last_error=last_error,
             )
-        if log_resolution_timed_out:
+        if log_probe_aborted:
             break
         if condition == "players_at_least" and steam_auth_paths:
             # Only what is new since the last probe; the wait itself
@@ -12973,8 +13398,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "lines each gave, so a no-match is visible as a no-match. "
             "A log path resolution that does not finish within timeout_s "
             "ends with satisfied: false and last_error log_paths_timeout; "
-            "scanned.truncated is true when a tail read was cut by its "
-            "byte cap. "
+            "for log_matches only, scanned.truncated is true when any read "
+            "of the call lost requested lines to its byte cap (such as the "
+            "initial lookback window or a read between probes) and false "
+            "on a complete read. "
             "players_* and entity_state probes are reads and do not renew "
             "the lease. log_matches does not renew. file_matches renews on "
             "each poll through session_heartbeat. "
