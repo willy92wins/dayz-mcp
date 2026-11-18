@@ -37,11 +37,12 @@ from tests.enforce_subset_helpers import (
 )
 
 CLIENT_PATH = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
+WORLD_PATH = addon_root() / "scripts" / "4_World" / "MCP_ClientRestCallbacks.c"
 CALLBACK_CLASS = "class MCPClientResultCallback : RestCallback"
 CALLBACK_SIGNATURES = (
-    "void MCPClientResultCallback(MCPClientBridge bridge)",
-    "void AttachBridge(MCPClientBridge bridge)",
-    "void DetachBridge()",
+    "void MCPClientResultCallback(MCPClientRestSink sink)",
+    "void AttachSink(MCPClientRestSink sink)",
+    "void DetachSink()",
     "override void OnSuccess(string data, int dataSize)",
     "override void OnError(int errorCode)",
     "override void OnTimeout()",
@@ -64,6 +65,7 @@ CLASS_TYPES = (
     "JsonSerializer",
     "MCPClientResultCallback",
     "MCPClientPollCallback",
+    "MCPClientRestHolder",
     "MCPCommand",
     "MCPJob",
 )
@@ -92,10 +94,65 @@ class Array(EnforceArray):
 
 
 def _class_text(source: str) -> str:
+    """The result callback class text, from its 4_World source."""
     text = clean(source)
     start = text.index(CALLBACK_CLASS)
     end = text.index("\n};", start)
     return text[start:end]
+
+
+class RestHolder:
+    """MCPClientRestHolder: Hold dedups by identity, Drop is idempotent."""
+
+    def __init__(self) -> None:
+        self.callbacks: list = []
+
+    def Hold(self, cb) -> None:
+        if cb is None:
+            return
+        if any(held is cb for held in self.callbacks):
+            return
+        self.callbacks.append(cb)
+
+    def Drop(self, cb) -> None:
+        for index, held in enumerate(self.callbacks):
+            if held is cb:
+                del self.callbacks[index]
+                return
+
+    def Count(self) -> int:
+        return len(self.callbacks)
+
+
+class RestSink:
+    """MCPClientRestForwarder: delegates to the bridge until Disconnect."""
+
+    def __init__(self) -> None:
+        self.owner: object = None
+
+    def Disconnect(self) -> None:
+        self.owner = None
+
+    def IsConnected(self) -> bool:
+        return self.owner is not None
+
+    def IsPollActive(self, cb) -> bool:
+        return False
+
+    def ReleaseCallback(self, cb) -> None:
+        self.owner.ReleaseCallback(cb)
+
+    def RecycleResultCallback(self, cb) -> None:
+        self.owner.RecycleResultCallback(cb)
+
+    def OnResultSuccess(self, data, size) -> None:
+        self.owner.OnResultSuccess(data, size)
+
+    def OnResultError(self, code) -> None:
+        self.owner.OnResultError(code)
+
+    def OnResultTimeout(self) -> None:
+        self.owner.OnResultTimeout()
 
 
 def _without_logs(source: str, signature: str) -> str:
@@ -126,7 +183,8 @@ class Rest:
     def POST(self, cb: object, request: WireString, payload: WireString) -> None:
         assert cb not in self.live, "a callback was reused while its POST is live"
         assert self.model.ns["m_CallbackRefs"].Find(cb) >= 0, "POST lacks script ownership"
-        assert cb.m_Bridge is self.model.bridge, "reused callback was not rebound"
+        assert any(held is cb for held in self.model.holder.callbacks), "POST lacks holder ownership"
+        assert cb.m_Sink is self.model.sink, "reused callback was not rebound"
         row = (cb, request.text, json.loads(payload.text))
         self.requests.append(row)
         self.live[cb] = row
@@ -140,23 +198,23 @@ class Rest:
 
 
 class Callback:
-    """One MCPClientResultCallback: its own m_Bridge and its translated handlers."""
+    """One MCPClientResultCallback: its own m_Sink and its translated handlers."""
 
     def __init__(self, codes: list[object], helpers: dict, owner: object) -> None:
-        self._ns: dict = dict(helpers, m_Bridge=None, this=self)
+        self._ns: dict = dict(helpers, m_Sink=None, this=self)
         for code in codes:
             exec(code, self._ns)
         self._ns["MCPClientResultCallback"](owner)
 
     @property
-    def m_Bridge(self) -> object:
-        return self._ns["m_Bridge"]
+    def m_Sink(self) -> object:
+        return self._ns["m_Sink"]
 
-    def AttachBridge(self, bridge: object) -> None:
-        self._ns["AttachBridge"](bridge)
+    def AttachSink(self, sink: object) -> None:
+        self._ns["AttachSink"](sink)
 
-    def DetachBridge(self) -> None:
-        self._ns["DetachBridge"]()
+    def DetachSink(self) -> None:
+        self._ns["DetachSink"]()
 
     def OnSuccess(self, data: object, size: int) -> None:
         self._ns["OnSuccess"](data, size)
@@ -171,13 +229,16 @@ class Callback:
 class ClientModel:
     """The client bridge's result transport, run from the real bodies."""
 
-    def __init__(self, source: str | None = None) -> None:
+    def __init__(self, source: str | None = None, callback_source: str | None = None) -> None:
         source = CLIENT_PATH.read_text(encoding="utf-8") if source is None else source
-        cls = _class_text(source)
+        callback_source = WORLD_PATH.read_text(encoding="utf-8") if callback_source is None else callback_source
+        cls = _class_text(callback_source)
         self.callback_codes = [_compiled(cls, signature) for signature in CALLBACK_SIGNATURES]
         self.allocations: list[Callback] = []
         self.serializable = True
         self.terminal_posts: list[int] = []
+        self.holder = RestHolder()
+        self.sink = RestSink()
         model = self
 
         class Factory:
@@ -211,6 +272,9 @@ class ClientModel:
             "MAX_POLL_RESULTS": constants["MAX_POLL_RESULTS"],
             "MCPClientResultCallback": Factory(),
             "MCPClientPollCallback": SimpleNamespace(Cast=lambda _value: None),
+            "MCPClientRestHolder": self.holder,
+            "MCPClientRestForwarder": lambda owner: self.sink,
+            "m_RestSink": self.sink,
             "JsonSerializer": Serializer,
             "EncodeQueryValue": lambda value: value,
             "AddLoadCounter": lambda value, amount: value + amount,
@@ -267,6 +331,7 @@ class ClientModel:
         self.helpers = {
             name: self.ns[name] for name in ("_S", "_string_copy", "_bounded", "_vector")
         }
+        self.helpers["MCPClientRestHolder"] = self.holder
         self.ctx = Rest(self)
         self.ns["m_Ctx"] = self.ctx
         self.ns["m_PollCtx"] = self.ctx
@@ -278,6 +343,7 @@ class ClientModel:
         )
         if "RecycleResultCallback" in self.ns:
             self.bridge.RecycleResultCallback = self.ns["RecycleResultCallback"]
+        self.sink.owner = self.bridge
         self.ns["this"] = self.bridge
 
     def post(self, identity: int) -> Callback:
@@ -312,16 +378,16 @@ class ClientResultPoolBehaviorTest(unittest.TestCase):
         self.assertEqual([row[2]["id"] for row in model.ctx.requests], list(range(2000)))
         self.assertEqual({row[1] for row in model.ctx.requests}, {"result?key=test"})
 
-    def test_an_idle_callback_holds_no_bridge(self) -> None:
-        # MCPClientBridge is not Managed and m_Bridge is a strong ref: an
-        # idle pooled callback that kept it would pin the bridge.
+    def test_an_idle_callback_holds_no_sink(self) -> None:
+        # The sink forwarder holds the bridge: an idle pooled callback
+        # that kept its sink would pin the bridge through it.
         model = ClientModel()
         idle = model.post(1)
         model.complete(idle)
         self.assertEqual(list(model.pool), [idle])
-        self.assertIsNone(idle.m_Bridge)
+        self.assertIsNone(idle.m_Sink)
         self.assertIs(model.post(2), idle)
-        self.assertIs(idle.m_Bridge, model.bridge)
+        self.assertIs(idle.m_Sink, model.sink)
 
     def test_multiple_inflight_out_of_order_reuses_only_the_completed_slot(self) -> None:
         model = ClientModel()
@@ -363,7 +429,7 @@ class ClientResultPoolBehaviorTest(unittest.TestCase):
                 old = model.post(1)
                 survivor = model.post(2)
                 model.complete(old, event)
-                self.assertIsNone(old.m_Bridge)
+                self.assertIsNone(old.m_Sink)
                 self.assertEqual(model.pool.Count(), 0)
                 current = model.post(3)
                 self.assertIsNot(current, old)
@@ -376,23 +442,28 @@ class ClientResultPoolBehaviorTest(unittest.TestCase):
                 model.complete(survivor)
                 self.assertEqual(len(model.allocations), 3)
 
-    def test_shutdown_detaches_live_and_idle_before_native_reset_and_is_repeatable(self) -> None:
+    def test_shutdown_detaches_live_and_idle_without_native_reset_and_is_repeatable(self) -> None:
         model = ClientModel()
         idle, active = model.post(1), model.post(2)
         model.complete(idle)
-        self.assertIsNone(idle.m_Bridge)
+        self.assertIsNone(idle.m_Sink)
         model.ns["Shutdown"]()
-        self.assertIsNone(active.m_Bridge)
+        self.assertIsNone(active.m_Sink)
+        self.assertFalse(model.sink.IsConnected())
         self.assertIsNone(model.pool)
         self.assertEqual(model.refs.Count(), 0)
-        self.assertEqual(model.ctx.reset_count, 1)
+        # Stronger than the old gated reset: no reset() on any shutdown.
+        self.assertEqual(model.ctx.reset_count, 0)
+        # The in-flight callback is kept only by the 4_World holder.
+        self.assertEqual(model.holder.callbacks, [active])
         model.ns["Shutdown"]()
-        self.assertEqual(model.ctx.reset_count, 1)
+        self.assertEqual(model.ctx.reset_count, 0)
         for callback in (idle, active):
             callback.OnSuccess(WireString.of("{}"), 2)
             callback.OnError(8)
             callback.OnTimeout()
         self.assertIsNone(model.pool)
+        self.assertEqual(model.holder.callbacks, [])
 
     def test_a_shutdown_terminal_post_takes_a_pooled_callback_before_the_pool_empties(self) -> None:
         # The hold terminal POST runs inside Shutdown, before the pool is
@@ -407,13 +478,16 @@ class ClientResultPoolBehaviorTest(unittest.TestCase):
         terminal, _request, payload = model.ctx.requests[-1]
         self.assertIs(terminal, idle)
         self.assertEqual(payload["id"], 5)
-        self.assertIsNone(terminal.m_Bridge)
+        self.assertIsNone(terminal.m_Sink)
         self.assertIsNone(model.pool)
         self.assertEqual(model.ctx.reset_count, 0)
-        self.assertEqual(list(model.refs), [terminal])
+        # Bridge refs clear at shutdown; only the holder keeps the POST.
+        self.assertEqual(list(model.refs), [])
+        self.assertEqual(model.holder.callbacks, [terminal])
         model.complete(terminal)
         self.assertIsNone(model.pool)
-        self.assertEqual(list(model.refs), [terminal])
+        self.assertEqual(list(model.refs), [])
+        self.assertEqual(model.holder.callbacks, [])
         self.assertEqual(len(model.allocations), 1)
 
     def test_serialization_failure_does_not_acquire_or_send(self) -> None:
@@ -470,6 +544,11 @@ class ClientResultPoolMutationTest(unittest.TestCase):
         self.assertEqual(source.count(old), 1, old)
         return ClientModel(source.replace(old, new))
 
+    def _callback_mutant(self, old: str, new: str = "") -> ClientModel:
+        source = WORLD_PATH.read_text(encoding="utf-8")
+        self.assertEqual(source.count(old), 1, old)
+        return ClientModel(callback_source=source.replace(old, new))
+
     def test_omitting_the_pool_pop_is_detected_as_live_identity_reuse(self) -> None:
         model = self._mutant("m_ResultCallbackPool.Remove(last);")
         model.complete(model.post(1))
@@ -478,24 +557,24 @@ class ClientResultPoolMutationTest(unittest.TestCase):
             model.post(3)
 
     def test_omitting_the_rebind_is_detected_at_native_handoff(self) -> None:
-        model = self._mutant("cb.AttachBridge(this);")
+        model = self._mutant("cb.AttachSink(m_RestSink);")
         model.complete(model.post(1))
         with self.assertRaisesRegex(AssertionError, "not rebound"):
             model.post(2)
 
     def test_omitting_the_recycle_allocates_one_callback_per_result(self) -> None:
-        model = self._mutant("m_Bridge.RecycleResultCallback(this);")
+        model = self._callback_mutant("m_Sink.RecycleResultCallback(this);")
         for identity in range(50):
             model.complete(model.post(identity))
         self.assertEqual(len(model.allocations), 50)
 
     def test_omitting_the_release_keeps_admission_debt(self) -> None:
-        source = CLIENT_PATH.read_text(encoding="utf-8")
+        source = WORLD_PATH.read_text(encoding="utf-8")
         start = source.index(CALLBACK_CLASS)
         success = source.index("override void OnSuccess(", start)
-        release = source.index("m_Bridge.ReleaseCallback(this);", success)
-        mutant = source[:release] + source[release + len("m_Bridge.ReleaseCallback(this);") :]
-        model = ClientModel(mutant)
+        release = source.index("m_Sink.ReleaseCallback(this);", success)
+        mutant = source[:release] + source[release + len("m_Sink.ReleaseCallback(this);") :]
+        model = ClientModel(callback_source=mutant)
         model.complete(model.post(1))
         self.assertEqual(model.refs.Count(), 1)
 
@@ -508,7 +587,7 @@ class ClientResultPoolSourceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.source = CLIENT_PATH.read_text(encoding="utf-8")
         self.clean = clean(self.source)
-        self.callback = _class_text(self.source)
+        self.callback = _class_text(WORLD_PATH.read_text(encoding="utf-8"))
 
     def test_the_pool_state_and_methods_are_declared_in_their_classes(self) -> None:
         self.assertIn(
@@ -521,11 +600,12 @@ class ClientResultPoolSourceTest(unittest.TestCase):
         for signature in (ACQUIRE, RECYCLE):
             self.assertTrue(_body(self.source, signature).strip())
         self.assertEqual(
-            _body(self.callback, "void AttachBridge(MCPClientBridge bridge)").strip(),
-            "m_Bridge = bridge;",
+            _body(self.callback, "void AttachSink(MCPClientRestSink sink)").strip(),
+            "m_Sink = sink;",
         )
-        self.assertEqual(_body(self.callback, "void DetachBridge()").strip(), "m_Bridge = null;")
-        self.assertIn("protected ref MCPClientBridge m_Bridge;", self.callback)
+        self.assertEqual(_body(self.callback, "void DetachSink()").strip(), "m_Sink = null;")
+        self.assertIn("protected ref MCPClientRestSink m_Sink;", self.callback)
+        self.assertNotIn("MCPClientBridge", self.callback)
 
     def test_recycle_bound_matches_admission_and_failures_do_not_recycle(self) -> None:
         recycle = _body(self.source, RECYCLE)
@@ -534,31 +614,35 @@ class ClientResultPoolSourceTest(unittest.TestCase):
         for event in ("Error", "Timeout"):
             handler = _body(self.callback, CALLBACK_SIGNATURES[4 if event == "Error" else 5])
             self.assertNotIn("RecycleResultCallback", handler)
-            self.assertIn("DetachBridge();", handler)
+            self.assertIn("DetachSink();", handler)
+            self.assertIn("MCPClientRestHolder.Drop(this);", handler)
         success = _body(self.callback, CALLBACK_SIGNATURES[3])
+        self.assertLess(success.index("MCPClientRestHolder.Drop(this);"), success.index("ReleaseCallback(this)"))
         self.assertLess(success.index("ReleaseCallback(this)"), success.index("OnResultSuccess("))
         self.assertLess(success.index("OnResultSuccess("), success.index("RecycleResultCallback(this)"))
-        self.assertLess(success.index("RecycleResultCallback(this)"), success.index("DetachBridge();"))
+        self.assertLess(success.index("RecycleResultCallback(this)"), success.index("DetachSink();"))
 
     def test_post_takes_a_pooled_callback_and_stays_immediate_async(self) -> None:
         post = _body(self.source, POST)
         self.assertNotIn("new MCPClientResultCallback", post)
         self.assertIn("MCPClientResultCallback cb = AcquireResultCallback();", post)
-        self.assertLess(post.index("m_CallbackRefs.Insert(cb);"), post.index("m_Ctx.POST(cb, resultRequest, body);"))
+        self.assertLess(post.index("m_CallbackRefs.Insert(cb);"), post.index("MCPClientRestHolder.Hold(cb);"))
+        self.assertLess(post.index("MCPClientRestHolder.Hold(cb);"), post.index("m_Ctx.POST(cb, resultRequest, body);"))
         for forbidden in ("POST_now", "CallLater", "Sleep", "m_Pending", "m_PollInFlight", "MAX_CALLBACK_REFS"):
             self.assertNotIn(forbidden, post)
         self.assertEqual(self.clean.count("new MCPClientResultCallback("), 1)
-        self.assertIn("new MCPClientResultCallback(this)", _body(self.source, ACQUIRE))
+        self.assertIn("new MCPClientResultCallback(m_RestSink)", _body(self.source, ACQUIRE))
 
     def test_shutdown_empties_the_pool_after_the_terminal_posts_and_detach_pass(self) -> None:
         shutdown = _body(self.source, "void Shutdown()")
+        self.assertNotIn(".reset();", shutdown)
         order = [
             "PostUiDialogJob(m_DialogJob);",
             "PostActionHoldJob(holdJob);",
-            "resultCb.DetachBridge();",
+            "m_RestSink.Disconnect();",
+            "resultCb.DetachSink();",
             "m_ResultCallbackPool.Clear();",
             "m_ResultCallbackPool = null;",
-            "m_Ctx.reset();",
             "m_Ctx = null;",
         ]
         positions = []

@@ -54,19 +54,25 @@ class CallbackLifetimeContractTest(unittest.TestCase):
 
     def test_client_plain_parent_requires_detach_on_each_retired_callback(self):
         text = source("MCPClientBridge.c")
+        world = (ROOT / "addon/scripts/4_World/MCP_ClientRestCallbacks.c").read_text(encoding="utf-8-sig")
         self.assertIn("class MCPClientBridge extends MCPJobRunnerOwner", text)
+        self.assertNotIn("class MCPClientPollCallback", text)
+        self.assertNotIn("class MCPClientResultCallback", text)
         for kind in ("MCPClientPollCallback", "MCPClientResultCallback"):
-            cls = body(text, "class " + kind + " :")
-            self.assertIn("protected ref MCPClientBridge m_Bridge;", cls)
+            cls = body(world, "class " + kind + " :")
+            self.assertIn("protected ref MCPClientRestSink m_Sink;", cls)
+            self.assertNotIn("MCPClientBridge", cls)
             for event in ("Success", "Error", "Timeout"):
                 if kind == "MCPClientPollCallback" and event == "Success":
                     continue  # Still reusable; the cached pointer is detached at shutdown.
                 with self.subTest(kind=kind, event=event):
                     method = body(cls, "override void On" + event + "(")
                     channel = "Poll" if kind == "MCPClientPollCallback" else "Result"
-                    dispatch = "m_Bridge.On" + channel + event + "("
-                    self.assertIn("DetachBridge();", method[method.index(dispatch):])
-                    self.assertIn("m_Bridge.ReleaseCallback(this);", method)
+                    dispatch = "m_Sink.On" + channel + event + "("
+                    self.assertIn("DetachSink();", method[method.index(dispatch):])
+                    self.assertIn("MCPClientRestHolder.Drop(this);", method)
+                    self.assertIn("m_Sink.ReleaseCallback(this);", method)
+                    self.assertLess(method.index("MCPClientRestHolder.Drop(this);"), method.index("m_Sink.ReleaseCallback(this);"))
 
     def test_singletons_own_bridges_through_mission_until_explicit_shutdown(self):
         for owner in ("MCPBridge", "MCPClientBridge"):
@@ -89,19 +95,29 @@ class CallbackLifetimeContractTest(unittest.TestCase):
         self.assertLess(start.index("m_CallbackRefs.Insert(cb);"), start.index("m_Ctx.GET(cb, request);"))
 
     def test_poll_completions_release_before_rejecting_old_identity(self):
-        for filename, kind in (("MCPCallbacks.c", "MCPPollCallback"), ("MCPClientBridge.c", "MCPClientPollCallback")):
-            cls = body(source(filename), "class " + kind + " :")
+        world = (ROOT / "addon/scripts/4_World/MCP_ClientRestCallbacks.c").read_text(encoding="utf-8-sig")
+        for filename, kind, text in (
+            ("MCPCallbacks.c", "MCPPollCallback", None),
+            ("MCPClientBridge.c", "MCPClientPollCallback", world),
+        ):
+            cls = body(text if text is not None else source(filename), "class " + kind + " :")
             for event in ("Success", "Error", "Timeout"):
                 with self.subTest(kind=kind, event=event):
                     method = body(cls, "override void On" + event + "(")
-                    active = "if (!m_Bridge.IsActivePollCallback(this))"
-                    rejection = body(method, active).strip()
                     if kind == "MCPClientPollCallback":
-                        self.assertEqual(rejection, "DetachBridge();\n\t\t\t\treturn;")
+                        active = "if (!m_Sink.IsPollActive(this))"
+                        rejection = body(method, active).strip()
+                        self.assertEqual(rejection, "DetachSink();\n\t\t\treturn;")
+                        self.assertIn("MCPClientRestHolder.Drop(this);", method)
+                        self.assertLess(method.index("MCPClientRestHolder.Drop(this);"), method.index("ReleaseCallback(this)"))
+                        self.assertLess(method.index("ReleaseCallback(this)"), method.index(active))
+                        self.assertLess(method.index(active), method.index("m_Sink.OnPoll" + event + "("))
                     else:
+                        active = "if (!m_Bridge.IsActivePollCallback(this))"
+                        rejection = body(method, active).strip()
                         self.assertEqual(rejection, "return;")
-                    self.assertLess(method.index("ReleaseCallback(this)"), method.index(active))
-                    self.assertLess(method.index(active), method.index("m_Bridge.OnPoll" + event + "("))
+                        self.assertLess(method.index("ReleaseCallback(this)"), method.index(active))
+                        self.assertLess(method.index(active), method.index("m_Bridge.OnPoll" + event + "("))
         for owner in ("MCPBridge", "MCPClientBridge"):
             self.assertIn("return cb == m_PollCallback;", body(source(owner + ".c"), "bool IsActivePollCallback("))
 
@@ -115,15 +131,24 @@ class CallbackLifetimeContractTest(unittest.TestCase):
                     self.assertLess(method.index("m_PollCallback = null;"), method.index("OnPollFail("))
 
     def test_shutdown_detaches_cached_callback_even_when_pending_array_is_empty(self):
-        for owner in ("MCPBridge", "MCPClientBridge"):
-            with self.subTest(owner=owner):
-                shutdown = body(source(owner + ".c"), "\tvoid Shutdown()")
-                active = body(shutdown, "if (m_PollCallback)")
-                self.assertIn("m_PollCallback.DetachBridge();", active)
-                self.assertLess(shutdown.index("m_PollCallback.DetachBridge();"), shutdown.index("m_Ctx.reset();"))
-                self.assertIn("m_PollCallback = null;", shutdown)
-        for filename, kind in (("MCPCallbacks.c", "MCPPollCallback"), ("MCPClientBridge.c", "MCPClientPollCallback")):
-            self.assertEqual(body(body(source(filename), "class " + kind + " :"), "void DetachBridge()").strip(), "m_Bridge = null;")
+        shutdown = body(source("MCPBridge.c"), "\tvoid Shutdown()")
+        active = body(shutdown, "if (m_PollCallback)")
+        self.assertIn("m_PollCallback.DetachBridge();", active)
+        self.assertLess(shutdown.index("m_PollCallback.DetachBridge();"), shutdown.index("m_Ctx.reset();"))
+        self.assertIn("m_PollCallback = null;", shutdown)
+        self.assertEqual(body(body(source("MCPCallbacks.c"), "class MCPPollCallback :"), "void DetachBridge()").strip(), "m_Bridge = null;")
+        # Client: detach before the contexts are dropped, and no reset()
+        # at all (stronger than the old detach-before-reset ordering).
+        client_shutdown = body(source("MCPClientBridge.c"), "\tvoid Shutdown()")
+        client_active = body(client_shutdown, "if (m_PollCallback)")
+        self.assertIn("m_PollCallback.DetachSink();", client_active)
+        self.assertIn("m_RestSink.Disconnect();", client_shutdown)
+        self.assertLess(client_shutdown.index("m_RestSink.Disconnect();"), client_shutdown.index("m_PollCallback.DetachSink();"))
+        self.assertLess(client_shutdown.index("m_PollCallback.DetachSink();"), client_shutdown.index("m_Ctx = null;"))
+        self.assertNotIn(".reset();", client_shutdown)
+        self.assertIn("m_PollCallback = null;", client_shutdown)
+        world = (ROOT / "addon/scripts/4_World/MCP_ClientRestCallbacks.c").read_text(encoding="utf-8-sig")
+        self.assertEqual(body(body(world, "class MCPClientPollCallback :"), "void DetachSink()").strip(), "m_Sink = null;")
 
 
 if __name__ == "__main__":

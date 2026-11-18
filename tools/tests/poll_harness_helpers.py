@@ -234,6 +234,37 @@ def _bridge_harness(name: str, *, source: str | None = None) -> dict:
         clock.ticks += command.duration_ticks
         ns["PostResult"](command)
 
+    class ClientRestHolder:
+        """MCPClientRestHolder (4_World): Hold dedups, Drop is idempotent."""
+
+        def __init__(self) -> None:
+            self.callbacks: list = []
+
+        def Hold(self, cb) -> None:
+            if cb is None:
+                return
+            if any(held is cb for held in self.callbacks):
+                return
+            self.callbacks.append(cb)
+
+        def Drop(self, cb) -> None:
+            for index, held in enumerate(self.callbacks):
+                if held is cb:
+                    del self.callbacks[index]
+                    return
+
+        def Count(self) -> int:
+            return len(self.callbacks)
+
+    rest_holder = ClientRestHolder()
+
+    def rest_forwarder(owner) -> SimpleNamespace:
+        return SimpleNamespace(
+            owner=owner,
+            Disconnect=lambda: None,
+            IsConnected=lambda: True,
+        )
+
     ns.update(
         _S=WireString,
         array=Pending,
@@ -253,6 +284,10 @@ def _bridge_harness(name: str, *, source: str | None = None) -> dict:
         MCPPollCallback=lambda owner: object(),
         MCPClientPollCallback=lambda owner: object(),
         MCPClientResultCallback=lambda owner: object(),
+        MCPClientRestSink=object,
+        MCPClientRestForwarder=rest_forwarder,
+        MCPClientRestHolder=rest_holder,
+        rest_holder=rest_holder,
         AcquireResultCallback=lambda: SimpleNamespace(),
         JsonSerializer=Serializer,
         QueuePendingOrFail=lambda command: ns["m_Pending"].Insert(command),
@@ -342,6 +377,8 @@ def _bridge_harness(name: str, *, source: str | None = None) -> dict:
                 "MCPClientResultCallback",
                 "MCPPollCallback",
                 "MCPClientPollCallback",
+                "MCPClientRestHolder",
+                "MCPClientRestForwarder",
             ),
         )
 

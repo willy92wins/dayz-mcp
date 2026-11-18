@@ -1,113 +1,94 @@
-class MCPClientPollCallback : RestCallback
+// Forwarder for the 4_World REST callbacks: the bridge is reached only
+// through MCPClientRestSink, and Shutdown disconnects this link.
+class MCPClientRestForwarder : MCPClientRestSink
 {
-	// MCPJobRunnerOwner is not Managed: detach explicitly; a raw link can dangle.
-	protected ref MCPClientBridge m_Bridge;
+	protected MCPClientBridge m_Owner;
 
-	void MCPClientPollCallback(MCPClientBridge bridge)
+	void MCPClientRestForwarder(MCPClientBridge owner)
 	{
-		m_Bridge = bridge;
+		m_Owner = owner;
 	}
 
-	void DetachBridge()
+	void Disconnect()
 	{
-		m_Bridge = null;
+		m_Owner = null;
 	}
 
-	override void OnSuccess(string data, int dataSize)
+	override bool IsConnected()
 	{
-		if (m_Bridge)
+		return m_Owner != null;
+	}
+
+	override bool IsPollActive(MCPClientPollCallback cb)
+	{
+		if (!m_Owner)
 		{
-			m_Bridge.ReleaseCallback(this);
-			if (!m_Bridge.IsActivePollCallback(this))
-			{
-				DetachBridge();
-				return;
-			}
-			m_Bridge.OnPollSuccess(data, dataSize);
+			return false;
+		}
+		return m_Owner.IsActivePollCallback(cb);
+	}
+
+	override void ReleaseCallback(RestCallback cb)
+	{
+		if (m_Owner)
+		{
+			m_Owner.ReleaseCallback(cb);
 		}
 	}
 
-	override void OnError(int errorCode)
+	override void RecycleResultCallback(MCPClientResultCallback cb)
 	{
-		if (m_Bridge)
+		if (m_Owner)
 		{
-			m_Bridge.ReleaseCallback(this);
-			if (!m_Bridge.IsActivePollCallback(this))
-			{
-				DetachBridge();
-				return;
-			}
-			m_Bridge.OnPollError(errorCode);
-			DetachBridge();
+			m_Owner.RecycleResultCallback(cb);
 		}
 	}
 
-	override void OnTimeout()
+	override void OnPollSuccess(string data, int dataSize)
 	{
-		if (m_Bridge)
+		if (m_Owner)
 		{
-			m_Bridge.ReleaseCallback(this);
-			if (!m_Bridge.IsActivePollCallback(this))
-			{
-				DetachBridge();
-				return;
-			}
-			m_Bridge.OnPollTimeout();
-			DetachBridge();
-		}
-	}
-};
-
-class MCPClientResultCallback : RestCallback
-{
-	// MCPJobRunnerOwner is not Managed: detach explicitly; a raw link can dangle.
-	protected ref MCPClientBridge m_Bridge;
-
-	void MCPClientResultCallback(MCPClientBridge bridge)
-	{
-		m_Bridge = bridge;
-	}
-
-	void AttachBridge(MCPClientBridge bridge)
-	{
-		m_Bridge = bridge;
-	}
-
-	void DetachBridge()
-	{
-		m_Bridge = null;
-	}
-
-	override void OnSuccess(string data, int dataSize)
-	{
-		if (m_Bridge)
-		{
-			m_Bridge.ReleaseCallback(this);
-			m_Bridge.OnResultSuccess(data, dataSize);
-			// Back to the free list detached: an idle callback holds no bridge.
-			m_Bridge.RecycleResultCallback(this);
-			DetachBridge();
+			m_Owner.OnPollSuccess(data, dataSize);
 		}
 	}
 
-	override void OnError(int errorCode)
+	override void OnPollError(int errorCode)
 	{
-		if (m_Bridge)
+		if (m_Owner)
 		{
-			m_Bridge.ReleaseCallback(this);
-			m_Bridge.OnResultError(errorCode);
-			// OnError may repeat (restapi.c:53): never reuse this identity.
-			DetachBridge();
+			m_Owner.OnPollError(errorCode);
 		}
 	}
 
-	override void OnTimeout()
+	override void OnPollTimeout()
 	{
-		if (m_Bridge)
+		if (m_Owner)
 		{
-			m_Bridge.ReleaseCallback(this);
-			m_Bridge.OnResultTimeout();
-			DetachBridge();
+			m_Owner.OnPollTimeout();
+		}
+	}
+
+	override void OnResultSuccess(string data, int dataSize)
+	{
+		if (m_Owner)
+		{
+			m_Owner.OnResultSuccess(data, dataSize);
+		}
+	}
+
+	override void OnResultError(int errorCode)
+	{
+		if (m_Owner)
+		{
+			m_Owner.OnResultError(errorCode);
+		}
+	}
+
+	override void OnResultTimeout()
+	{
+		if (m_Owner)
+		{
+			m_Owner.OnResultTimeout();
 		}
 	}
 };
@@ -573,6 +554,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected int m_CameraPathCommandId;
 	//! m_Tick when that play turned the path's camera on (TickCameraPath).
 	protected int m_CameraPathPlayTick;
+	protected ref MCPClientRestForwarder m_RestSink;
 	protected ref array<ref RestCallback> m_CallbackRefs;
 	protected ref array<ref RestCallback> m_PollCallbackRefs;
 	protected ref MCPClientPollCallback m_PollCallback;
@@ -646,6 +628,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_CameraPath = new MCPCameraPath();
 		m_CameraPathCommandId = 0;
 		m_CameraPathPlayTick = 0;
+		m_RestSink = new MCPClientRestForwarder(this);
 		m_CallbackRefs = new array<ref RestCallback>();
 		m_PollCallbackRefs = new array<ref RestCallback>();
 		m_ResultCallbackPool = new array<ref MCPClientResultCallback>();
@@ -1001,7 +984,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		if (!m_PollCallback)
 		{
-			m_PollCallback = new MCPClientPollCallback(this);
+			m_PollCallback = new MCPClientPollCallback(m_RestSink);
 		}
 	}
 
@@ -1024,6 +1007,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		m_PollCallbackRefs.Insert(m_PollCallback);
+		MCPClientRestHolder.Hold(m_PollCallback);
 	}
 
 	void OnPollSuccess(string data, int dataSize)
@@ -1099,29 +1083,24 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// exact string, so a distinct poll base is unreachable, and stripping the
 	// trailing slash makes the engine concatenate base+request into a malformed
 	// URL (error=7). Isolation of stale polls is identity discard of the
-	// abandoned callback, not a second context. AbandonInFlightPoll must not
-	// reset() when m_PollCtx == m_Ctx.
+	// abandoned callback, not a second context. No reset() is used on this
+	// context: a GET or POST can be in flight whenever this runs.
 	protected string PollContextUrl(string url)
 	{
 		return url;
 	}
 
-	// reset() only a distinct poll context (restapi.c:133). Shared results
-	// context must not reset() here (would cancel in-flight POSTs). Detach the
-	// live pointer so the next StartPoll allocates a new callback; keep the
-	// abandoned object in m_PollCallbackRefs until its GET completion calls
-	// ReleaseCallback. Engine retain of RestCallback passed to GET is unknown,
-	// so script-side hold is required either way. An orphan that never
-	// completes stays retained (bounded residual leak: one object per abandon).
+	// No reset(): the abandoned GET is still in flight on the shared context
+	// (restapi.c:130-133 clears pending requests). Detach the live pointer so
+	// the next StartPoll allocates a new callback; keep the abandoned object
+	// in m_PollCallbackRefs and in MCPClientRestHolder until its GET
+	// completion drops it. Engine retain of RestCallback passed to GET is
+	// unknown, so script-side hold is required either way. An orphan that
+	// never completes stays retained (bounded residual leak: one object
+	// per abandon).
 	protected void AbandonInFlightPoll()
 	{
 		m_PollCallback = null;
-
-		if (m_PollCtx && m_PollCtx != m_Ctx)
-		{
-			m_PollCtx.reset();
-			m_PollCtx.SetHeader("application/json");
-		}
 	}
 
 	void OnPollError(int errorCode)
@@ -10296,6 +10275,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		MCPClientResultCallback cb = AcquireResultCallback();
 		m_CallbackRefs.Insert(cb);
+		MCPClientRestHolder.Hold(cb);
 		string resultRequest = "result?key=" + m_Key;
 		if (m_PeerInstance != "")
 		{
@@ -10332,11 +10312,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			cb = m_ResultCallbackPool.Get(last);
 			m_ResultCallbackPool.Remove(last);
-			cb.AttachBridge(this);
+			cb.AttachSink(m_RestSink);
 		}
 		else
 		{
-			cb = new MCPClientResultCallback(this);
+			cb = new MCPClientResultCallback(m_RestSink);
 		}
 		return cb;
 	}
@@ -10994,7 +10974,6 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	void Shutdown()
 	{
-		bool postedTerminal = false;
 		// ShutdownInstance calls here, then releasing m_Instance runs our destructor.
 		// The two lines are the only in-engine evidence this guard fired: the first
 		// entry alone means no re-entry happened, both mean the second was refused.
@@ -11016,15 +10995,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		// MissionGameplay.c only shuts down from its destructor; OnMissionStart /
 		// OnUpdate own the ticks. Our destructor may call Shutdown again (guard above).
-		// Keep m_Configured until the first terminal POST. reset() clears pending REST
-		// requests (restapi.c:130-133). After a terminal dialog POST, skip it
-		// and keep callback refs: RestApi is process-scoped and can finish the
-		// already-pushed request. A delayed reset() is unsafe because
-		// GetRestContext reuses the same context for the next mission.
+		// Keep m_Configured until the first terminal POST. No reset() runs
+		// here or elsewhere in teardown: it clears pending REST requests
+		// (restapi.c:130-133) while a GET or POST can still be in flight.
+		// RestApi is process-scoped and can finish an already-pushed
+		// request; its callback is held in 4_World until it completes.
 		if (m_DialogJob && m_DialogJob.dialog && m_DialogJob.dialog.state != "")
 		{
 			PostUiDialogJob(m_DialogJob);
-			postedTerminal = true;
 			Log("client shutdown posted dialog terminal; rest reset skipped");
 		}
 
@@ -11064,8 +11042,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		ReleaseCamera();
 
 		// Post the hold terminal before detaching result callbacks. PostResult
-		// inserts a new callback; doing that after DetachBridge would keep
-		// m_Bridge on a callback the shutdown pass never cleared.
+		// inserts a new callback; doing that after DetachSink would keep
+		// a sink on a callback the shutdown pass never cleared.
 		if (m_ActionHoldCommandId >= 0)
 		{
 			MCPCommand holdCommand = new MCPCommand();
@@ -11076,21 +11054,27 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				MCPJob holdJob = new MCPJob();
 				holdJob.id = m_ActionHoldCommandId;
 				PostActionHoldJob(holdJob);
-				postedTerminal = true;
 				m_ActionHoldCommandId = -1;
 			}
+		}
+
+		// Disconnect the sink after the terminal POSTs: a callback that
+		// completes from here on only drops itself from the 4_World holder.
+		if (m_RestSink)
+		{
+			m_RestSink.Disconnect();
 		}
 
 		// A completed cached callback is absent from m_PollCallbackRefs.
 		if (m_PollCallback)
 		{
-			m_PollCallback.DetachBridge();
+			m_PollCallback.DetachSink();
 		}
 
-		// Break the callback->bridge->callback-array ref cycle before
-		// contexts are dropped. Shared context plus a posted terminal
-		// POST keeps the arrays, so a never-completing GET must not keep
-		// a live m_Bridge pointer that pins the bridge across missions.
+		// Break the callback->sink->bridge link before contexts are
+		// dropped, so a never-completing GET cannot keep a live sink
+		// pointer that pins the bridge across missions. The 4_World
+		// holder keeps each in-flight callback until it completes.
 		int i;
 		if (m_PollCallbackRefs)
 		{
@@ -11100,7 +11084,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				MCPClientPollCallback pollCb = MCPClientPollCallback.Cast(m_PollCallbackRefs.Get(i));
 				if (pollCb)
 				{
-					pollCb.DetachBridge();
+					pollCb.DetachSink();
 				}
 
 				i = i + 1;
@@ -11115,7 +11099,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				MCPClientResultCallback resultCb = MCPClientResultCallback.Cast(m_CallbackRefs.Get(i));
 				if (resultCb)
 				{
-					resultCb.DetachBridge();
+					resultCb.DetachSink();
 				}
 
 				i = i + 1;
@@ -11130,34 +11114,20 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 		m_ResultCallbackPool = null;
 
-		bool pollDistinct = false;
-		if (m_PollCtx && m_PollCtx != m_Ctx)
-		{
-			pollDistinct = true;
-		}
-		// postedTerminal keeps the result POST alive. Poll is independent:
-		// an unanswered GET must not pin the bridge across missions.
-		if (pollDistinct)
-		{
-			m_PollCtx.reset();
-		}
+		// No reset() on either context, terminal POST or not: a poll GET
+		// or a result POST can still be in flight, and GetRestContext
+		// hands the same process-scoped context to the next mission.
 		m_PollCtx = null;
 
 		if (m_Ctx)
 		{
-			if (!postedTerminal)
-			{
-				m_Ctx.reset();
-			}
 			m_Ctx = null;
 		}
 
+		// The holder, not these arrays, keeps in-flight callbacks now.
 		if (m_PollCallbackRefs)
 		{
-			if (pollDistinct || !postedTerminal)
-			{
-				m_PollCallbackRefs.Clear();
-			}
+			m_PollCallbackRefs.Clear();
 		}
 
 		// Contexts already nulled above. Drop the live poll pointer after
@@ -11166,10 +11136,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		if (m_CallbackRefs)
 		{
-			if (!postedTerminal)
-			{
-				m_CallbackRefs.Clear();
-			}
+			m_CallbackRefs.Clear();
 		}
 
 		if (m_Pending)

@@ -231,6 +231,8 @@ def _execute_translated_client_poll(source: str, cleaned: str) -> list[str]:
         "MCPCameraPath": object,
         "MCPJobRunner": lambda: SimpleNamespace(Count=lambda: 0),
         "MCPClientPollCallback": lambda _owner: object(),
+        "MCPClientRestForwarder": lambda _owner: SimpleNamespace(Disconnect=lambda: None, IsConnected=lambda: True),
+        "MCPClientRestHolder": SimpleNamespace(Hold=lambda _cb: None, Drop=lambda _cb: None, Count=lambda: 0),
         "GetPollVersion": lambda: WireString.of("12%7E1.30"),
         "LoadCounterQuery": lambda: WireString.of(""),
         "this": object(),
