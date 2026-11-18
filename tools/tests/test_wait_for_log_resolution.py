@@ -47,6 +47,14 @@ Added after the review of the first implementation:
 * P2 #4 scanned.truncated is true when lines the call asked for were lost and
   false after a complete read; file_matches does not publish it.
 
+Added after the second review:
+
+* P1 a status request abandoned at its deadline (a coroutine whose blocking
+  request runs through asyncio.to_thread, as the client's does) does not
+  starve the default executor; at most 2 are live at once.
+* The periodic refresh follows a run that changes during the wait, within
+  the C3 bound on lifecycle_status calls.
+
 Seams these tests rely on, shared with the rest of the suite: the deadline and
 elapsed_s come from time.monotonic and the wait sleeps between probes with
 asyncio.sleep (the fake clocks patch both, as _ExactWaitClock users do); a
@@ -1543,6 +1551,262 @@ class FileMatchesScanReportTest(unittest.IsolatedAsyncioTestCase):
                     "file_matches publishes scanned.truncated without tracking a cut "
                     f"read: {result['scanned']}",
                 )
+
+
+class _ToThreadStatusRuntime:
+    """lifecycle_status shaped like the client's real one.
+
+    ClientRuntime.lifecycle_status is a coroutine whose HTTP round trip is a
+    blocking ``_request_once`` run through ``asyncio.to_thread``
+    (control_client.py:506-508). Cancelling the coroutine does not stop that
+    thread. Here the request blocks on ``release`` for up to ``block_s``;
+    ``max_in_flight`` is the most threads ever inside it at once.
+    """
+
+    def __init__(self, rows: list[dict[str, Any]], *, block_s: float) -> None:
+        self.tool_lock = asyncio.Lock()
+        self.rows = rows
+        self.block_s = block_s
+        self.release = threading.Event()
+        self.requests = 0
+        self.max_in_flight = 0
+        self._in_flight = 0
+        self._lock = threading.Lock()
+
+    @property
+    def in_flight(self) -> int:
+        with self._lock:
+            return self._in_flight
+
+    def _request_once(self) -> dict[str, Any]:
+        with self._lock:
+            self.requests += 1
+            blocked = self.block_s > 0
+            if blocked:
+                self._in_flight += 1
+                self.max_in_flight = max(self.max_in_flight, self._in_flight)
+        try:
+            if blocked:
+                self.release.wait(self.block_s)
+            return {"runs": copy.deepcopy(self.rows)}
+        finally:
+            if blocked:
+                with self._lock:
+                    self._in_flight -= 1
+
+    async def lifecycle_status(self) -> dict[str, Any]:
+        return await asyncio.to_thread(self._request_once)
+
+    async def drained(self, timeout_s: float) -> bool:
+        """Whether every blocked request ended within ``timeout_s`` (real time)."""
+
+        deadline = time.monotonic() + timeout_s
+        while True:
+            if self.in_flight == 0:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.01)
+
+    async def call_bridge(
+        self, cmd: str, args: dict[str, Any], peer: str, timeout_s: float
+    ) -> dict[str, Any]:
+        raise AssertionError(f"log_matches must not call the bridge (got {cmd})")
+
+
+class AbandonedStatusRequestsTest(_ProjectCase, unittest.IsolatedAsyncioTestCase):
+    """Second review, P1: the status request abandoned at a deadline holds no thread.
+
+    lifecycle_status is a coroutine whose blocking request runs through
+    asyncio.to_thread, as the client's does. A run of short waits, more than
+    any default executor has threads, gives up at its deadline one after the
+    other. The event loop's default executor must still run an unrelated job;
+    at most MAX_LIVE_REQUESTS threads are ever inside the request, because an
+    abandoned request keeps its slot until it really ends; and once the
+    requests are released the next wait resolves again.
+    """
+
+    CALLS = 40
+    BLOCK_S = 5.0
+    SHORT_TIMEOUT_S = 0.025
+    MAX_LIVE_REQUESTS = 2
+
+    @slow_test
+    async def test_abandoned_status_requests_do_not_starve_the_default_executor(
+        self,
+    ) -> None:
+        _append(self.project.script_log, f"SCRIPT : {NEEDLE}")
+        store = _SealedPolicyStore(self.project.policy)
+        rows = _status_rows([_launched_run(self.project)])
+        runtime = _ToThreadStatusRuntime(rows, block_s=self.BLOCK_S)
+        self.addCleanup(runtime.release.set)
+        answers: list[tuple[float, dict[str, Any]]] = []
+        with store.installed():
+            try:
+                for _ in range(self.CALLS):
+                    started = time.monotonic()
+                    result = await server.execute_wait_for(
+                        runtime,
+                        "log_matches",
+                        pattern=NEEDLE,
+                        timeout_s=self.SHORT_TIMEOUT_S,
+                        lookback_lines=200,
+                    )
+                    answers.append((time.monotonic() - started, result))
+                live = runtime.in_flight
+                lock_free = not runtime.tool_lock.locked()
+                probe_started = time.monotonic()
+                try:
+                    probe = await asyncio.wait_for(
+                        asyncio.to_thread(lambda: 1), timeout=1.0
+                    )
+                except TimeoutError:
+                    probe = None
+                probe_s = time.monotonic() - probe_started
+            finally:
+                runtime.release.set()
+                drained = await runtime.drained(10.0)
+            runtime.block_s = 0.0
+            recovered = await server.execute_wait_for(
+                runtime,
+                "log_matches",
+                pattern=NEEDLE,
+                timeout_s=2.0,
+                lookback_lines=200,
+            )
+
+        late = [
+            (index, round(elapsed, 3))
+            for index, (elapsed, _result) in enumerate(answers)
+            if elapsed > self.SHORT_TIMEOUT_S + DEADLINE_SLACK_S
+        ]
+        wrong = [
+            (index, result.get("satisfied"), result.get("last_error"))
+            for index, (_elapsed, result) in enumerate(answers)
+            if result.get("satisfied") or result.get("last_error") != LOG_PATHS_TIMEOUT
+        ]
+        self.assertEqual(late, [], "short waits overran their deadline (call, s)")
+        self.assertEqual(
+            wrong, [], "short waits on a blocked request must end in log_paths_timeout"
+        )
+        self.assertTrue(lock_free, "tool_lock was still held after the short waits")
+        self.assertEqual(
+            probe,
+            1,
+            f"after {self.CALLS} waits gave up on a blocked status request, an "
+            f"unrelated asyncio.to_thread job did not run within 1 s "
+            f"({probe_s:.2f} s): {live} threads were still inside the request",
+        )
+        self.assertLessEqual(
+            runtime.max_in_flight,
+            self.MAX_LIVE_REQUESTS,
+            f"{runtime.max_in_flight} threads were inside the blocked status "
+            "request at once; an abandoned request keeps its slot until it ends, "
+            f"so at most {self.MAX_LIVE_REQUESTS} may be live",
+        )
+        self.assertTrue(
+            drained, "a thread was still inside the request 10 s after its release"
+        )
+        self.assertTrue(
+            recovered["satisfied"],
+            "once the blocked requests were released the next wait did not "
+            f"resolve: last_error={recovered.get('last_error')!r}",
+        )
+
+
+class _SwitchingRuntime(_StatusRuntime):
+    """lifecycle_status that answers ``after`` from fake time ``switch_at`` on."""
+
+    def __init__(
+        self,
+        before: list[dict[str, Any]],
+        after: list[dict[str, Any]],
+        *,
+        switch_at: float,
+        clock: _ExactWaitClock,
+    ) -> None:
+        super().__init__(before, clock=clock)
+        self.after = after
+        self.switch_at = switch_at
+
+    async def lifecycle_status(self) -> dict[str, Any]:
+        self.status_calls += 1
+        assert self.clock is not None
+        rows = self.after if self.clock.now >= self.switch_at else self.rows
+        return {"runs": copy.deepcopy(rows)}
+
+
+class RunChangeDuringTheWaitTest(unittest.IsolatedAsyncioTestCase):
+    """Second review: the periodic refresh follows a run that changes mid-wait.
+
+    lifecycle_status answers the first project's run until 6 s of fake time,
+    then that run EXITED and a second project's run, whose script log has the
+    needle. Neither folder is the other's sibling, so only a later full
+    resolution finds the second run's logs. A wait that resolves before
+    polling and on the first probe but never refreshes afterwards misses them.
+    The C3 rule bounds the cost: one lifecycle_status call before polling
+    plus at most one refresh per 5 s, 1 + 15 // 5 = 4 calls in this wait.
+    """
+
+    TIMEOUT_S = 15.0
+    SWITCH_AT_S = 6.0
+
+    def setUp(self) -> None:
+        super().setUp()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        self.first = _Project(root, mod="FirstMod")
+        self.second = _Project(root, mod="SecondMod")
+        self.second_log = self.second.server / "script_2026-11-18_10-00-06.log"
+        _append(self.second_log, "SCRIPT : second run init", f"SCRIPT : {NEEDLE}")
+
+    async def test_a_run_started_during_the_wait_is_read_after_a_refresh(
+        self,
+    ) -> None:
+        first = dataclasses.replace(_launched_run(self.first), run_id="run-first")
+        first_exited = dataclasses.replace(
+            first,
+            owner_session_id=None,
+            owner_lease_id=None,
+            state="EXITED",
+            processes=[],
+        )
+        second = dataclasses.replace(_launched_run(self.second), run_id="run-second")
+        clock = _PollClock()
+        runtime = _SwitchingRuntime(
+            _status_rows([first]),
+            _status_rows([first_exited, second]),
+            switch_at=self.SWITCH_AT_S,
+            clock=clock,
+        )
+        store = _SealedPolicyStore(self.first.policy, self.second.policy)
+        with store.installed(), clock.installed():
+            result = await server.execute_wait_for(
+                runtime,
+                "log_matches",
+                pattern=NEEDLE,
+                timeout_s=self.TIMEOUT_S,
+                poll_interval_s=1.0,
+                lookback_lines=0,
+            )
+
+        summary = (
+            f"probes={result['probes']}, elapsed_s={result['elapsed_s']:.1f}, "
+            f"lifecycle_status calls={runtime.status_calls}, "
+            f"scanned files={_file_names(result)}"
+        )
+        self.assertTrue(
+            result["satisfied"],
+            "the run that started during the wait was never read: the resolution "
+            f"was not refreshed after the first probe ({summary})",
+        )
+        self.assertIn(NEEDLE, result["observed"])
+        self.assertIn("_server/" + self.second_log.name, _file_names(result))
+        self.assertLess(result["elapsed_s"], self.TIMEOUT_S, summary)
+        self.assertLessEqual(
+            runtime.status_calls, 1 + int(self.TIMEOUT_S // 5), summary
+        )
 
 
 if __name__ == "__main__":
