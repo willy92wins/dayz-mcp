@@ -19,10 +19,18 @@ from mcp.server.fastmcp.exceptions import ToolError
 from dayz_mcp import log_tail
 
 
-def _sibling_profile_dirs(profiles: list[str]) -> list[str]:
+def _check_stop(stop: Any) -> None:
+    if stop is not None and stop.stopped:
+        raise TimeoutError
+
+
+def _sibling_profile_dirs(
+    profiles: list[str], *, stop: Any = None
+) -> list[str]:
     """Add the _client/_server sibling when the run only recorded one side."""
     extra: list[str] = []
     for item in profiles:
+        _check_stop(stop)
         path = Path(item)
         parent = path.parent.name.casefold()
         leaf = path.name
@@ -89,16 +97,20 @@ def _newest_rpt_and_script(dated: list[tuple[float, str]]) -> list[str]:
     return [newest[suffix][1] for suffix in (".rpt", ".log") if suffix in newest]
 
 
-def _current_launch_logs(profiles_dir: str, start_epoch: float | None) -> list[str]:
+def _current_launch_logs(
+    profiles_dir: str, start_epoch: float | None, *, stop: Any = None
+) -> list[str]:
     """Return RPT, script and, when the launch time is known, .adm files.
 
     Without a launch timestamp, keep the newest .rpt and the newest .log.
     A .adm is included only when start_epoch is set and the file's mtime is
     at or after that floor, so a leftover from another run is not read.
     """
+    _check_stop(stop)
     paths = log_tail.resolve_log_files(profiles_dir)
     dated: list[tuple[float, str]] = []
     for path in paths:
+        _check_stop(stop)
         # crash_*.log dumps are excluded even when freshly touched: a crash dump
         # carries CE world-create noise by the hundred thousand lines and starves
         # the wait_for scan budget (fb-20260823-130809-413a).
@@ -155,16 +167,23 @@ def _recorded_anchor_in_sealed_project(run: dict[str, Any]) -> bool:
     return _validated_recorded_leaf(policy, run) is not None
 
 
-def _profile_dirs_from_runs(runs: list[dict[str, Any]]) -> list[str]:
+def _profile_dirs_from_runs(
+    runs: list[dict[str, Any]], *, stop: Any = None
+) -> list[str]:
+    from dayz_mcp.dayz_test_tool import _close_policy_memo_scope
+
     allowed: list[str] = []
-    for item in runs:
-        profiles = item.get("profiles")
-        if not log_tail.is_allowed_profiles_dir(profiles):
-            continue
-        if not _recorded_anchor_in_sealed_project(item):
-            continue
-        allowed.append(str(profiles))
-    return _sibling_profile_dirs(sorted(set(allowed)))
+    with _close_policy_memo_scope():
+        for item in runs:
+            _check_stop(stop)
+            profiles = item.get("profiles")
+            if not log_tail.is_allowed_profiles_dir(profiles):
+                continue
+            if not _recorded_anchor_in_sealed_project(item):
+                continue
+            allowed.append(str(profiles))
+    _check_stop(stop)
+    return _sibling_profile_dirs(sorted(set(allowed)), stop=stop)
 
 
 def _offset_before_last_lines(data: bytes, lookback_lines: int) -> int:
@@ -249,6 +268,43 @@ def _marker_rewound_handle(
     )
 
 
+def _window_lost_lookback_lines(
+    window: bytes, window_start: int, lookback_lines: int
+) -> bool:
+    """Whether capping the tail rewind at ``window_start`` lost requested lines."""
+    if lookback_lines <= 0 or window_start <= 0:
+        return False
+    parts = window.split(b"\n")
+    tail_parts = parts[1:]
+    if not tail_parts:
+        return True
+    line_count = len(tail_parts) - 1 if tail_parts[-1] == b"" else len(tail_parts)
+    return line_count < lookback_lines
+
+
+def _rewound_marker(
+    path: str, lookback_lines: int, *, stop: object = None
+) -> tuple[log_tail.TailMarker, bool]:
+    file_path = Path(path)
+    with file_path.open("rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        identity = log_tail._file_identity(
+            handle, min(log_tail.IDENTITY_PREFIX_BYTES, size)
+        )
+        read_size = min(size, log_tail.MAX_TAIL_BYTES)
+        window_start = size - read_size
+        handle.seek(window_start)
+        window = log_tail.read_window(handle, read_size, stop)
+    offset = _offset_before_last_lines_in_window(window, window_start, lookback_lines)
+    truncated = _window_lost_lookback_lines(window, window_start, lookback_lines)
+    return (
+        log_tail.TailMarker(
+            path=str(file_path), offset=offset, size=size, identity=identity
+        ),
+        truncated,
+    )
+
+
 def _marker_rewound(path: str, lookback_lines: int) -> log_tail.TailMarker:
     """Marker rewound by ``lookback_lines``, reading only the file's tail.
 
@@ -259,25 +315,16 @@ def _marker_rewound(path: str, lookback_lines: int) -> log_tail.TailMarker:
     not from ``stat(path)``: the game is appending to this file while we read it,
     so the size has to describe the bytes we actually took.
     """
-    file_path = Path(path)
-    with file_path.open("rb") as handle:
-        size = os.fstat(handle.fileno()).st_size
-        identity = log_tail._file_identity(
-            handle, min(log_tail.IDENTITY_PREFIX_BYTES, size)
-        )
-        read_size = min(size, log_tail.MAX_TAIL_BYTES)
-        window_start = size - read_size
-        handle.seek(window_start)
-        window = handle.read(read_size)
-    offset = _offset_before_last_lines_in_window(window, window_start, lookback_lines)
-    return log_tail.TailMarker(
-        path=str(file_path), offset=offset, size=size, identity=identity
-    )
+    marker, _truncated = _rewound_marker(path, lookback_lines)
+    return marker
 
 
-def _log_markers_at_end(paths: list[str]) -> dict[str, log_tail.TailMarker]:
+def _log_markers_at_end(
+    paths: list[str], *, stop: Any = None
+) -> dict[str, log_tail.TailMarker]:
     markers: dict[str, log_tail.TailMarker] = {}
     for path in paths:
+        _check_stop(stop)
         try:
             result = log_tail.read_since(path, None)
         except log_tail.LogTailError:
@@ -286,23 +333,39 @@ def _log_markers_at_end(paths: list[str]) -> dict[str, log_tail.TailMarker]:
     return markers
 
 
+def _log_markers_with_lookback_status(
+    paths: list[str], lookback_lines: int, *, stop: Any = None
+) -> tuple[dict[str, log_tail.TailMarker], bool]:
+    if lookback_lines <= 0:
+        return _log_markers_at_end(paths, stop=stop), False
+    markers: dict[str, log_tail.TailMarker] = {}
+    truncated = False
+    for path in paths:
+        _check_stop(stop)
+        try:
+            marker, cut = _rewound_marker(path, lookback_lines, stop=stop)
+        except TimeoutError:
+            raise
+        except (OSError, log_tail.LogTailError):
+            continue
+        markers[path] = marker
+        truncated = truncated or cut
+    return markers, truncated
+
+
 def _log_markers_with_lookback(
     paths: list[str], lookback_lines: int
 ) -> dict[str, log_tail.TailMarker]:
-    if lookback_lines <= 0:
-        return _log_markers_at_end(paths)
-    markers: dict[str, log_tail.TailMarker] = {}
-    for path in paths:
-        try:
-            markers[path] = _marker_rewound(path, lookback_lines)
-        except (OSError, log_tail.LogTailError):
-            continue
+    markers, _truncated = _log_markers_with_lookback_status(paths, lookback_lines)
     return markers
 
 
 def _new_log_lines(
-    paths: list[str], markers: dict[str, log_tail.TailMarker]
-) -> tuple[list[str], dict[str, log_tail.TailMarker], dict[str, int]]:
+    paths: list[str],
+    markers: dict[str, log_tail.TailMarker],
+    *,
+    stop: Any = None,
+) -> tuple[list[str], dict[str, log_tail.TailMarker], dict[str, int], bool]:
     """New lines since ``markers``, plus how many each file contributed.
 
     A path missing from the returned counts could not be read at all. That is
@@ -312,7 +375,9 @@ def _new_log_lines(
     lines: list[str] = []
     updated = dict(markers)
     counts: dict[str, int] = {}
+    truncated = False
     for path in paths:
+        _check_stop(stop)
         try:
             result = log_tail.read_since(path, markers.get(path))
         except log_tail.LogTailError:
@@ -320,7 +385,8 @@ def _new_log_lines(
         updated[path] = result["marker"]
         lines.extend(result["lines"])
         counts[path] = len(result["lines"])
-    return lines, updated, counts
+        truncated = truncated or bool(result["truncated"])
+    return lines, updated, counts, truncated
 
 
 def _log_label(path: str) -> str:
@@ -355,6 +421,7 @@ def _scanned_report(
     unreadable: set[str],
     lookback_from: str,
     scan_truncated: bool,
+    truncated: bool | None = None,
 ) -> dict[str, Any]:
     """What wait_for actually read, so a no-match is visible as a no-match.
 
@@ -377,6 +444,8 @@ def _scanned_report(
         "files": files,
         "lines_total": sum(int(item["lines"]) for item in files),
     }
+    if truncated is not None:
+        report["truncated"] = truncated
     if lookback_from == "launch":
         report["scan_truncated"] = scan_truncated
     return report

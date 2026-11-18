@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import json
 import math
@@ -4338,6 +4339,33 @@ def _start_role_roots() -> dict[str, str] | None:
     return mapping
 
 
+_close_policy_memo: contextvars.ContextVar[dict[str, object] | None] = (
+    contextvars.ContextVar("close_policy_memo", default=None)
+)
+
+
+@contextmanager
+def _close_policy_memo_scope() -> Iterator[None]:
+    """Share one sealed-policy load between the runs of a single call."""
+    token = _close_policy_memo.set({})
+    try:
+        yield
+    finally:
+        _close_policy_memo.reset(token)
+
+
+def _load_sealed_policies() -> tuple[dayz_test_request.RequestProjectPolicy, ...] | None:
+    from dayz_mcp.launcher_registry import try_open_approved_launcher
+
+    try:
+        with try_open_approved_launcher("dayz-test-v1") as opened:
+            opened.validate_native_pe()
+            with secure_launcher.load_verified_bundle(opened) as bundle:
+                return _semantic_policies(bundle.sealed_policies)
+    except Exception:
+        return None
+
+
 def _close_project_policy(
     run: dict[str, object],
 ) -> dayz_test_request.RequestProjectPolicy | None:
@@ -4349,14 +4377,15 @@ def _close_project_policy(
     and with no cache this returns None and the close falls back to
     the conservative logout wait (see `_wait_for_connected_logouts`).
     """
-    from dayz_mcp.launcher_registry import try_open_approved_launcher
-
-    try:
-        with try_open_approved_launcher("dayz-test-v1") as opened:
-            opened.validate_native_pe()
-            with secure_launcher.load_verified_bundle(opened) as bundle:
-                policies = _semantic_policies(bundle.sealed_policies)
-    except Exception:
+    memo = _close_policy_memo.get()
+    if memo is None:
+        policies = _load_sealed_policies()
+    elif "policies" in memo:
+        policies = memo["policies"]  # type: ignore[assignment]
+    else:
+        policies = _load_sealed_policies()
+        memo["policies"] = policies
+    if policies is None:
         return None
     matches = [item for item in policies if run.get("mod") == "@" + item.mod]
     if len(matches) != 1:
