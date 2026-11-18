@@ -15,35 +15,35 @@ class MCPClientRestSink
 		return false;
 	}
 
-	void ReleaseCallback(RestCallback cb)
+	void SinkReleaseCallback(RestCallback cb)
 	{
 	}
 
-	void RecycleResultCallback(MCPClientResultCallback cb)
+	void SinkRecycleResultCallback(MCPClientResultCallback cb)
 	{
 	}
 
-	void OnPollSuccess(string data, int dataSize)
+	void SinkOnPollSuccess(string data, int dataSize)
 	{
 	}
 
-	void OnPollError(int errorCode)
+	void SinkOnPollError(int errorCode)
 	{
 	}
 
-	void OnPollTimeout()
+	void SinkOnPollTimeout()
 	{
 	}
 
-	void OnResultSuccess(string data, int dataSize)
+	void SinkOnResultSuccess(string data, int dataSize)
 	{
 	}
 
-	void OnResultError(int errorCode)
+	void SinkOnResultError(int errorCode)
 	{
 	}
 
-	void OnResultTimeout()
+	void SinkOnResultTimeout()
 	{
 	}
 };
@@ -126,13 +126,13 @@ class MCPClientPollCallback : RestCallback
 		{
 			return;
 		}
-		m_Sink.ReleaseCallback(this);
+		m_Sink.SinkReleaseCallback(this);
 		if (!m_Sink.IsPollActive(this))
 		{
 			DetachSink();
 			return;
 		}
-		m_Sink.OnPollSuccess(data, dataSize);
+		m_Sink.SinkOnPollSuccess(data, dataSize);
 	}
 
 	override void OnError(int errorCode)
@@ -142,13 +142,13 @@ class MCPClientPollCallback : RestCallback
 		{
 			return;
 		}
-		m_Sink.ReleaseCallback(this);
+		m_Sink.SinkReleaseCallback(this);
 		if (!m_Sink.IsPollActive(this))
 		{
 			DetachSink();
 			return;
 		}
-		m_Sink.OnPollError(errorCode);
+		m_Sink.SinkOnPollError(errorCode);
 		DetachSink();
 	}
 
@@ -159,13 +159,13 @@ class MCPClientPollCallback : RestCallback
 		{
 			return;
 		}
-		m_Sink.ReleaseCallback(this);
+		m_Sink.SinkReleaseCallback(this);
 		if (!m_Sink.IsPollActive(this))
 		{
 			DetachSink();
 			return;
 		}
-		m_Sink.OnPollTimeout();
+		m_Sink.SinkOnPollTimeout();
 		DetachSink();
 	}
 };
@@ -197,10 +197,10 @@ class MCPClientResultCallback : RestCallback
 		{
 			return;
 		}
-		m_Sink.ReleaseCallback(this);
-		m_Sink.OnResultSuccess(data, dataSize);
+		m_Sink.SinkReleaseCallback(this);
+		m_Sink.SinkOnResultSuccess(data, dataSize);
 		// Back to the free list detached: an idle callback holds no sink.
-		m_Sink.RecycleResultCallback(this);
+		m_Sink.SinkRecycleResultCallback(this);
 		DetachSink();
 	}
 
@@ -211,8 +211,8 @@ class MCPClientResultCallback : RestCallback
 		{
 			return;
 		}
-		m_Sink.ReleaseCallback(this);
-		m_Sink.OnResultError(errorCode);
+		m_Sink.SinkReleaseCallback(this);
+		m_Sink.SinkOnResultError(errorCode);
 		// OnError may repeat (restapi.c:53): never reuse this identity.
 		DetachSink();
 	}
@@ -224,8 +224,8 @@ class MCPClientResultCallback : RestCallback
 		{
 			return;
 		}
-		m_Sink.ReleaseCallback(this);
-		m_Sink.OnResultTimeout();
+		m_Sink.SinkReleaseCallback(this);
+		m_Sink.SinkOnResultTimeout();
 		DetachSink();
 	}
 };

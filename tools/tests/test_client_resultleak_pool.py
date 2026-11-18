@@ -139,19 +139,19 @@ class RestSink:
     def IsPollActive(self, cb) -> bool:
         return False
 
-    def ReleaseCallback(self, cb) -> None:
+    def SinkReleaseCallback(self, cb) -> None:
         self.owner.ReleaseCallback(cb)
 
-    def RecycleResultCallback(self, cb) -> None:
+    def SinkRecycleResultCallback(self, cb) -> None:
         self.owner.RecycleResultCallback(cb)
 
-    def OnResultSuccess(self, data, size) -> None:
+    def SinkOnResultSuccess(self, data, size) -> None:
         self.owner.OnResultSuccess(data, size)
 
-    def OnResultError(self, code) -> None:
+    def SinkOnResultError(self, code) -> None:
         self.owner.OnResultError(code)
 
-    def OnResultTimeout(self) -> None:
+    def SinkOnResultTimeout(self) -> None:
         self.owner.OnResultTimeout()
 
 
@@ -563,7 +563,7 @@ class ClientResultPoolMutationTest(unittest.TestCase):
             model.post(2)
 
     def test_omitting_the_recycle_allocates_one_callback_per_result(self) -> None:
-        model = self._callback_mutant("m_Sink.RecycleResultCallback(this);")
+        model = self._callback_mutant("m_Sink.SinkRecycleResultCallback(this);")
         for identity in range(50):
             model.complete(model.post(identity))
         self.assertEqual(len(model.allocations), 50)
@@ -572,8 +572,8 @@ class ClientResultPoolMutationTest(unittest.TestCase):
         source = WORLD_PATH.read_text(encoding="utf-8")
         start = source.index(CALLBACK_CLASS)
         success = source.index("override void OnSuccess(", start)
-        release = source.index("m_Sink.ReleaseCallback(this);", success)
-        mutant = source[:release] + source[release + len("m_Sink.ReleaseCallback(this);") :]
+        release = source.index("m_Sink.SinkReleaseCallback(this);", success)
+        mutant = source[:release] + source[release + len("m_Sink.SinkReleaseCallback(this);") :]
         model = ClientModel(callback_source=mutant)
         model.complete(model.post(1))
         self.assertEqual(model.refs.Count(), 1)
@@ -613,14 +613,14 @@ class ClientResultPoolSourceTest(unittest.TestCase):
         self.assertIn(ADMISSION, _body(self.source, "protected void StartPoll()"))
         for event in ("Error", "Timeout"):
             handler = _body(self.callback, CALLBACK_SIGNATURES[4 if event == "Error" else 5])
-            self.assertNotIn("RecycleResultCallback", handler)
+            self.assertNotIn("SinkRecycleResultCallback", handler)
             self.assertIn("DetachSink();", handler)
             self.assertIn("MCPClientRestHolder.Drop(this);", handler)
         success = _body(self.callback, CALLBACK_SIGNATURES[3])
-        self.assertLess(success.index("MCPClientRestHolder.Drop(this);"), success.index("ReleaseCallback(this)"))
-        self.assertLess(success.index("ReleaseCallback(this)"), success.index("OnResultSuccess("))
-        self.assertLess(success.index("OnResultSuccess("), success.index("RecycleResultCallback(this)"))
-        self.assertLess(success.index("RecycleResultCallback(this)"), success.index("DetachSink();"))
+        self.assertLess(success.index("MCPClientRestHolder.Drop(this);"), success.index("SinkReleaseCallback(this)"))
+        self.assertLess(success.index("SinkReleaseCallback(this)"), success.index("SinkOnResultSuccess("))
+        self.assertLess(success.index("SinkOnResultSuccess("), success.index("SinkRecycleResultCallback(this)"))
+        self.assertLess(success.index("SinkRecycleResultCallback(this)"), success.index("DetachSink();"))
 
     def test_post_takes_a_pooled_callback_and_stays_immediate_async(self) -> None:
         post = _body(self.source, POST)

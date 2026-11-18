@@ -88,18 +88,28 @@ class PollWatchdogContractTest(unittest.TestCase):
         polarity = "if (!m_Sink.IsPollActive(this))"
         inverted = "if (m_Sink.IsPollActive(this))"
         for event_sig, dispatch in (
-            ("override void OnSuccess", "OnPollSuccess("),
-            ("override void OnError", "OnPollError("),
-            ("override void OnTimeout", "OnPollTimeout("),
+            ("override void OnSuccess", "SinkOnPollSuccess("),
+            ("override void OnError", "SinkOnPollError("),
+            ("override void OnTimeout", "SinkOnPollTimeout("),
         ):
             body = _brace_body(callback, event_sig)
             self.assertIn("MCPClientRestHolder.Drop(this);", body)
             self.assertLess(body.index("MCPClientRestHolder.Drop(this);"), body.index("IsConnected()"))
             self.assertIn(polarity, body)
             self.assertNotIn(inverted, body)
-            self.assertLess(body.index("ReleaseCallback(this)"), body.index(polarity))
-            self.assertLess(body.index(polarity), body.index("return;"))
-            self.assertLess(body.index("return;"), body.index(dispatch))
+            self.assertLess(body.index("SinkReleaseCallback(this)"), body.index(polarity))
+            self.assertLess(
+                body.index("if (!m_Sink || !m_Sink.IsConnected())"),
+                body.index(polarity),
+            )
+            self.assertLess(
+                body.index(polarity),
+                body.index("return;", body.index(polarity)),
+            )
+            self.assertLess(
+                body.index("return;", body.index(polarity)),
+                body.index(dispatch),
+            )
 
     def test_callback_identity_contract(self) -> None:
         source = CLIENT.read_text(encoding="utf-8")
@@ -152,12 +162,16 @@ class PollWatchdogContractTest(unittest.TestCase):
         on_success = _brace_body(callback, "override void OnSuccess")
         self.assertIn("if (!m_Sink.IsPollActive(this))", on_success)
         self.assertLess(
+            on_success.index("if (!m_Sink || !m_Sink.IsConnected())"),
             on_success.index("if (!m_Sink.IsPollActive(this))"),
-            on_success.index("return;"),
         )
         self.assertLess(
-            on_success.index("return;"),
-            on_success.index("OnPollSuccess("),
+            on_success.index("if (!m_Sink.IsPollActive(this))"),
+            on_success.index("return;", on_success.index("if (!m_Sink.IsPollActive(this))")),
+        )
+        self.assertLess(
+            on_success.index("return;", on_success.index("if (!m_Sink.IsPollActive(this))")),
+            on_success.index("SinkOnPollSuccess("),
         )
 
         on_tick = _brace_body(source, "void OnTick(float timeslice)")

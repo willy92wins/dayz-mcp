@@ -68,11 +68,11 @@ class CallbackLifetimeContractTest(unittest.TestCase):
                 with self.subTest(kind=kind, event=event):
                     method = body(cls, "override void On" + event + "(")
                     channel = "Poll" if kind == "MCPClientPollCallback" else "Result"
-                    dispatch = "m_Sink.On" + channel + event + "("
+                    dispatch = "m_Sink.SinkOn" + channel + event + "("
                     self.assertIn("DetachSink();", method[method.index(dispatch):])
                     self.assertIn("MCPClientRestHolder.Drop(this);", method)
-                    self.assertIn("m_Sink.ReleaseCallback(this);", method)
-                    self.assertLess(method.index("MCPClientRestHolder.Drop(this);"), method.index("m_Sink.ReleaseCallback(this);"))
+                    self.assertIn("m_Sink.SinkReleaseCallback(this);", method)
+                    self.assertLess(method.index("MCPClientRestHolder.Drop(this);"), method.index("m_Sink.SinkReleaseCallback(this);"))
 
     def test_singletons_own_bridges_through_mission_until_explicit_shutdown(self):
         for owner in ("MCPBridge", "MCPClientBridge"):
@@ -109,9 +109,9 @@ class CallbackLifetimeContractTest(unittest.TestCase):
                         rejection = body(method, active).strip()
                         self.assertEqual(rejection, "DetachSink();\n\t\t\treturn;")
                         self.assertIn("MCPClientRestHolder.Drop(this);", method)
-                        self.assertLess(method.index("MCPClientRestHolder.Drop(this);"), method.index("ReleaseCallback(this)"))
-                        self.assertLess(method.index("ReleaseCallback(this)"), method.index(active))
-                        self.assertLess(method.index(active), method.index("m_Sink.OnPoll" + event + "("))
+                        self.assertLess(method.index("MCPClientRestHolder.Drop(this);"), method.index("SinkReleaseCallback(this)"))
+                        self.assertLess(method.index("SinkReleaseCallback(this)"), method.index(active))
+                        self.assertLess(method.index(active), method.index("m_Sink.SinkOnPoll" + event + "("))
                     else:
                         active = "if (!m_Bridge.IsActivePollCallback(this))"
                         rejection = body(method, active).strip()

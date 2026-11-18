@@ -28,7 +28,7 @@ class MCPClientRestForwarder : MCPClientRestSink
 		return m_Owner.IsActivePollCallback(cb);
 	}
 
-	override void ReleaseCallback(RestCallback cb)
+	override void SinkReleaseCallback(RestCallback cb)
 	{
 		if (m_Owner)
 		{
@@ -36,7 +36,7 @@ class MCPClientRestForwarder : MCPClientRestSink
 		}
 	}
 
-	override void RecycleResultCallback(MCPClientResultCallback cb)
+	override void SinkRecycleResultCallback(MCPClientResultCallback cb)
 	{
 		if (m_Owner)
 		{
@@ -44,7 +44,7 @@ class MCPClientRestForwarder : MCPClientRestSink
 		}
 	}
 
-	override void OnPollSuccess(string data, int dataSize)
+	override void SinkOnPollSuccess(string data, int dataSize)
 	{
 		if (m_Owner)
 		{
@@ -52,7 +52,7 @@ class MCPClientRestForwarder : MCPClientRestSink
 		}
 	}
 
-	override void OnPollError(int errorCode)
+	override void SinkOnPollError(int errorCode)
 	{
 		if (m_Owner)
 		{
@@ -60,7 +60,7 @@ class MCPClientRestForwarder : MCPClientRestSink
 		}
 	}
 
-	override void OnPollTimeout()
+	override void SinkOnPollTimeout()
 	{
 		if (m_Owner)
 		{
@@ -68,7 +68,7 @@ class MCPClientRestForwarder : MCPClientRestSink
 		}
 	}
 
-	override void OnResultSuccess(string data, int dataSize)
+	override void SinkOnResultSuccess(string data, int dataSize)
 	{
 		if (m_Owner)
 		{
@@ -76,7 +76,7 @@ class MCPClientRestForwarder : MCPClientRestSink
 		}
 	}
 
-	override void OnResultError(int errorCode)
+	override void SinkOnResultError(int errorCode)
 	{
 		if (m_Owner)
 		{
@@ -84,7 +84,7 @@ class MCPClientRestForwarder : MCPClientRestSink
 		}
 	}
 
-	override void OnResultTimeout()
+	override void SinkOnResultTimeout()
 	{
 		if (m_Owner)
 		{

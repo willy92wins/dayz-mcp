@@ -106,7 +106,7 @@ class ClientTeardownRestApiTest(unittest.TestCase):
                     )
                     self.assertLess(
                         body.index("if (!m_Sink || !m_Sink.IsConnected())"),
-                        body.index("m_Sink.ReleaseCallback(this);"),
+                        body.index("m_Sink.SinkReleaseCallback(this);"),
                     )
 
     def test_disconnected_sink_delivers_nothing(self) -> None:
