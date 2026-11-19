@@ -49,7 +49,12 @@ from dayz_mcp.server import (
     ToolError,
     build_app,
 )
-from dayz_mcp.session_coordination import READ_ONLY_COMMANDS, command_requires_lease
+from dayz_mcp.session_coordination import (
+    ClientIdentity,
+    READ_ONLY_COMMANDS,
+    SessionCoordinator,
+    command_requires_lease,
+)
 from tests._addon_paths import addon_root
 from tests.bridge_client_capabilities_helpers import announced_caps, dispatch_census
 from tests.enforce_subset_helpers import (
@@ -60,9 +65,10 @@ from tests.enforce_subset_helpers import (
     clean,
     fake_class,
     method_body,
+    python_source,
     translate,
 )
-from tests.fence_helpers import bind_both_peers
+from tests.fence_helpers import INST_SERVER, bind_both_peers, bound_queue
 from tests.mcp_helpers import _content_json
 
 
@@ -229,6 +235,19 @@ _LOCAL_DECLARATION = re.compile(
     + "|".join(_LOCAL_TYPES)
     + r")\s+(\w+)\s*(?:=[^;]*)?;\s*$"
 )
+_IDENTITY: dict[str, object] = {
+    "platform": "codex",
+    "pid": 12,
+    "ppid": 1,
+    "started_at_utc": "2026-10-24T00:00:00Z",
+    "session_id": "loot-cone-session",
+    "task_label": "loot_los_cone",
+}
+_NET_ID_CALL_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<recv>[A-Za-z_]\w*)\.GetNetworkID\("
+    r"(?P<low>[A-Za-z_]\w*)\s*,\s*(?P<high>[A-Za-z_]\w*)\)$",
+    re.MULTILINE,
+)
 
 
 class _LootConeString(EnforceString):
@@ -268,6 +287,63 @@ def _in_order(test: unittest.TestCase, body: str, *tokens: str) -> None:
         test.assertIn(token, body)
         positions.append(body.index(token))
     test.assertEqual(positions, sorted(positions), tokens)
+
+
+def _block_after(source: str, start: int) -> str:
+    brace = source.index("{", start)
+    if source[start:brace].strip():
+        raise AssertionError(
+            f"unexpected text before block: {source[start:brace]!r}"
+        )
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[brace + 1 : index]
+    raise AssertionError(f"unterminated block at offset {start}")
+
+
+def _if_body(source: str, condition: str) -> str:
+    needle = f"if ({condition})"
+    if source.count(needle) != 1:
+        raise AssertionError(f"{needle!r} occurs {source.count(needle)} times")
+    return _block_after(source, source.index(needle) + len(needle))
+
+
+def _announce_server(
+    state: loopback.ServerState, commands: list[str], ach: str | None
+) -> None:
+    state.daemon_generation = "gen-loot-cone"
+    state._peer_caps["server"] = {
+        "generation": state.daemon_generation,
+        "commands": list(commands),
+        "reason": "ok",
+        "arg_contract_hash": ach,
+        "announced_at": state._now(),
+        "instance": INST_SERVER,
+    }
+
+
+def _coordinated_state() -> loopback.ServerState:
+    state = loopback.ServerState("test-key")
+    bind_both_peers(state)
+    _announce_server(
+        state,
+        sorted(_BRIDGE_COMMAND_TOOLS["server"]),
+        EXPECTED_SERVER_ARG_CONTRACT_HASH,
+    )
+    state.coordination = SessionCoordinator(
+        token_fn=lambda: "token",
+        id_fn=lambda: "lease",
+        audit=lambda event: True,
+        cleanup=lambda session, lease, reason, active: state.cleanup_owner(
+            session, lease, reason, active
+        ),
+    )
+    return state
 
 
 def _locals_declared_at_top(body: str) -> list[str]:
@@ -540,6 +616,110 @@ class RequestAndIngressTest(unittest.TestCase):
                     (403, {"error": "live_profile_refused"}),
                 )
 
+    def test_t2_coordinator_refuses_missing_and_invalid_lease_without_queueing(self) -> None:
+        state = _coordinated_state()
+        before_id = state._next_id
+
+        # Missing lease token: 423 lease_required, nothing queued, id untouched.
+        self.assertEqual(
+            state.enqueue_command(
+                COMMAND, _wire_args(), peer="server", identity_payload=_IDENTITY
+            ),
+            (423, {"error": "lease_required"}),
+        )
+        self.assertEqual(bound_queue(state, "server"), [])
+        self.assertEqual(state._next_id, before_id)
+
+        # Invalid lease token before any lease is active: 403 lease_invalid, nothing queued.
+        self.assertEqual(
+            state.enqueue_command(
+                COMMAND,
+                _wire_args(),
+                peer="server",
+                identity_payload=_IDENTITY,
+                lease_token="wrong-token",
+            ),
+            (403, {"error": "lease_invalid"}),
+        )
+        self.assertEqual(bound_queue(state, "server"), [])
+        self.assertEqual(state._next_id, before_id)
+
+        # Invalid token while a lease is active is still refused without queueing.
+        client = ClientIdentity.from_payload(_IDENTITY)
+        acq_status, grant = state.coordination.acquire(client, "loot_los_cone")  # type: ignore[union-attr]
+        self.assertEqual(acq_status, 200)
+        self.assertEqual(
+            state.enqueue_command(
+                COMMAND,
+                _wire_args(),
+                peer="server",
+                identity_payload=_IDENTITY,
+                lease_token="wrong-token",
+            ),
+            (403, {"error": "lease_invalid"}),
+        )
+        self.assertEqual(bound_queue(state, "server"), [])
+        self.assertEqual(state._next_id, before_id)
+
+        # Valid lease token enqueues the command on the server peer.
+        status, body = state.enqueue_command(
+            COMMAND,
+            _wire_args(),
+            peer="server",
+            identity_payload=_IDENTITY,
+            lease_token=grant["lease_token"],
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(bound_queue(state, "server")), 1)
+        self.assertEqual(state._next_id, before_id + 1)
+
+    def test_t2_enqueue_refuses_invalid_half_yaw_deg_with_valid_lease(self) -> None:
+        state = _coordinated_state()
+        client = ClientIdentity.from_payload(_IDENTITY)
+        acq_status, grant = state.coordination.acquire(client, "loot_los_cone")  # type: ignore[union-attr]
+        self.assertEqual(acq_status, 200)
+        lease_token = grant["lease_token"]
+        before_id = state._next_id
+
+        for bad_half_yaw in (
+            0,
+            0.0,
+            -0.5,
+            30.01,
+            30.5,
+            math.nan,
+            math.inf,
+            -math.inf,
+            True,
+            False,
+            "10.0",
+        ):
+            with self.subTest(half_yaw_deg=bad_half_yaw):
+                self.assertEqual(
+                    state.enqueue_command(
+                        COMMAND,
+                        _wire_args(half_yaw_deg=bad_half_yaw),
+                        peer="server",
+                        identity_payload=_IDENTITY,
+                        lease_token=lease_token,
+                    ),
+                    (400, {"error": "bad_args"}),
+                )
+                self.assertEqual(bound_queue(state, "server"), [])
+                self.assertEqual(state._next_id, before_id)
+
+        # Exact cap (30.0) passes ingress with the same valid lease.
+        status, body = state.enqueue_command(
+            COMMAND,
+            _wire_args(half_yaw_deg=loot_los_cone.HALF_YAW_MAX_DEG),
+            peer="server",
+            identity_payload=_IDENTITY,
+            lease_token=lease_token,
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(bound_queue(state, "server")), 1)
+        self.assertEqual(state._next_id, before_id + 1)
+
 
 class CensusAndContractHashTest(unittest.TestCase):
     """T3 (server capability census & mask) and T4 (SERVER_ARG_CONTRACT & ach)."""
@@ -555,10 +735,17 @@ class CensusAndContractHashTest(unittest.TestCase):
         branches = _server_dispatch_branches(server_src)
         self.assertIn(COMMAND, branches)
         dispatch = method_body(server_src, SIG_DISPATCH_CHAIN)
+        self.assertEqual(
+            dispatch.count(f'else if (command.cmd == "{COMMAND}")'), 1
+        )
+        branch = _if_body(dispatch, f'command.cmd == "{COMMAND}"')
+        self.assertEqual(
+            branch.strip(), "postNow = DispatchLootLosCone(command, result);"
+        )
         _in_order(
             self,
             dispatch,
-            'command.cmd == "loot_los_cone"',
+            f'else if (command.cmd == "{COMMAND}")',
             "postNow = DispatchLootLosCone(command, result);",
             'result.error = "unknown_command";',
         )
@@ -1552,12 +1739,16 @@ class _FakeItem:
         class_name: str = "ItemBase",
         parent: object = None,
         net_id_log: list[object] | None = None,
+        net_low: int = 0,
+        net_high: int = 0,
     ) -> None:
         self._item_type = _LootConeString.of(item_type)
         self._class_name = _LootConeString.of(class_name)
         self._pos = EnforceVector(pos)
         self._parent = parent
         self._net_id_log = net_id_log
+        self._net_low = net_low
+        self._net_high = net_high
 
     def GetHierarchyParent(self) -> object:
         return self._parent
@@ -1565,9 +1756,10 @@ class _FakeItem:
     def GetPosition(self) -> EnforceVector:
         return EnforceVector(self._pos)
 
-    def GetNetworkID(self, _low: int, _high: int) -> None:
+    def GetNetworkID(self, _low: int, _high: int) -> tuple[int, int]:
         if self._net_id_log is not None:
             self._net_id_log.append(self)
+        return self._net_low, self._net_high
 
     def GetType(self) -> _LootConeString:
         return self._item_type
@@ -1733,10 +1925,13 @@ class DispatchLootLosConeTest(unittest.TestCase):
         translate(self.bridge, SIG_NEAREST, ns, class_types=("array",))
         translate(self.bridge, SIG_GAP_KIND, ns)
         translate(self.bridge, SIG_CANDIDATE, ns, class_types=("Object", "InventoryItem"))
-        dispatch = translate(
+        # enforce_subset_helpers.translate only supports out_functions on bare
+        # non-void assignment calls, not void method calls like
+        # candItem.GetNetworkID(candNetLow, candNetHigh);. Bind that one
+        # translated call so the double returns (low, high) into the locals.
+        dispatch_name, dispatch_code = python_source(
             self.bridge,
             SIG_DISPATCH,
-            ns,
             class_types=(
                 "MCPCommand",
                 "MCPResult",
@@ -1753,6 +1948,18 @@ class DispatchLootLosConeTest(unittest.TestCase):
             ),
             members=("m_ReadyObjects", "m_ReadyProxyCargos"),
         )
+        net_id_matches = list(_NET_ID_CALL_RE.finditer(dispatch_code))
+        if len(net_id_matches) != 1:
+            raise AssertionError(
+                f"expected 1 GetNetworkID call in {dispatch_name}, got {len(net_id_matches)}"
+            )
+        dispatch_code = _NET_ID_CALL_RE.sub(
+            r"\g<indent>\g<low>, \g<high> = \g<recv>.GetNetworkID(\g<low>, \g<high>)",
+            dispatch_code,
+            count=1,
+        )
+        exec(compile(dispatch_code, f"<enforce:{dispatch_name}>", "exec"), ns)
+        dispatch = ns[dispatch_name]
         return dispatch, {
             "clock_reads": clock_reads,
             "query_calls": query_calls,
@@ -1822,12 +2029,29 @@ class DispatchLootLosConeTest(unittest.TestCase):
         side_item = _FakeItem("SideCan", (14.0, 1.7, 20.0), net_id_log=net_id_log)
         edge_radius_item = _FakeItem("EdgeRadiusCan", (10.0, 1.7, 28.0), net_id_log=net_id_log)
 
-        item_1 = _FakeItem("Can_01", (10.0, 0.2, 22.0), net_id_log=net_id_log)
-        item_2 = _FakeItem("", (10.0, 1.7, 23.0), class_name="FallbackItem", net_id_log=net_id_log)
-        item_3 = _FakeItem("Can_03", (10.0, 1.7, 24.0), net_id_log=net_id_log)
-        item_4 = _FakeItem("Can_04", (10.0, 1.7, 25.0), net_id_log=net_id_log)
-        item_5 = _FakeItem("Can_05", (10.0, 1.7, 26.0), net_id_log=net_id_log)
-        item_6 = _FakeItem("Can_06", (10.0, 1.7, 27.0), net_id_log=net_id_log)
+        item_1 = _FakeItem(
+            "Can_01", (10.0, 0.2, 22.0), net_id_log=net_id_log, net_low=101, net_high=11
+        )
+        item_2 = _FakeItem(
+            "",
+            (10.0, 1.7, 23.0),
+            class_name="FallbackItem",
+            net_id_log=net_id_log,
+            net_low=202,
+            net_high=-22,
+        )
+        item_3 = _FakeItem(
+            "Can_03", (10.0, 1.7, 24.0), net_id_log=net_id_log, net_low=-303, net_high=33
+        )
+        item_4 = _FakeItem(
+            "Can_04", (10.0, 1.7, 25.0), net_id_log=net_id_log, net_low=404, net_high=44
+        )
+        item_5 = _FakeItem(
+            "Can_05", (10.0, 1.7, 26.0), net_id_log=net_id_log, net_low=505, net_high=-55
+        )
+        item_6 = _FakeItem(
+            "Can_06", (10.0, 1.7, 27.0), net_id_log=net_id_log, net_low=606, net_high=66
+        )
 
         world_objects = [
             obs_a,
@@ -1945,6 +2169,18 @@ class DispatchLootLosConeTest(unittest.TestCase):
             emitted_types,
             ["Can_01", "FallbackItem", "Can_03", "Can_04", "Can_05", "Can_06"],
         )
+        expected_net_ids = [
+            ("Can_01", 101, 11),
+            ("FallbackItem", 202, -22),
+            ("Can_03", -303, 33),
+            ("Can_04", 404, 44),
+            ("Can_05", 505, -55),
+            ("Can_06", 606, 66),
+        ]
+        self.assertEqual(
+            [(r.item_type.text, r.net_low, r.net_high) for r in read.rows],
+            expected_net_ids,
+        )
         for excluded in ("HeldCan", "SideCan", "EdgeRadiusCan"):
             self.assertNotIn(excluded, emitted_types)
         self.assertEqual(len(net_id_log), 6)
@@ -1991,6 +2227,137 @@ class DispatchLootLosConeTest(unittest.TestCase):
         wire_payload = {"ok": 1, FIELD: _to_wire_value(read)}
         normalized = loot_los_cone.normalize_bridge_result(wire_payload)
         self.assertEqual(len(normalized["evidence"]["rows"]), 6)
+        self.assertEqual(
+            [
+                (r["item_type"], r["net_low"], r["net_high"])
+                for r in normalized["evidence"]["rows"]
+            ],
+            expected_net_ids,
+        )
+        self.assertIs(normalized["evidence"]["truncated"], False)
+
+    def test_t11_dispatch_two_living_observers_reset_rows_and_rays_real_body(self) -> None:
+        obs_a = _FakePlayer("obs-a", (10.0, 1.7, 20.0), heading_rad=0.0, pitch_deg=4.0)
+        obs_b = _FakePlayer(
+            "obs-b", (200.0, 1.7, 200.0), heading_rad=-math.pi / 2.0, pitch_deg=-3.0
+        )
+        items_a = [
+            _FakeItem(
+                f"A_{i:02d}",
+                (10.0, 1.7, 21.0 + float(i)),
+                net_low=1000 + i,
+                net_high=10 + i,
+            )
+            for i in range(1, 7)
+        ]
+        items_b = [
+            _FakeItem(
+                f"B_{i:02d}",
+                (200.5 + float(i), 1.7, 200.0),
+                net_low=2000 + i,
+                net_high=20 + i,
+            )
+            for i in range(1, 7)
+        ]
+        # Scramble both sets so nearest-first selection runs independently per observer.
+        world_objects = [
+            items_a[3],
+            items_a[1],
+            items_a[5],
+            items_a[0],
+            items_a[4],
+            items_a[2],
+            items_b[4],
+            items_b[1],
+            items_b[5],
+            items_b[0],
+            items_b[3],
+            items_b[2],
+        ]
+        dispatch, meta = self._build_dispatch(
+            [obs_a, obs_b], world_objects, tick_ms=90000
+        )
+        args = SimpleNamespace(
+            uids=_LootConeArray(
+                [_LootConeString.of("obs-a"), _LootConeString.of("obs-b")]
+            ),
+            radius=8.0,
+            half_yaw_deg=10.0,
+        )
+        post_now, result = self._run_dispatch(dispatch, args)
+        self.assertIs(post_now, True)
+        self.assertIs(result.ok, True)
+        self.assertEqual(meta["clock_reads"], [1])
+
+        query_calls = meta["query_calls"]
+        self.assertEqual(len(query_calls), 2)  # type: ignore[arg-type]
+        self.assertEqual(list(query_calls[0][0]), [10.0, 1.7, 20.0])  # type: ignore[index]
+        self.assertEqual(list(query_calls[1][0]), [200.0, 1.7, 200.0])  # type: ignore[index]
+
+        read = result.loot_los_cone
+        self.assertIs(read.truncated, False)
+        self.assertEqual(read.observers.Count(), 2)
+        sum_a, sum_b = list(read.observers)
+        self.assertEqual(sum_a.uid.text, "obs-a")
+        self.assertIs(sum_a.found, True)
+        self.assertIs(sum_a.yaw_deg_available, True)
+        self.assertAlmostEqual(sum_a.yaw_deg, 0.0, places=5)
+        self.assertEqual(
+            (sum_a.scanned, sum_a.in_radius, sum_a.in_cone, sum_a.rays, sum_a.rows),
+            (12, 6, 6, 4, 6),
+        )
+        self.assertEqual(sum_b.uid.text, "obs-b")
+        self.assertIs(sum_b.found, True)
+        self.assertIs(sum_b.yaw_deg_available, True)
+        self.assertAlmostEqual(sum_b.yaw_deg, 90.0, places=5)
+        self.assertEqual(
+            (sum_b.scanned, sum_b.in_radius, sum_b.in_cone, sum_b.rays, sum_b.rows),
+            (12, 6, 6, 4, 6),
+        )
+
+        self.assertEqual(read.rows.Count(), 12)
+        rows_a = [r for r in read.rows if r.uid.text == "obs-a"]
+        rows_b = [r for r in read.rows if r.uid.text == "obs-b"]
+        self.assertEqual(len(rows_a), 6)
+        self.assertEqual(len(rows_b), 6)
+        self.assertEqual(
+            [(r.item_type.text, r.net_low, r.net_high, r.gap_kind.text) for r in rows_a],
+            [
+                ("A_01", 1001, 11, ""),
+                ("A_02", 1002, 12, ""),
+                ("A_03", 1003, 13, ""),
+                ("A_04", 1004, 14, ""),
+                ("A_05", 1005, 15, "ray_budget_exceeded"),
+                ("A_06", 1006, 16, "ray_budget_exceeded"),
+            ],
+        )
+        self.assertEqual(
+            [(r.item_type.text, r.net_low, r.net_high, r.gap_kind.text) for r in rows_b],
+            [
+                ("B_01", 2001, 21, ""),
+                ("B_02", 2002, 22, ""),
+                ("B_03", 2003, 23, ""),
+                ("B_04", 2004, 24, ""),
+                ("B_05", 2005, 25, "ray_budget_exceeded"),
+                ("B_06", 2006, 26, "ray_budget_exceeded"),
+            ],
+        )
+
+        ray_calls = meta["ray_calls"]
+        self.assertEqual(len(ray_calls), 8)  # type: ignore[arg-type]
+        self.assertEqual(len({id(call[3]) for call in ray_calls}), 8)  # type: ignore[attr-defined]
+        for call in ray_calls[:4]:  # type: ignore[index]
+            self.assertEqual(list(call[0]), [10.0, 1.7, 20.0])
+            self.assertIs(call[2], obs_a)
+        for call in ray_calls[4:]:  # type: ignore[index]
+            self.assertEqual(list(call[0]), [200.0, 1.7, 200.0])
+            self.assertIs(call[2], obs_b)
+
+        normalized = loot_los_cone.normalize_bridge_result(
+            {"ok": 1, FIELD: _to_wire_value(read)}
+        )
+        self.assertEqual(len(normalized["evidence"]["rows"]), 12)
+        self.assertIs(normalized["loot_los_cone"]["truncated"], False)
         self.assertIs(normalized["evidence"]["truncated"], False)
 
     def test_t11_dispatch_truncates_past_16_rows_per_observer_real_body(self) -> None:
@@ -2093,6 +2460,27 @@ class DispatchLootLosConeTest(unittest.TestCase):
         self.assertNotIn("LootConeYawOff", self.bridge)
         self.assertNotIn("LootConeInCone", self.bridge)
         self.assertNotIn("LootConeCastRay", self.bridge)
+
+        # Pin the exact LosConeInCone block so candNetLow/candNetHigh cannot be
+        # overwritten after candItem.GetNetworkID(candNetLow, candNetHigh).
+        in_cone_body = _if_body(
+            dispatch, "LosConeInCone(candDist, radius, yawOffDeg, halfYawDeg)"
+        )
+        self.assertEqual(
+            _flat(in_cone_body),
+            "obsSummary.in_cone = obsSummary.in_cone + 1; "
+            "candNetLow = 0; candNetHigh = 0; "
+            "candItem.GetNetworkID(candNetLow, candNetHigh); "
+            "candType = candItem.GetType(); "
+            'if (candType == "") { candType = candItem.ClassName(); } '
+            "candNetLows.Insert(candNetLow); "
+            "candNetHighs.Insert(candNetHigh); "
+            "candTypes.Insert(candType); "
+            "candPositions.Insert(candPos); "
+            "candDistances.Insert(candDist); "
+            "candYawOffs.Insert(yawOffDeg); "
+            "candTaken.Insert(false);",
+        )
 
         # Pin every step and row member write line by line.
         _in_order(
