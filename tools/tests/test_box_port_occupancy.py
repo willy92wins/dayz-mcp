@@ -793,6 +793,80 @@ class CrashReporterHeldPortD3b7Test(PortOccupancyTest):
             self.lifecycle._foreign_port_reason({self.DEAD_CLIENT, self.REPORTER}, None)
         )
 
+    # --- review r1 of d3b7: the requested port, the refusal hint, named holders -----------------
+
+    def test_d3b7_requesting_the_reporters_own_port_names_the_reporter(self) -> None:
+        # Guards the requested-port path: a launch that asks for the very port
+        # the reporter holds is still refused, with a reason and a hint that name
+        # the reporter instead of the generic foreign-holder answer. RED on
+        # 6b9c926 by design: _foreign_port_reason answers port_in_use_foreign
+        # before it looks at the reporter, and _port_conflict_fields replaces
+        # the reporter's hint with the foreign-DayZ one.
+        from dayz_mcp import box_occupancy
+
+        self.leave_reporter_holding_the_port()
+
+        reason = self.lifecycle._foreign_port_reason(set(), self.PORT)
+        self.assertIsInstance(reason, str)
+        self.assertNotEqual(reason, "port_in_use_foreign")
+        self.assertTrue(self.names_crash_reporter(reason), reason)
+        self.assert_no_pid(reason)
+        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request(port=self.PORT))
+        self.assertEqual(result.get("error"), "active_run_exists", result)
+        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(self.store.list_runs(), [])
+        self.assertTrue(self.names_crash_reporter(self.rejected_reasons()[-1]), self.rejected_reasons())
+        box = dict(self.lifecycle.box_occupancy())
+        payload = box_occupancy._enrich_active_run_result(
+            {"error": "active_run_exists"}, box, port=self.PORT
+        )
+        self.assertEqual(payload.get("error_code"), "active_run_exists", payload)
+        self.assertTrue(self.names_crash_reporter(payload.get("reason")), payload)
+        self.assertTrue(self.names_crash_reporter(payload.get("hint")), payload)
+        self.assertIn("close", payload["hint"].casefold())
+        self.assert_no_pid(payload)
+
+    def test_d3b7_refusal_hint_names_the_reporter_on_another_port(self) -> None:
+        # Guards the refusal hint: a launch on another port gets the reporter's
+        # remedy from occupancy_error_fields (_wait_hint), not the generic
+        # "retry with wait_for_box_s" answer. Green on 6b9c926 by design; kills
+        # a version without the crash-reporter branch of _wait_hint.
+        from dayz_mcp import box_occupancy
+        from dayz_mcp.process_lifecycle import occupancy_error_fields
+
+        self.leave_reporter_holding_the_port()
+        box = dict(self.lifecycle.box_occupancy())
+
+        fields = occupancy_error_fields(box)
+        payload = box_occupancy._enrich_active_run_result(
+            {"error": "active_run_exists"}, box, port=2302
+        )
+
+        for label, text in (("occupancy_error_fields", fields.get("hint")), ("refusal", payload.get("hint"))):
+            with self.subTest(label):
+                self.assertIsInstance(text, str)
+                self.assertTrue(self.names_crash_reporter(text), text)
+                self.assertIn("close", text.casefold())
+                self.assertNotIn("retry with wait_for_box_s", text)
+                self.assert_no_pid(text)
+
+    def test_d3b7_a_named_holder_is_never_attributed_to_its_reporter_child(self) -> None:
+        # Guards "nameless holders only": a holder the socket table names keeps
+        # its own image even when a live CrashReporter.exe lists its pid as ppid,
+        # so a named holder that is not DayZ neither occupies the box nor makes a
+        # refusal name a reporter. Green on 6b9c926 by design; kills a version
+        # that drops the name-is-None condition in any of the three readers.
+        self.leave_reporter_holding_the_port()
+        self.port_holders = _holders((self.PORT, self.DEAD_CLIENT, "python.exe"))
+
+        box = self.lifecycle.box_occupancy()
+
+        self.assertTrue(box["port_scan_known"], box["port_scan_reason"])
+        self.assertEqual(box["foreign"], [])
+        self.assertFalse(box["occupied"])
+        self.assertIsNone(self.lifecycle._foreign_port_reason(set(), 2302))
+        self.assertEqual(self.lifecycle._diag_snapshot_empty(), (True, ""))
+
 
 if __name__ == "__main__":
     unittest.main()
