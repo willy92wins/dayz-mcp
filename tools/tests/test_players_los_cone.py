@@ -79,7 +79,7 @@ CENSUS_FIXTURE = (
     Path(__file__).resolve().parent / "fixtures" / "bridge_capabilities_v1.json"
 )
 PREVIOUS_ACH = "3b7a1b143153de71"
-NEW_ACH = "2ec297a794473200"
+NEW_ACH = "fe4cd4a4597078cf"
 WIRE_KEYS = {"uids", "radius", "half_yaw_deg"}
 
 PREVIOUS_50_SERVER_BITS: tuple[str, ...] = (
@@ -562,11 +562,11 @@ class CensusAndContractHashTest(unittest.TestCase):
 
         # Bit table append-only: prior 50 bits unchanged, bit 50 is players_los_cone.
         self.assertEqual(SERVER_CAPABILITY_BITS[:50], PREVIOUS_50_SERVER_BITS)
-        self.assertEqual(SERVER_CAPABILITY_BITS[50:], (COMMAND,))
+        self.assertEqual(SERVER_CAPABILITY_BITS[50:], (COMMAND, "loot_los_cone"))
 
         mask_matches = re.findall(r'SERVER_CAPABILITIES_MASK\s*=\s*"([^"]+)"', server_src)
-        self.assertEqual(mask_matches, ["1.7ffffffffffff"])
-        self.assertEqual(encode_capability_mask("server", census), "1.7ffffffffffff")
+        self.assertEqual(mask_matches, ["1.fffffffffffff"])
+        self.assertEqual(encode_capability_mask("server", census), "1.fffffffffffff")
         decoded, reason = parse_capability_mask("server", mask_matches[0])
         self.assertEqual(reason, "ok")
         self.assertEqual(set(decoded or ()), set(census))
