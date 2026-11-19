@@ -936,6 +936,47 @@ class CrashReporterHeldPortD3b7Test(PortOccupancyTest):
         self.assertIn("close", payload["hint"].casefold())
         self.assert_no_pid(payload)
 
+    # --- review r3 of d3b7: both ports of a two-port reporter -----------------------------------
+
+    def test_d3b7_both_ports_of_a_two_port_reporter_are_the_reporters(self) -> None:
+        # Guards every held port: with the dead client's two ports in either
+        # order in the socket table, the reporter's one row keeps the lowest in
+        # port and lists both in ports, sorted; a launch on either port is
+        # refused with the reporter's reason and hint, not the foreign-DayZ
+        # answer, and the hint names both ports. Green on 28225d9 by design;
+        # kills a version whose ports keeps only the last port it saw.
+        from dayz_mcp import box_occupancy
+
+        self.leave_reporter_holding_the_port()
+        other = self.PORT + 1
+        orders = {
+            "lowest_first": ((self.PORT, self.DEAD_CLIENT, None), (other, self.DEAD_CLIENT, None)),
+            "highest_first": ((other, self.DEAD_CLIENT, None), (self.PORT, self.DEAD_CLIENT, None)),
+        }
+        for label, rows in orders.items():
+            self.port_holders = _holders(*rows)
+            self.lifecycle._invalidate_box_cache()
+            box = dict(self.lifecycle.box_occupancy())
+            with self.subTest(label):
+                self.assertEqual(len(box["foreign"]), 1, box["foreign"])
+                row = box["foreign"][0]
+                self.assertEqual(row.get("port"), self.PORT, row)
+                self.assertEqual(row.get("ports"), [self.PORT, other], row)
+            for requested in (self.PORT, other):
+                with self.subTest(label, requested_port=requested):
+                    reason = self.lifecycle._foreign_port_reason(set(), requested)
+                    self.assertTrue(self.names_crash_reporter(reason), reason)
+                    payload = box_occupancy._enrich_active_run_result(
+                        {"error": "active_run_exists"}, box, port=requested
+                    )
+                    self.assertEqual(payload.get("error_code"), "active_run_exists", payload)
+                    self.assertNotEqual(payload.get("reason"), "port_in_use_foreign", payload)
+                    self.assertTrue(self.names_crash_reporter(payload.get("reason")), payload)
+                    self.assertTrue(self.names_crash_reporter(payload.get("hint")), payload)
+                    for port in (self.PORT, other):
+                        self.assertIn(str(port), payload["hint"])
+                    self.assert_no_pid(payload)
+
 
 if __name__ == "__main__":
     unittest.main()
