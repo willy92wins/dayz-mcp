@@ -505,5 +505,277 @@ class PortOccupancyRound2Test(PortOccupancyTest):
         self.assertEqual(self.lifecycle._diag_snapshot_empty(), (True, ""))
 
 
+# --- inbox d3b7: a crashed client's CrashReporter.exe keeps its UDP port -------------------------
+
+class CrashReporterHeldPortD3b7Test(PortOccupancyTest):
+    """fb-20261118-192120-d3b7: a dead client's CrashReporter.exe keeps its port.
+
+    An unmanaged DayZ client crashes and its CrashReporter.exe child keeps the
+    client's UDP socket. The socket table then names the dead client's pid with
+    no image; the child probe row whose ppid is that pid is the only witness of
+    who holds it. Same fixture as PortOccupancyTest, plus that probe. The box
+    stays occupied (fail-closed) and names the reporter.
+    """
+
+    DEAD_CLIENT = 69416
+    REPORTER = 37864
+    PORT = 2316
+    GONE = {"error": "process_not_found", "exit_code": 4}
+
+    def reporter_row(
+        self, ppid: int, *, pid: int | None = None, name: str = "CrashReporter.exe"
+    ) -> dict[str, object]:
+        return {"pid": self.REPORTER if pid is None else pid, "ppid": ppid, "name": name}
+
+    def leave_reporter_holding_the_port(self) -> None:
+        """The d3b7 host: client 69416 is gone, its CrashReporter.exe 37864 lives on."""
+        from dayz_mcp.native_process_guard import identity_hashes
+
+        reporter = self.game / "CrashReporter.exe"
+        reporter.write_bytes(b"")
+        self.port_holders = _holders((self.PORT, self.DEAD_CLIENT, None))
+        self.guard.snapshots[self.DEAD_CLIENT] = dict(self.GONE)
+        self.guard.snapshots[self.REPORTER] = {
+            "pid": self.REPORTER,
+            "creation_time_utc": "2026-07-15T00:01:00.0000000Z",
+            "executable_sha256": identity_hashes(str(reporter), [str(reporter)])[
+                "executable_sha256"
+            ],
+            "command_line_sha256": "c" * 64,
+            "identity_scheme": "psutil-argv-v2",
+            "identity_complete": True,
+        }
+        self.lifecycle.child_probe = lambda: {
+            "known": True,
+            "processes": [self.reporter_row(self.DEAD_CLIENT)],
+        }
+
+    @staticmethod
+    def names_crash_reporter(text: object) -> bool:
+        """CrashReporter.exe, crash_reporter or Crash Reporter, in any case."""
+        if not isinstance(text, str):
+            return False
+        return "crashreporter" in "".join(ch for ch in text.casefold() if ch.isalpha())
+
+    def assert_attribution_unknown_and_blocked(self) -> None:
+        """Every surface's answer for a nameless holder nobody vouches for."""
+        self.lifecycle._invalidate_box_cache()
+        box = self.lifecycle.box_occupancy()
+        self.assertTrue(box["occupied"])
+        self.assertFalse(box["port_scan_known"])
+        self.assertEqual(box["port_scan_reason"], "port_attribution_unknown")
+        self.assertEqual(box["foreign"], [])
+        self.assertEqual(
+            self.lifecycle._foreign_port_reason(set(), 2302), "port_attribution_unknown"
+        )
+        self.assertEqual(
+            self.lifecycle._diag_snapshot_empty(), (False, "port_attribution_unknown")
+        )
+        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request(port=2302))
+        self.assertEqual(result.get("error"), "active_run_exists", result)
+        self.assertEqual(self.rejected_reasons()[-1], "port_attribution_unknown")
+        self.assertEqual(self.launcher.calls, [])
+
+    # --- positive: red on e36a19f by design -----------------------------------------------------
+
+    def test_d3b7_box_names_the_crash_reporter_holding_a_dead_clients_port(self) -> None:
+        # Guards the box: the nameless holder of 2316 is attributed to the live
+        # CrashReporter.exe whose ppid it is; the box stays occupied, with a known
+        # scan and one foreign row. RED on e36a19f by design: _collect_probes never
+        # reads child_probe, so the scan is port_attribution_unknown, foreign empty.
+        self.leave_reporter_holding_the_port()
+
+        box = self.lifecycle.box_occupancy()
+
+        self.assertTrue(box["occupied"])
+        self.assertTrue(box["scan_known"])
+        self.assertTrue(box["port_scan_known"], box["port_scan_reason"])
+        self.assertIsNone(box["port_scan_reason"])
+        self.assertEqual(box["runs"], [])
+        self.assertEqual(len(box["foreign"]), 1, box["foreign"])
+        row = box["foreign"][0]
+        # The socket-table row shape, plus the reporter's own pid.
+        self.assertLessEqual(
+            {"port", "mods", "profiles", "image", "source", "pid"}, set(row), row
+        )
+        self.assertEqual(row["pid"], self.REPORTER)
+        self.assertEqual(row["image"], "CrashReporter.exe")
+        self.assertEqual(row["port"], self.PORT)
+        self.assertEqual(row["mods"], [])
+        self.assertIsNone(row["profiles"])
+
+    def test_d3b7_session_status_blocked_on_names_the_crash_reporter(self) -> None:
+        # Guards session_status: blocked_on names the Crash Reporter window and
+        # its remedy instead of sending the reader to the socket table, and
+        # available_for stays closed. RED on e36a19f by design: blocked_on is the
+        # port_attribution_unknown "restore the daemon's view" text.
+        from dayz_mcp import server
+
+        self.leave_reporter_holding_the_port()
+        # As server.session_status builds it, with no lease holder (the ticket).
+        box = dict(self.lifecycle.box_occupancy())
+        server._annotate_box_foreign_ports(box)
+        box["available_for"] = server.box_available_for(box, None)
+        text = server._session_status_blocked_on({"owner": None, "box": box}, None)
+
+        self.assertEqual(box["available_for"], {"new_launch": False, "adopt": False})
+        self.assertIsInstance(text, str)
+        self.assertTrue(self.names_crash_reporter(text), text)
+        self.assertIn("close", text.casefold())
+        self.assertNotIn("restore the daemon's view", text)
+        self.assertNotIn("port_attribution_unknown", text)
+
+    def test_d3b7_start_is_refused_with_a_reason_that_names_the_reporter(self) -> None:
+        # Guards start_run and _foreign_port_reason: the launch is still refused
+        # and nothing is launched, but the reason names the reporter instead of
+        # port_attribution_unknown, and the admission audit carries that reason.
+        # RED on e36a19f by design: the reason is port_attribution_unknown (the
+        # refusal itself already holds there).
+        self.leave_reporter_holding_the_port()
+
+        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request(port=2302))
+
+        self.assertEqual(result.get("error"), "active_run_exists", result)
+        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(self.store.list_runs(), [])
+        for requested_port in (2302, None):
+            with self.subTest(requested_port=requested_port):
+                reason = self.lifecycle._foreign_port_reason(set(), requested_port)
+                self.assertIsInstance(reason, str)
+                self.assertNotEqual(reason, "port_attribution_unknown")
+                self.assertTrue(self.names_crash_reporter(reason), reason)
+        self.assertEqual(
+            self.rejected_reasons()[-1], self.lifecycle._foreign_port_reason(set(), 2302)
+        )
+
+    def test_d3b7_admin_empty_gate_still_refuses_and_names_the_reporter(self) -> None:
+        # Guards _diag_snapshot_empty (the admin "empty" reconcile gate): the same
+        # holder still refuses, with a reason that names the reporter. RED on
+        # e36a19f by design: the reason is port_attribution_unknown.
+        self.leave_reporter_holding_the_port()
+
+        empty, reason = self.lifecycle._diag_snapshot_empty()
+
+        self.assertFalse(empty)
+        self.assertNotEqual(reason, "port_attribution_unknown")
+        self.assertTrue(self.names_crash_reporter(reason), reason)
+
+    # --- negative: green on e36a19f by design, and after the fix --------------------------------
+
+    def test_d3b7_nameless_holder_without_a_crash_reporter_child_stays_unknown(self) -> None:
+        # Guards "no CrashReporter": no child row, a child of another image, or no
+        # child probe wired (an empty, known scan) names nothing, so the holder
+        # stays port_attribution_unknown and blocks. Green on e36a19f by design;
+        # must stay green after the fix.
+        self.leave_reporter_holding_the_port()
+        probes = {
+            "no_child_rows": lambda: {"known": True, "processes": []},
+            "child_of_another_image": lambda: {
+                "known": True,
+                "processes": [self.reporter_row(self.DEAD_CLIENT, name="WerFault.exe")],
+            },
+            "child_probe_not_wired": None,
+        }
+        for label, probe in probes.items():
+            with self.subTest(label):
+                self.lifecycle.child_probe = probe
+                self.assert_attribution_unknown_and_blocked()
+
+    def test_d3b7_crash_reporter_of_another_parent_leaves_the_holder_unknown(self) -> None:
+        # Guards "CrashReporter of another ppid": a live CrashReporter.exe whose
+        # ppid is not the holder's pid does not vouch for it. Green on e36a19f by
+        # design; must stay green after the fix.
+        self.leave_reporter_holding_the_port()
+        self.lifecycle.child_probe = lambda: {
+            "known": True,
+            "processes": [self.reporter_row(51036)],
+        }
+
+        self.assert_attribution_unknown_and_blocked()
+
+    def test_d3b7_reporter_of_one_nameless_holder_does_not_name_another(self) -> None:
+        # Guards "another ppid" per holder: a reporter whose parent holds another
+        # nameless port leaves 69416 unattributed, so the scan stays unknown and
+        # 2316 gets no row. Which holder a refusal names first is not pinned.
+        # Green on e36a19f by design; must stay green after the fix.
+        self.leave_reporter_holding_the_port()
+        self.port_holders = _holders((self.PORT, self.DEAD_CLIENT, None), (2402, 777, None))
+        self.guard.snapshots[777] = dict(self.GONE)
+        self.lifecycle.child_probe = lambda: {
+            "known": True,
+            "processes": [self.reporter_row(777)],
+        }
+
+        box = self.lifecycle.box_occupancy()
+
+        self.assertTrue(box["occupied"])
+        self.assertFalse(box["port_scan_known"])
+        self.assertEqual(box["port_scan_reason"], "port_attribution_unknown")
+        self.assertNotIn(self.PORT, [row.get("port") for row in box["foreign"]])
+        self.assertFalse(self.lifecycle._diag_snapshot_empty()[0])
+        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request(port=2302))
+        self.assertEqual(result.get("error"), "active_run_exists", result)
+        self.assertEqual(self.launcher.calls, [])
+
+    def test_d3b7_unknown_child_scan_keeps_the_holder_unknown(self) -> None:
+        # Guards "child probe unknown", as _crash_reporter_probe_rows models it: a
+        # probe that raises, answers known=False, or lists a row it cannot vouch
+        # for is no witness, even beside a matching row. Green on e36a19f by
+        # design; must stay green after the fix.
+        self.leave_reporter_holding_the_port()
+        matching = self.reporter_row(self.DEAD_CLIENT)
+
+        def toolhelp_fails() -> dict[str, object]:
+            raise OSError("toolhelp snapshot failed")
+
+        probes = {
+            "probe_raises": toolhelp_fails,
+            "known_false": lambda: {"known": False, "processes": [matching]},
+            "malformed_row": lambda: {
+                "known": True,
+                "processes": [matching, {"pid": 37865, "name": "CrashReporter.exe"}],
+            },
+        }
+        for label, probe in probes.items():
+            with self.subTest(label):
+                self.lifecycle.child_probe = probe
+                self.assert_attribution_unknown_and_blocked()
+
+    # --- managed run: green on e36a19f by design ------------------------------------------------
+
+    def test_d3b7_managed_run_keeps_the_port_of_its_registered_reporter(self) -> None:
+        # Guards the managed path (inbox 7417): the reaper registers the reporter
+        # on the run, so the dead client's socket stays the run's: no foreign row,
+        # the scan known, and the start gate sees no foreign holder. Green on
+        # e36a19f by design; the run check must stay ahead of any crash-reporter
+        # attribution.
+        self.lifecycle.parent_anchor = (lambda pid: object(), lambda token: None)
+        client = process(self.DEAD_CLIENT, "client")
+        run = self.add_run(client)
+        # Housekeeping anchors the live client before it crashes.
+        self.guard.snapshots[client.pid] = snapshot(client)
+        self.assertEqual(self.lifecycle.reap_dead_runs(), [])
+        self.leave_reporter_holding_the_port()
+
+        self.assertEqual(self.lifecycle.reap_dead_runs(), [])
+
+        stored = self.store.get(run.run_id)
+        self.assertEqual(
+            [(record.pid, record.role) for record in stored.processes],
+            [(self.DEAD_CLIENT, "client"), (self.REPORTER, "crash_reporter")],
+        )
+        box = self.lifecycle.box_occupancy()
+        self.assertTrue(box["occupied"])
+        self.assertEqual([row["run_id"] for row in box["runs"]], [run.run_id])
+        self.assertEqual(box["foreign"], [])
+        self.assertTrue(box["port_scan_known"])
+        self.assertIsNone(box["port_scan_reason"])
+        self.assertEqual(box["ports_in_use"], [self.PORT])
+        self.assertEqual(box["foreign_ports"], [])
+        self.assertIsNone(
+            self.lifecycle._foreign_port_reason({self.DEAD_CLIENT, self.REPORTER}, None)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
