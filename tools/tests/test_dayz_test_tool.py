@@ -2500,6 +2500,18 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         )
         self._assert_reaped_race_kept(result, run_id=other)
 
+    # Control for 8bed: an UNRECONCILED row with no process left is not the
+    # reaper's EXITED row, so the failure stays as it is; only an EXITED row or
+    # no row is the stop the caller asked for. Green on e36a19f and after the
+    # fix; kills a version that also takes an empty process list for success.
+    async def test_stop_keeps_run_not_adoptable_while_the_row_is_unreconciled_without_processes(
+        self,
+    ) -> None:
+        result = await self._stop_after_reaped_race(
+            {"runs": [self._reaped_race_row("UNRECONCILED", [])]}
+        )
+        self._assert_reaped_race_kept(result)
+
     async def test_worker_failed_carries_lifecycle_start_error(self) -> None:
         policy = _policy()
         # last_start_error is only written by _settle_failed_launch, which
