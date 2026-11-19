@@ -10732,17 +10732,19 @@ class ProcessLifecycle:
             if isinstance(pid, int) and pid in registered_pids:
                 continue
             name = holder.get("name")
-            if _is_dayz_image(name) or (
-                requested_port is not None and holder["port"] == requested_port
-            ):
-                return "port_in_use_foreign"
             if name is None and isinstance(pid, int) and not isinstance(pid, bool):
                 if not reporter_ppids_loaded:
                     reporter_ppids = self._crash_reporter_parent_pids()
                     reporter_ppids_loaded = True
                 if reporter_ppids is not None and pid in reporter_ppids:
+                    if requested_port is not None and holder["port"] == requested_port:
+                        return PORT_HELD_BY_CRASH_REPORTER
                     crash_reporter_held = True
                     continue
+            if _is_dayz_image(name) or (
+                requested_port is not None and holder["port"] == requested_port
+            ):
+                return "port_in_use_foreign"
             if _holder_unattributed(pid, name):
                 unattributed = True
         # A holder nobody can be named for might be a DayZ image on another
