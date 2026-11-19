@@ -1432,15 +1432,21 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
         # Guard (passes today): when the bridge's first POST was lost, the
         # daemon's first reception of a late answer already carries retry=True
         # and still audits one late_answer_abandon line naming the queued
-        # release. Mutants killed: a late_answer_abandon line without
-        # release_id only when the first reception has retry=True, or with
-        # another id (for example command_id) only under retry.
+        # release. A second spawn is queued before the late answer so the
+        # release id is not consecutive with command_id. Mutants killed: a
+        # late_answer_abandon line without release_id only when the first
+        # reception has retry=True, or under retry with another id (for
+        # example command_id, a value computed from it such as command_id + 1,
+        # or a constant that consecutive ids would hide).
         state, now, command_id = self._delivered_spawn()
         audit = self._real_audit(state)
+        status, other = _enqueue_spawn(state, operation_timeout_s=60.0)
+        self.assertEqual(status, 200, other)
         now[0] += 0.126
         self.assertTrue(self._answer(state, command_id, retry=True).get("discarded"))
         release_ids = self._queued_release_ids(state)
         self.assertEqual(len(release_ids), 1)
+        self.assertNotEqual(release_ids[0], command_id + 1, release_ids)
         lines = self._release_lines(audit, command_id)
         self.assertEqual([e.get("event") for e in lines], ["late_answer_abandon"], self._lines(audit))
         self.assertEqual(
