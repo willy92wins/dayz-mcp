@@ -2512,6 +2512,55 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         )
         self._assert_reaped_race_kept(result)
 
+    # Review r1 of 8bed: the success names the asked run, a run_not_adoptable
+    # that names the asked run is reconciled too, and a status answer that
+    # does not read as rows keeps the failure.
+
+    async def test_stop_after_a_reap_names_the_asked_run(self) -> None:
+        # The worker's terminal carries no run_id; the success must still name
+        # the run the caller asked to stop. Green on fac1053 by design; kills a
+        # version that leaves the terminal's null run_id on the success.
+        for label, after in (
+            ("exited_row", {"runs": [self._reaped_race_row("EXITED", [])]}),
+            ("no_row", {"runs": []}),
+        ):
+            with self.subTest(label):
+                result = await self._stop_after_reaped_race(after)
+                self._assert_reaped_race_succeeded(result)
+                self.assertEqual(result.get("run_id"), RUN_ID, result)
+
+    async def test_stop_treats_run_not_adoptable_naming_the_asked_run_as_success(
+        self,
+    ) -> None:
+        # A run_not_adoptable that names the asked run is the same race: with
+        # the row EXITED or gone it is the stop the caller asked for. Green on
+        # fac1053 by design; kills a version that reconciles only a terminal
+        # without run_id.
+        for label, after in (
+            ("exited_row", {"runs": [self._reaped_race_row("EXITED", [])]}),
+            ("no_row", {"runs": []}),
+        ):
+            with self.subTest(label):
+                result = await self._stop_after_reaped_race(after, terminal_run_id=RUN_ID)
+                self._assert_reaped_race_succeeded(result)
+                self.assertEqual(result.get("run_id"), RUN_ID, result)
+
+    async def test_stop_keeps_run_not_adoptable_when_status_is_malformed(
+        self,
+    ) -> None:
+        # A status answer that arrives but does not read as a list of rows is
+        # no proof the run is gone: the failure stays (fail-closed). Green on
+        # fac1053 by design; kills a version that takes any unreadable answer
+        # for a missing row.
+        for label, after in (
+            ("row_is_not_a_dict", {"runs": [None]}),
+            ("runs_is_not_a_list", {"runs": "x"}),
+            ("no_runs_key", {}),
+        ):
+            with self.subTest(label):
+                result = await self._stop_after_reaped_race(after)
+                self._assert_reaped_race_kept(result)
+
     async def test_worker_failed_carries_lifecycle_start_error(self) -> None:
         policy = _policy()
         # last_start_error is only written by _settle_failed_launch, which
