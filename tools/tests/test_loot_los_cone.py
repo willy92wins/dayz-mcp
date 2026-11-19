@@ -343,6 +343,7 @@ def _coordinated_state() -> loopback.ServerState:
             session, lease, reason, active
         ),
     )
+    state.retail_probe = lambda: {"known": True, "processes": []}
     return state
 
 
