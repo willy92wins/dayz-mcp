@@ -98,6 +98,8 @@ PRUNABLE_FIELDS = (
     "player_kill",
     # players_kinematics fills it with the trace header and paged wire rows.
     "players_kinematics",
+    # players_los_cone fills it with the header, observer summaries, and wire rows.
+    "players_los_cone",
     # bot_start / bot_stop fill it on success (120f).
     "bot",
     # player_set_stance fills it, also on its refusals once the body is known.
