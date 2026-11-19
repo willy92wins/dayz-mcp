@@ -867,6 +867,75 @@ class CrashReporterHeldPortD3b7Test(PortOccupancyTest):
         self.assertIsNone(self.lifecycle._foreign_port_reason(set(), 2302))
         self.assertEqual(self.lifecycle._diag_snapshot_empty(), (True, ""))
 
+    # --- review r2 of d3b7: every port the reporter holds, and no takeover ----------------------
+
+    def test_d3b7_a_launch_on_the_reporters_other_port_names_the_reporter(self) -> None:
+        # Guards every held port: the dead client held two UDP ports and its
+        # reporter keeps both, so a launch that asks for the higher one is
+        # refused with a reason and a hint that name the reporter and that port.
+        # The box still shows one row for the reporter, at its lowest port. RED on
+        # 5447a9a by design: _port_conflict_fields matches only the row's lowest
+        # port, so 2317 gets port_in_use_foreign and the foreign-DayZ hint.
+        from dayz_mcp import box_occupancy
+
+        self.leave_reporter_holding_the_port()
+        other = self.PORT + 1
+        self.port_holders = _holders(
+            (self.PORT, self.DEAD_CLIENT, None), (other, self.DEAD_CLIENT, None)
+        )
+
+        box = dict(self.lifecycle.box_occupancy())
+        self.assertEqual([row.get("port") for row in box["foreign"]], [self.PORT], box["foreign"])
+        reason = self.lifecycle._foreign_port_reason(set(), other)
+        self.assertTrue(self.names_crash_reporter(reason), reason)
+        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request(port=other))
+        self.assertEqual(result.get("error"), "active_run_exists", result)
+        self.assertEqual(self.launcher.calls, [])
+        self.assertTrue(self.names_crash_reporter(self.rejected_reasons()[-1]), self.rejected_reasons())
+        payload = box_occupancy._enrich_active_run_result(
+            {"error": "active_run_exists"}, box, port=other
+        )
+        self.assertEqual(payload.get("error_code"), "active_run_exists", payload)
+        self.assertTrue(self.names_crash_reporter(payload.get("reason")), payload)
+        self.assertTrue(self.names_crash_reporter(payload.get("hint")), payload)
+        self.assertIn("close", payload["hint"].casefold())
+        self.assertIn(str(other), payload["hint"])
+        self.assert_no_pid(payload)
+
+    def test_d3b7_no_takeover_is_offered_for_the_reporters_port(self) -> None:
+        # Guards the takeover exclusion: with another session's managed run in
+        # the box, a launch on the port the reporter holds is not told to take
+        # that run over (evicting it does not free the reporter's port); the
+        # answer stays active_run_exists with the reporter's reason and hint.
+        # Green on 5447a9a by design; kills a version that drops the reporter's
+        # reason from the exclusions of _apply_takeover_required.
+        from dayz_mcp import box_occupancy
+
+        self.leave_reporter_holding_the_port()
+        box = dict(self.lifecycle.box_occupancy())
+        # Another session's running run, shaped as test_box_occupancy's
+        # takeover fixtures shape it.
+        box["runs"] = [
+            {
+                "run_id": "run-other",
+                "mod": "@OtherMod",
+                "label": "other",
+                "age_s": 44.0,
+                "state": "RUNNING",
+                "owner_session": "other",
+            }
+        ]
+
+        payload = box_occupancy._enrich_active_run_result(
+            {"error": "active_run_exists"}, box, caller_session="caller", port=self.PORT
+        )
+
+        self.assertEqual(payload.get("error_code"), "active_run_exists", payload)
+        self.assertTrue(self.names_crash_reporter(payload.get("reason")), payload)
+        self.assertTrue(self.names_crash_reporter(payload.get("hint")), payload)
+        self.assertIn("close", payload["hint"].casefold())
+        self.assert_no_pid(payload)
+
 
 if __name__ == "__main__":
     unittest.main()
