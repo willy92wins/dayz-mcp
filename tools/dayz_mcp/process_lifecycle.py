@@ -1503,14 +1503,27 @@ def crash_reporter_box_hint(box: object) -> str | None:
         if not isinstance(item, dict) or item.get("source") != "crash_reporter":
             continue
         found = True
-        port = item.get("port")
-        if (
-            isinstance(port, int)
-            and not isinstance(port, bool)
-            and 1 <= port <= 65535
-            and port not in ports
-        ):
-            ports.append(port)
+        raw_ports = item.get("ports")
+        added = False
+        if isinstance(raw_ports, (list, tuple)):
+            for port in raw_ports:
+                if (
+                    isinstance(port, int)
+                    and not isinstance(port, bool)
+                    and 1 <= port <= 65535
+                ):
+                    if port not in ports:
+                        ports.append(port)
+                    added = True
+        if not added:
+            port = item.get("port")
+            if (
+                isinstance(port, int)
+                and not isinstance(port, bool)
+                and 1 <= port <= 65535
+                and port not in ports
+            ):
+                ports.append(port)
     if not found:
         return None
     if ports:
@@ -10918,6 +10931,7 @@ class ProcessLifecycle:
                 if row is None:
                     row = {
                         "port": int(port),
+                        "ports": [int(port)],
                         "mods": [],
                         "profiles": None,
                         "image": "CrashReporter.exe",
@@ -10925,8 +10939,13 @@ class ProcessLifecycle:
                     }
                     rows_by_pid[int(pid)] = row
                     foreign.append(row)
-                elif int(port) < int(row["port"]):
-                    row["port"] = int(port)
+                else:
+                    row_ports = row.get("ports")
+                    if isinstance(row_ports, list) and int(port) not in row_ports:
+                        row_ports.append(int(port))
+                        row_ports.sort()
+                    if int(port) < int(row["port"]):
+                        row["port"] = int(port)
                 continue
             if _holder_unattributed(pid, name):
                 # A socket nobody can be named for cannot be cleared as

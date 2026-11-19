@@ -511,18 +511,31 @@ def _port_conflict_fields(
         }
     if isinstance(port, int) and not isinstance(port, bool):
         foreign = box.get("foreign")
-        if isinstance(foreign, list) and any(
-            isinstance(item, dict)
-            and item.get("source") == "crash_reporter"
-            and not isinstance(item.get("port"), bool)
-            and item.get("port") == port
-            for item in foreign
-        ):
-            return {
-                "reason": PORT_HELD_BY_CRASH_REPORTER,
-                "port": port,
-                "hint": crash_reporter_box_hint(box),
-            }
+        if isinstance(foreign, list):
+            for item in foreign:
+                if not isinstance(item, dict) or item.get("source") != "crash_reporter":
+                    continue
+                held_ports = item.get("ports")
+                if isinstance(held_ports, (list, tuple)):
+                    matched = any(
+                        isinstance(held, int)
+                        and not isinstance(held, bool)
+                        and held == port
+                        for held in held_ports
+                    )
+                else:
+                    held = item.get("port")
+                    matched = (
+                        isinstance(held, int)
+                        and not isinstance(held, bool)
+                        and held == port
+                    )
+                if matched:
+                    return {
+                        "reason": PORT_HELD_BY_CRASH_REPORTER,
+                        "port": port,
+                        "hint": crash_reporter_box_hint(box),
+                    }
     # Prefer the full table when present (option A); fall back to the default
     # DayZ-related list for older payloads that never emitted foreign_ports_all.
     foreign_ports_all = box.get("foreign_ports_all")
