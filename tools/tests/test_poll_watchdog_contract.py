@@ -6,6 +6,7 @@ from tests._addon_paths import addon_root
 
 
 CLIENT = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
+WORLD_CLIENT = addon_root() / "scripts" / "4_World" / "MCP_ClientRestCallbacks.c"
 SERVER = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 
 
@@ -64,6 +65,11 @@ class PollWatchdogContractTest(unittest.TestCase):
 
         hold = _brace_body(source, "protected void HoldPollCallback()")
         self.assertIn("m_PollCallbackRefs.Insert(m_PollCallback)", hold)
+        self.assertIn("MCPClientRestHolder.Hold(m_PollCallback)", hold)
+        self.assertLess(
+            hold.index("m_PollCallbackRefs.Insert(m_PollCallback)"),
+            hold.index("MCPClientRestHolder.Hold(m_PollCallback)"),
+        )
 
         on_fail = _brace_body(source, "protected void OnPollFail(string reason)")
         self.assertIn("m_PollInFlight = false;", on_fail)
@@ -71,26 +77,39 @@ class PollWatchdogContractTest(unittest.TestCase):
 
     def test_stale_poll_callback_does_not_dispatch(self) -> None:
         source = CLIENT.read_text(encoding="utf-8")
-        callback = _brace_body(source, "class MCPClientPollCallback")
+        self.assertNotIn("class MCPClientPollCallback", source)
+        callback = _brace_body(WORLD_CLIENT.read_text(encoding="utf-8"), "class MCPClientPollCallback")
         self.assertNotIn("m_Generation", callback)
         self.assertNotIn("void SetGeneration", callback)
         self.assertNotIn("ConsumeStalePollCompletion", callback)
         ctor = _brace_body(callback, "void MCPClientPollCallback(")
-        self.assertIn("m_Bridge = bridge;", ctor)
+        self.assertIn("m_Sink = sink;", ctor)
         self.assertNotIn("generation", ctor)
-        polarity = "if (!m_Bridge.IsActivePollCallback(this))"
-        inverted = "if (m_Bridge.IsActivePollCallback(this))"
+        polarity = "if (!m_Sink.IsPollActive(this))"
+        inverted = "if (m_Sink.IsPollActive(this))"
         for event_sig, dispatch in (
-            ("override void OnSuccess", "OnPollSuccess("),
-            ("override void OnError", "OnPollError("),
-            ("override void OnTimeout", "OnPollTimeout("),
+            ("override void OnSuccess", "SinkOnPollSuccess("),
+            ("override void OnError", "SinkOnPollError("),
+            ("override void OnTimeout", "SinkOnPollTimeout("),
         ):
             body = _brace_body(callback, event_sig)
+            self.assertIn("MCPClientRestHolder.Drop(this);", body)
+            self.assertLess(body.index("MCPClientRestHolder.Drop(this);"), body.index("IsConnected()"))
             self.assertIn(polarity, body)
             self.assertNotIn(inverted, body)
-            self.assertLess(body.index("ReleaseCallback(this)"), body.index(polarity))
-            self.assertLess(body.index(polarity), body.index("return;"))
-            self.assertLess(body.index("return;"), body.index(dispatch))
+            self.assertLess(body.index("SinkReleaseCallback(this)"), body.index(polarity))
+            self.assertLess(
+                body.index("if (!m_Sink || !m_Sink.IsConnected())"),
+                body.index(polarity),
+            )
+            self.assertLess(
+                body.index(polarity),
+                body.index("return;", body.index(polarity)),
+            )
+            self.assertLess(
+                body.index("return;", body.index(polarity)),
+                body.index(dispatch),
+            )
 
     def test_callback_identity_contract(self) -> None:
         source = CLIENT.read_text(encoding="utf-8")
@@ -136,19 +155,23 @@ class PollWatchdogContractTest(unittest.TestCase):
             start_poll.index("m_PollCtx.GET(m_PollCallback, request)"),
         )
 
-        callback = _brace_body(source, "class MCPClientPollCallback")
+        callback = _brace_body(WORLD_CLIENT.read_text(encoding="utf-8"), "class MCPClientPollCallback")
         ctor = _brace_body(callback, "void MCPClientPollCallback(")
-        self.assertIn("m_Bridge = bridge;", ctor)
+        self.assertIn("m_Sink = sink;", ctor)
         self.assertNotIn("SetGeneration", callback)
         on_success = _brace_body(callback, "override void OnSuccess")
-        self.assertIn("if (!m_Bridge.IsActivePollCallback(this))", on_success)
+        self.assertIn("if (!m_Sink.IsPollActive(this))", on_success)
         self.assertLess(
-            on_success.index("if (!m_Bridge.IsActivePollCallback(this))"),
-            on_success.index("return;"),
+            on_success.index("if (!m_Sink || !m_Sink.IsConnected())"),
+            on_success.index("if (!m_Sink.IsPollActive(this))"),
         )
         self.assertLess(
-            on_success.index("return;"),
-            on_success.index("OnPollSuccess("),
+            on_success.index("if (!m_Sink.IsPollActive(this))"),
+            on_success.index("return;", on_success.index("if (!m_Sink.IsPollActive(this))")),
+        )
+        self.assertLess(
+            on_success.index("return;", on_success.index("if (!m_Sink.IsPollActive(this))")),
+            on_success.index("SinkOnPollSuccess("),
         )
 
         on_tick = _brace_body(source, "void OnTick(float timeslice)")
@@ -377,40 +400,47 @@ class PollWatchdogContractTest(unittest.TestCase):
         self.assertNotIn('url + "/"', body)
         self.assertNotIn("url.Substring", body)
 
-    def test_watchdog_resets_only_poll_context_and_preserves_result_refs(self) -> None:
+    def test_watchdog_abandons_without_reset_and_preserves_result_refs(self) -> None:
         source = CLIENT.read_text(encoding="utf-8")
         abandon = _brace_body(source, "protected void AbandonInFlightPoll()")
-        self.assertIn("m_PollCtx.reset()", abandon)
+        # Stronger than the old distinct-context reset: no reset() anywhere,
+        # because the abandoned GET is still in flight on the shared context.
+        self.assertNotIn(".reset()", abandon)
+        self.assertNotIn(".reset();", source)
         self.assertIn("m_PollCallback = null;", abandon)
         self.assertNotIn("m_PollCallbackRefs.Clear()", abandon)
-        self.assertNotIn("m_Ctx.reset()", abandon)
         self.assertNotIn("m_CallbackRefs.Clear()", abandon)
         self.assertNotIn("new ", abandon)
-        self.assertLess(
-            abandon.index("m_PollCallback = null;"), abandon.index("m_PollCtx.reset()")
-        )
-        self.assertIn("m_PollCtx != m_Ctx", abandon)
+        self.assertNotIn("DetachSink", abandon)
         post = _brace_body(source, "protected void PostResult(")
         self.assertIn("m_CallbackRefs.Insert(cb)", post)
+        self.assertIn("MCPClientRestHolder.Hold(cb);", post)
+        self.assertLess(post.index("m_CallbackRefs.Insert(cb);"), post.index("MCPClientRestHolder.Hold(cb);"))
+        self.assertLess(post.index("MCPClientRestHolder.Hold(cb);"), post.index("m_Ctx.POST(cb, resultRequest, body);"))
         self.assertIn("m_Ctx.POST(cb, resultRequest, body)", post)
         self.assertNotIn("m_PollCtx.POST", post)
 
     def test_shutdown_shared_ctx_terminal_detaches_callbacks(self) -> None:
         source = CLIENT.read_text(encoding="utf-8")
-        poll_cb = _brace_body(source, "class MCPClientPollCallback")
-        result_cb = _brace_body(source, "class MCPClientResultCallback")
-        poll_detach = _brace_body(poll_cb, "void DetachBridge()")
-        result_detach = _brace_body(result_cb, "void DetachBridge()")
-        self.assertIn("m_Bridge = null;", poll_detach)
-        self.assertIn("m_Bridge = null;", result_detach)
+        world = WORLD_CLIENT.read_text(encoding="utf-8")
+        poll_cb = _brace_body(world, "class MCPClientPollCallback")
+        result_cb = _brace_body(world, "class MCPClientResultCallback")
+        poll_detach = _brace_body(poll_cb, "void DetachSink()")
+        result_detach = _brace_body(result_cb, "void DetachSink()")
+        self.assertIn("m_Sink = null;", poll_detach)
+        self.assertIn("m_Sink = null;", result_detach)
 
         shutdown = _brace_body(source, "void Shutdown()")
-        self.assertIn("bool pollDistinct = false;", shutdown)
-        self.assertIn("if (m_PollCtx && m_PollCtx != m_Ctx)", shutdown)
-        self.assertIn("if (pollDistinct)", shutdown)
-        self.assertIn("m_PollCtx.reset()", shutdown)
-        self.assertIn("if (pollDistinct || !postedTerminal)", shutdown)
+        # Stronger than the old gated resets: no reset() and no distinct-
+        # context branch at all, and both ref arrays clear unconditionally
+        # because the 4_World holder keeps in-flight callbacks.
+        self.assertNotIn("pollDistinct", shutdown)
+        self.assertNotIn(".reset()", shutdown)
+        self.assertNotIn(".reset();", source)
+        self.assertIn("m_RestSink.Disconnect();", shutdown)
         self.assertIn("m_PollCallbackRefs.Clear()", shutdown)
+        self.assertIn("m_CallbackRefs.Clear()", shutdown)
+        self.assertNotIn("if (pollDistinct || !postedTerminal)", shutdown)
         self.assertIn("m_PollCallback = null;", shutdown)
         self.assertGreater(
             shutdown.index("m_PollCallback = null;"),
@@ -420,37 +450,30 @@ class PollWatchdogContractTest(unittest.TestCase):
             shutdown.index("m_PollCallback = null;"),
             shutdown.index("m_Ctx = null;"),
         )
-        ctx_reset = _brace_body(shutdown, "if (m_Ctx)")
-        self.assertIn("if (!postedTerminal)", ctx_reset)
-        self.assertIn("m_Ctx.reset()", ctx_reset)
-        # Shared context + postedTerminal: reset and Clear stay gated, arrays remain.
+        ctx_block = _brace_body(shutdown, "if (m_Ctx)")
+        self.assertIn("m_Ctx = null;", ctx_block)
+        self.assertNotIn("postedTerminal", ctx_block)
+        self.assertNotIn(".reset()", ctx_block)
         after_shared_null = shutdown[shutdown.index("m_Ctx = null;") :]
         result_refs = after_shared_null[after_shared_null.index("if (m_CallbackRefs)") :]
-        self.assertIn("if (!postedTerminal)", result_refs)
+        self.assertNotIn("postedTerminal", result_refs)
         self.assertIn("m_CallbackRefs.Clear()", result_refs)
-        self.assertLess(
-            result_refs.index("if (!postedTerminal)"),
-            result_refs.index("m_CallbackRefs.Clear()"),
-        )
-        poll_reset_idx = shutdown.index("if (pollDistinct)")
-        posted_result_idx = shutdown.index("if (m_Ctx)")
-        self.assertLess(poll_reset_idx, posted_result_idx)
-        # The poll reset is only the distinct-context block. The hold terminal
-        # POST is earlier, before callback detach, so it is outside this slice.
-        poll_block = shutdown[poll_reset_idx:posted_result_idx]
-        self.assertNotIn("postedTerminal", poll_block)
-        self.assertNotIn("PostActionHoldJob", poll_block)
 
-        posted_idx = shutdown.index("postedTerminal = true;")
-        detach_poll_idx = shutdown.index("pollCb.DetachBridge()")
-        detach_result_idx = shutdown.index("resultCb.DetachBridge()")
+        posted_idx = shutdown.index("PostUiDialogJob(m_DialogJob);")
+        disconnect_idx = shutdown.index("m_RestSink.Disconnect();")
+        detach_poll_idx = shutdown.index("pollCb.DetachSink()")
+        detach_result_idx = shutdown.index("resultCb.DetachSink()")
         hold_post_idx = shutdown.index("PostActionHoldJob(holdJob)")
+        self.assertLess(hold_post_idx, disconnect_idx)
         self.assertLess(hold_post_idx, detach_poll_idx)
         self.assertLess(hold_post_idx, detach_result_idx)
         ctx_null_idx = shutdown.index("m_PollCtx = null;")
         shared_null_idx = shutdown.index("m_Ctx = null;")
+        self.assertLess(posted_idx, disconnect_idx)
         self.assertLess(posted_idx, detach_poll_idx)
         self.assertLess(posted_idx, detach_result_idx)
+        self.assertLess(disconnect_idx, detach_poll_idx)
+        self.assertLess(disconnect_idx, detach_result_idx)
         self.assertLess(detach_poll_idx, ctx_null_idx)
         self.assertLess(detach_result_idx, ctx_null_idx)
         self.assertLess(detach_poll_idx, shared_null_idx)
@@ -460,7 +483,7 @@ class PollWatchdogContractTest(unittest.TestCase):
         self.assertIn("m_PollCallbackRefs.Get", shutdown)
         self.assertIn("m_CallbackRefs.Get", shutdown)
         abandon = _brace_body(source, "protected void AbandonInFlightPoll()")
-        self.assertNotIn("DetachBridge", abandon)
+        self.assertNotIn("DetachSink", abandon)
 
     def test_server_bridge_has_no_poll_watchdog(self) -> None:
         source = SERVER.read_text(encoding="utf-8")

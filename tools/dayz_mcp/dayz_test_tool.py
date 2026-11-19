@@ -4156,39 +4156,59 @@ async def execute_dayz_test_stop(
                     expected_run_id=run_id,
                     progress_cb=progress_cb,
                 )
-                if (
+                error_code = result.get("error_code")
+                result_run_id = result.get("run_id")
+                stop_failed_reconcile = (
                     result.get("status") == "failed"
-                    and result.get("error_code") == "run_stop_failed"
-                    and result.get("run_id") == run_id
-                ):
+                    and error_code == "run_stop_failed"
+                    and result_run_id == run_id
+                )
+                # fb-20261116-020242-8bed: a run left UNRECONCILED can be
+                # retired to EXITED by the daemon's reaper before the worker's
+                # adopt runs, so the kill path answers run_not_adoptable with
+                # no run_id (or the asked run_id). Reconcile only when the
+                # asked row is EXITED or absent; any other state (including
+                # UNRECONCILED without processes) and any read failure stay
+                # failed.
+                not_adoptable_reconcile = (
+                    result.get("status") == "failed"
+                    and error_code == "run_not_adoptable"
+                    and (result_run_id is None or result_run_id == run_id)
+                )
+                if stop_failed_reconcile or not_adoptable_reconcile:
+                    reconciled = False
                     try:
                         snapshot = await runtime.lifecycle_status()
                     except Exception:
-                        return result
-                    try:
-                        stopped = _exact_run(snapshot, run_id)
-                    except DayzTestToolError as exc:
-                        # fb-20260918-165857-744a: a reaped/missing row after
-                        # the worker already tried to stop is success, not a
-                        # leftover DayZ process.
-                        if exc.code == "run_not_found":
-                            result.update(
-                                status="succeeded",
-                                phase="completed",
-                                error_code=None,
-                                cleanup_degraded=False,
+                        pass
+                    else:
+                        try:
+                            stopped = _exact_run(snapshot, run_id)
+                        except DayzTestToolError as exc:
+                            # fb-20260918-165857-744a / fb-20261116-020242-8bed:
+                            # a reaped/missing row after the worker already
+                            # tried to stop or adopt is success, not a leftover
+                            # DayZ process.
+                            if exc.code == "run_not_found":
+                                reconciled = True
+                        except Exception:
+                            pass
+                        else:
+                            processes = stopped.get("processes")
+                            processes_gone = (
+                                stop_failed_reconcile
+                                and isinstance(processes, list)
+                                and not processes
                             )
-                        return result
-                    except Exception:
-                        return result
-                    processes = stopped.get("processes")
-                    processes_gone = isinstance(processes, list) and not processes
-                    if stopped.get("state") == "EXITED" or processes_gone:
+                            if stopped.get("state") == "EXITED" or processes_gone:
+                                reconciled = True
+                    if reconciled:
                         result.update(
                             status="succeeded",
                             phase="completed",
                             error_code=None,
                             cleanup_degraded=False,
+                            run_id=run_id,
                         )
             # 2edd-2: dayz_test_stop always drives the kill path today. Surface
             # that on the MCP envelope so "succeeded" is not read as "exit
