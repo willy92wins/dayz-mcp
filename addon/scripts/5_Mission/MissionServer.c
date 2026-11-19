@@ -34,6 +34,8 @@ modded class MissionServer
 		// the mission default was fixed at OnMissionStart from the config
 		// on disk, and Tick leaves at once when no body is in godmode.
 		MCPGodmode.Tick(timeslice);
+		// Server-side kinematic sampler: returns immediately while idle.
+		MCPPlayersKinematics.Tick();
 
 		MCPBridge bridge = MCPBridge.Get();
 		if (bridge)

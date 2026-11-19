@@ -187,6 +187,7 @@ from dayz_mcp import camera_path as camera_path_contract
 from dayz_mcp import loadout as loadout_contract
 from dayz_mcp import player_move as player_move_contract
 from dayz_mcp import player_trace as player_trace_contract
+from dayz_mcp import players_kinematics as players_kinematics_contract
 # Moved out of this module unchanged (backlog 71fc) and imported back, so
 # dayz_mcp.server.<name> is still the same object for every name it had.
 from dayz_mcp.action_cursor import execute_action_cursor
@@ -706,6 +707,9 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     # A mistyped uid key must not be dropped: kill has no first-player fallback.
     "player_kill",
     "player_set_stance",
+    # A mistyped uids key (e.g. uid=) must not be dropped and silently sample
+    # every connected player: unknown keys are refused.
+    "players_kinematics",
     "bot_start",
     "bot_stop",
     # A mistyped scene_id key must not create a batch outside its scene, where
@@ -12767,6 +12771,129 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         try:
             return player_trace_contract.normalize_bridge_result(raw_result)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Capture and read a server-side per-player kinematic "
+            "trace driven from MissionServer.OnUpdate on the server peer, with no "
+            "raycasts and no world writes. Measures raw quantities only: no "
+            "verdicts, thresholds, or filtering. "
+            "Modes: mode=start (empty trace_id) creates a new trace_id and starts "
+            "sampling (trace_exists if a trace already exists, so call mode=clear "
+            "first; clear of an active trace is trace_active, so stop first); "
+            "mode=status reads the header; mode=stop stops the trace with "
+            "stop_reason=requested; mode=read pages rows by cursor (>= 0) and "
+            f"limit ({players_kinematics_contract.LIMIT_MIN}.."
+            f"{players_kinematics_contract.LIMIT_MAX}, default 64); mode=clear "
+            "clears a stopped trace. "
+            f"sample_hz ({players_kinematics_contract.SAMPLE_HZ_MIN}.."
+            f"{players_kinematics_contract.SAMPLE_HZ_MAX}, default 10) sets the "
+            "cadence on the single server clock GetGame().GetTime() in integer "
+            "milliseconds (tick_ms, start_tick_ms, now_tick_ms; GetTickTime is "
+            "not used). max_samples "
+            f"({players_kinematics_contract.MAX_SAMPLES_MIN}.."
+            f"{players_kinematics_contract.MAX_SAMPLES_MAX}, default 4096) sizes "
+            "the preallocated row buffer; when full, the trace stops with "
+            "overflow=true and stop_reason=overflow without overwriting (the last "
+            "pass may be partial). uids is an optional list of up to "
+            f"{players_kinematics_contract.UIDS_MAX} unique non-blank plain "
+            "identity strings (PlayerIdentity.GetPlainId()); omitted or empty "
+            "samples all connected living PlayerBase with an identity. Dead bodies "
+            "are never sampled, so a respawn appears as a subject_absent gap "
+            "rather than an in-cadence position jump. "
+            "Published reply: players_kinematics holds the header without raw wire "
+            "rows, and mode=read also publishes evidence in the "
+            "dayz-mcp-evidence-v1 envelope (truncated is next_cursor < count; eof "
+            "is !active and next_cursor == count; non-read modes omit evidence). "
+            "Row fields and engine reads: pos (Object.GetPosition, m), "
+            "expected_dt_s (interval_ms * 0.001, s), observed_dt_s (delta tick_ms "
+            "in s; omitted with first_sample), vel (pos delta / observed_dt_s, "
+            "m/s; omitted with first_sample and clock_not_monotonic), vel_engine "
+            "(Human.PhysicsGetVelocity, m/s; on foot only, unavailable in a "
+            "vehicle), yaw_deg (HumanInputController.GetHeadingAngle converted to "
+            "compass degrees, 0 north = +Z, 90 east = +X; this is the server's "
+            "heading for the player, not the client camera, and has not yet been "
+            "measured against a human player's mouse movement or free look), "
+            "pitch_deg (HumanCommandWeapons.GetBaseAimingAngleUD, deg; unverified "
+            "against human mouse input on the server, masked as unavailable by "
+            "default unless include_unverified=true), stance_idx "
+            "(HumanMovementState.m_iStanceIdx), command "
+            "(HumanMovementState.m_CommandTypeId as a closed token), falling "
+            "(Human.PhysicsIsFalling(false), raw physics controller reading on "
+            "foot only and unavailable in a vehicle; this is not grounded, as a "
+            "body floating after a server teleport still reads falling=false), "
+            "jump (PlayerBase.IsJumpInProgress; unverified against human keyboard "
+            "input on the server, masked as unavailable by default unless "
+            "include_unverified=true), parachute (always unavailable, "
+            "parachute_available=false, because vanilla DayZ 1.30 has no "
+            "parachute), in_vehicle (whether a Transport was found via "
+            "GetCommand_Vehicle().GetTransport() or Transport.Cast(GetParent())), "
+            "vehicle_type (Transport.GetType() or ClassName(), or '-' on foot), "
+            "and vehicle_class (one of five classes: none, ground for Car or "
+            "Motorbike, water for Boat, aircraft for Helicopter, or unknown). "
+            "Gap kinds in strict precedence order: first_sample (no prior sample "
+            "for this uid in this trace), clock_not_monotonic (tick_ms <= previous "
+            "tick_ms), subject_absent (now_pass - previous_pass > 1, uid missed at "
+            "least one executed pass), pass_late (tick_ms - previous tick_ms > "
+            "late_after_ms), or empty string otherwise (in-cadence position jumps "
+            "are not gaps). "
+            "Budget: each pass is timed with TickCount (10 000 ticks = 1 ms; "
+            f"pass_cost_budget_ticks={players_kinematics_contract.PASS_BUDGET_TICKS}, "
+            "0.5 ms); header counters report passes, budget_skips, "
+            "pass_cost_last_ticks, pass_cost_max_ticks and pass_cost_budget_ticks. "
+            "If a pass exceeds the budget, the next due pass is skipped and "
+            "counted in budget_skips; a later row carries pass_late only when "
+            "GapKind's rule holds (more than late_after_ms since that uid's "
+            "previous sample, after the earlier gap rules). "
+            "There is no disk dump: the trace is aborted and lost on lease close "
+            "or mission shutdown, so stop and read all pages before releasing the "
+            "lease. Stop reasons: '', requested, overflow. "
+            "Errors: bad_mode, bad_trace_id, bad_cursor, bad_limit, bad_sample_hz, "
+            "bad_max_samples, bad_uids (refused before the bridge), bad_args, "
+            "trace_exists, trace_not_found, trace_active, live_profile_refused, "
+            "bad_bridge_kinematics_result, bad_bridge_kinematics_boolean, "
+            "bad_evidence_row, bad_evidence_result."
+        )
+    )
+    async def players_kinematics(
+        mode: StrictStr,
+        trace_id: StrictStr = "",
+        cursor: StrictInt = 0,
+        limit: StrictInt = 64,
+        sample_hz: StrictInt = 10,
+        max_samples: StrictInt = 4096,
+        uids: list[StrictStr] | None = None,
+        include_unverified: StrictBool = False,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        try:
+            args = players_kinematics_contract.normalize_request(
+                mode,
+                trace_id,
+                cursor,
+                limit,
+                sample_hz,
+                max_samples,
+                uids,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        if not isinstance(include_unverified, bool):
+            raise ToolError(_bad_args("include_unverified", include_unverified, "be a bool"))
+        async with runtime.tool_lock:
+            raw_result = await runtime.call_bridge(
+                "players_kinematics",
+                args,
+                "server",
+                _timeout(timeout_s),
+            )
+        try:
+            return players_kinematics_contract.normalize_bridge_result(
+                raw_result,
+                include_unverified=include_unverified,
+            )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
 

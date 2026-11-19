@@ -387,6 +387,9 @@ class MCPArgs
 	bool active;
 	// player_respawn_survivor only: the vanilla survivor type to pin.
 	string survivor_type;
+	// players_kinematics: optional list of up to 16 player uids (GetPlainId).
+	// Empty means sample every connected living player with an identity.
+	ref array<string> uids;
 
 	void MCPArgs()
 	{
@@ -399,6 +402,7 @@ class MCPArgs
 		look_at = new array<float>();
 		want = new array<string>();
 		sources = new array<string>();
+		uids = new array<string>();
 		fields = new array<ref MCPDialogField>();
 		loadout_items = new array<ref MCPLoadoutItem>();
 		keys = new array<ref MCPPathKey>();
@@ -1677,6 +1681,8 @@ class MCPResult
 	ref MCPUiClickSequence click_sequence;
 	// player_kill reply. Unassigned on its refusals and on other commands.
 	ref MCPPlayerKill player_kill;
+	// players_kinematics header and paged rows. Unassigned on other commands.
+	ref MCPPlayersKinematicsRead players_kinematics;
 	// bot_start / bot_stop reply. Unassigned on their refusals and on other commands.
 	ref MCPBotReport bot;
 	// player_set_stance reply. Unassigned on its refusals and on other commands.

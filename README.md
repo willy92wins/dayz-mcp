@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 116 typed
+game, put the world into a state, act, and read back what the engine did — 117 typed
 tools, server-authoritative, no keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
@@ -105,13 +105,13 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` writes nothing unless the client starts with `-autotest` (T165276),
 and dayz-mcp does not start it that way yet, so frames come from an external window grab of the rendered client, which only reads pixels.
 
-**116 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**117 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
 `action_cursor`, `action_hold`, `action_use`, `actor_emote`, `ai_group_order`, `ai_group_spawn`, `ai_group_state`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_path_play`, `camera_path_release`, `camera_set`, `camera_set_focus`, `capture_screenshot`, `chat_read`, `gameplay_state`,
 `dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `dev_free_camera_set`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `hud_set`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `inventory_move`, `key_press`,
 `lease_acquire`, `list_projects`, `loadout_apply`, `loadout_get`, `logs_since`, `nav_path_query`, `notify_players`, `object_anim`,
 `object_delete`, `object_doors`, `object_inspect`, `object_resolve`, `object_set_health`, `pipeline_feedback`, `pipeline_inbox`,
-`pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_find`, `player_godmode`, `player_heal`, `player_kill`, `player_look_at`, `player_move`, `player_respawn`, `player_set_stance`, `player_teleport`, `player_trace`, `player_view_set`, `players_visibility`, `bot_start`, `bot_stop`, `query_all_players`, `query_get_in_condition`,
+`pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_find`, `player_godmode`, `player_heal`, `player_kill`, `player_look_at`, `player_move`, `player_respawn`, `player_set_stance`, `player_teleport`, `player_trace`, `player_view_set`, `players_kinematics`, `players_visibility`, `bot_start`, `bot_stop`, `query_all_players`, `query_get_in_condition`,
 `query_player_state`, `restore_gameplay`, `scene_clear`, `scene_entities`, `scene_raycast`, `server_perf`, `session_acquire`,
 `session_acquire_wait`, `session_cancel`, `session_heartbeat`, `session_release`,
 `session_status`, `session_wait`, `surface_query`, `survivor_drive`, `telemetry_read`, `ui_click`, `ui_dialog`, `ui_focus`, `ui_map_set`, `ui_menu_set`, `ui_pause`, `ui_reload_layout`,

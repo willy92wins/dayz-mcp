@@ -242,6 +242,16 @@ def _minimal_args(cmd: str) -> dict:
         return {"uid": "player-1"}
     if cmd == "player_set_stance":
         return {"uid": "player-1", "stance": "erect", "recover": False}
+    if cmd == "players_kinematics":
+        return {
+            "mode": "start",
+            "trace_id": "0" * 32,
+            "cursor": 0,
+            "limit": 64,
+            "sample_hz": 10,
+            "max_samples": 100,
+            "uids": [],
+        }
     if cmd == "bot_start":
         return {
             "object_id": 1,
