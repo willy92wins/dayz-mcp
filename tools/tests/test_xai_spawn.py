@@ -1428,6 +1428,30 @@ class AIGroupSpawnReleaseAuditTest(unittest.TestCase):
             lines[0],
         )
 
+    def test_a_late_answer_first_received_as_a_retry_names_its_release(self) -> None:
+        # Guard (passes today): when the bridge's first POST was lost, the
+        # daemon's first reception of a late answer already carries retry=True
+        # and still audits one late_answer_abandon line naming the queued
+        # release. Mutants killed: a late_answer_abandon line without
+        # release_id only when the first reception has retry=True, or with
+        # another id (for example command_id) only under retry.
+        state, now, command_id = self._delivered_spawn()
+        audit = self._real_audit(state)
+        now[0] += 0.126
+        self.assertTrue(self._answer(state, command_id, retry=True).get("discarded"))
+        release_ids = self._queued_release_ids(state)
+        self.assertEqual(len(release_ids), 1)
+        lines = self._release_lines(audit, command_id)
+        self.assertEqual([e.get("event") for e in lines], ["late_answer_abandon"], self._lines(audit))
+        self.assertEqual(
+            (
+                lines[0].get("reason"), lines[0].get("decision"), lines[0].get("duration_s"),
+                lines[0].get("release_id"),
+            ),
+            ("late_answer", "release_queued", 0.0, release_ids[0]),
+            lines[0],
+        )
+
     def test_a_caller_holding_the_broker_lock_gets_no_audit_write_under_it(self) -> None:
         # Sol r1 finding 1: the broker lock is an RLock, so a caller that
         # already holds it (re-entrant) still holds it after the method's own
