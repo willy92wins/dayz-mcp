@@ -16,6 +16,7 @@ from dayz_mcp.process_lifecycle import (
     ADOPTION_REVERT_PENDING,
     caller_launched_row,
     caller_may_adopt_ownerless,
+    crash_reporter_box_hint,
     empty_box,
     occupancy_error_fields,
     protection_fields,
@@ -893,6 +894,10 @@ def _session_status_blocked_on(
         idle = _ownerless_idle_runs(box)
         if len(idle) == 1 and _row_is_protected(idle[0], caller_session):
             return _protection_blocked_on(idle[0])
+    if isinstance(box, dict):
+        reporter_blocked = crash_reporter_box_hint(box)
+        if reporter_blocked is not None:
+            return reporter_blocked
     if isinstance(box, dict) and box.get("occupied") is True:
         return (
             'DayZ test box; next: call dayz_test_run(..., on_busy="queue") '
