@@ -550,6 +550,19 @@ class CrashReporterHeldPortD3b7Test(PortOccupancyTest):
             "processes": [self.reporter_row(self.DEAD_CLIENT)],
         }
 
+    def assert_no_pid(self, published: object) -> None:
+        """No pid or ppid, by name or by value, in what the box and its callers publish.
+
+        The box publishes no pids (test_box_occupancy.py:275 and :166 of this file);
+        naming CrashReporter.exe and the port is enough to close its window.
+        """
+        text = published if isinstance(published, str) else json.dumps(published)
+        words = "".join(ch if ch.isalnum() else " " for ch in text.casefold()).split()
+        self.assertNotIn("pid", words, text)
+        self.assertNotIn("ppid", words, text)
+        for pid in (self.DEAD_CLIENT, self.REPORTER):
+            self.assertNotIn(str(pid), text)
+
     @staticmethod
     def names_crash_reporter(text: object) -> bool:
         """CrashReporter.exe, crash_reporter or Crash Reporter, in any case."""
@@ -581,12 +594,16 @@ class CrashReporterHeldPortD3b7Test(PortOccupancyTest):
     def test_d3b7_box_names_the_crash_reporter_holding_a_dead_clients_port(self) -> None:
         # Guards the box: the nameless holder of 2316 is attributed to the live
         # CrashReporter.exe whose ppid it is; the box stays occupied, with a known
-        # scan and one foreign row. RED on e36a19f by design: _collect_probes never
-        # reads child_probe, so the scan is port_attribution_unknown, foreign empty.
+        # scan and one foreign row that names the image and the port, and the box
+        # publishes no pid. RED on e36a19f by design: _collect_probes never reads
+        # child_probe, so the scan is port_attribution_unknown, foreign empty.
         self.leave_reporter_holding_the_port()
 
         box = self.lifecycle.box_occupancy()
 
+        # No pid anywhere in the box, the reporter's row included.
+        self.assertNotIn("pid", json.dumps(box))
+        self.assert_no_pid(box)
         self.assertTrue(box["occupied"])
         self.assertTrue(box["scan_known"])
         self.assertTrue(box["port_scan_known"], box["port_scan_reason"])
@@ -594,11 +611,8 @@ class CrashReporterHeldPortD3b7Test(PortOccupancyTest):
         self.assertEqual(box["runs"], [])
         self.assertEqual(len(box["foreign"]), 1, box["foreign"])
         row = box["foreign"][0]
-        # The socket-table row shape, plus the reporter's own pid.
-        self.assertLessEqual(
-            {"port", "mods", "profiles", "image", "source", "pid"}, set(row), row
-        )
-        self.assertEqual(row["pid"], self.REPORTER)
+        # The socket-table row shape.
+        self.assertLessEqual({"port", "mods", "profiles", "image", "source"}, set(row), row)
         self.assertEqual(row["image"], "CrashReporter.exe")
         self.assertEqual(row["port"], self.PORT)
         self.assertEqual(row["mods"], [])
@@ -624,6 +638,7 @@ class CrashReporterHeldPortD3b7Test(PortOccupancyTest):
         self.assertIn("close", text.casefold())
         self.assertNotIn("restore the daemon's view", text)
         self.assertNotIn("port_attribution_unknown", text)
+        self.assert_no_pid(text)
 
     def test_d3b7_start_is_refused_with_a_reason_that_names_the_reporter(self) -> None:
         # Guards start_run and _foreign_port_reason: the launch is still refused
@@ -644,6 +659,7 @@ class CrashReporterHeldPortD3b7Test(PortOccupancyTest):
                 self.assertIsInstance(reason, str)
                 self.assertNotEqual(reason, "port_attribution_unknown")
                 self.assertTrue(self.names_crash_reporter(reason), reason)
+                self.assert_no_pid(reason)
         self.assertEqual(
             self.rejected_reasons()[-1], self.lifecycle._foreign_port_reason(set(), 2302)
         )
@@ -659,6 +675,7 @@ class CrashReporterHeldPortD3b7Test(PortOccupancyTest):
         self.assertFalse(empty)
         self.assertNotEqual(reason, "port_attribution_unknown")
         self.assertTrue(self.names_crash_reporter(reason), reason)
+        self.assert_no_pid(reason)
 
     # --- negative: green on e36a19f by design, and after the fix --------------------------------
 
