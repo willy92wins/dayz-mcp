@@ -2273,6 +2273,248 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["error_code"])
         self.assertFalse(result["cleanup_degraded"])
 
+    # fb-20261116-020242-8bed: the daemon's reaper retired the run to EXITED
+    # between the grant's adopt and the worker's, so the second dayz_test_stop
+    # of a run left UNRECONCILED met run_not_adoptable (adopt) and
+    # run_not_adopted (stop), and the sealed worker failed with
+    # run_not_adoptable and no run_id (dayz_test_worker: the kill path when
+    # adopt does not answer RUNNING). The 744a fallback above reads only
+    # run_stop_failed with the same run_id.
+    _REAPED_RACE_CODES = ("run_not_adoptable", "run_not_adopted")
+    _REAPED_RACE_KEYS = (
+        "status",
+        "phase",
+        "error_code",
+        "run_id",
+        "cleanup_degraded",
+        "stop_method",
+        "exit_metrics_valid",
+    )
+
+    @staticmethod
+    def _reaped_race_row(
+        state: str, processes: list[dict[str, object]]
+    ) -> dict[str, object]:
+        return {
+            "run_id": RUN_ID,
+            "state": state,
+            "mod": "@StorageMod",
+            "profiles": r"C:\Tools\LFV_D2_Executor\_client\profiles",
+            "processes": processes,
+        }
+
+    async def _stop_after_reaped_race(
+        self,
+        error_code: str,
+        after: object,
+        *,
+        terminal_run_id: str | None = None,
+    ) -> dict[str, object]:
+        """dayz_test_stop(RUN_ID) of the UNRECONCILED row the first stop left.
+
+        The first lifecycle_status lists the row with its surviving client, so
+        the stop reaches the worker; every later read answers after, or raises
+        it when it is an exception. The fake launcher returns the terminal the
+        worker emits there: run_not_adoptable, no run_id, cleanup_degraded
+        false. terminal_run_id names another run instead, with the
+        cleanup_degraded true that parse_worker_terminal pairs with a failed
+        run_id. run_not_adopted is not in dayz_test_worker.WORKER_ERROR_CODES,
+        so no terminal can carry it (parse_worker_terminal answers
+        terminal_invalid); that variant renames the error_code of the real
+        result _execute_request returns, the layer the fallback reads.
+        """
+        lfv = _policy(
+            mod="StorageMod",
+            dev_root=r"C:\Tools\LFV_D2_Executor",
+            default_source=r"C:\Tools\LFV_D2_Executor\staged-source\StorageMod",
+            default_base_mods=("@CF",),
+        )
+        unreconciled = self._reaped_race_row(
+            "UNRECONCILED", [{"pid": 76216, "role": "client"}]
+        )
+        runtime = _Runtime()
+
+        async def lifecycle_status() -> dict[str, object]:
+            runtime.lifecycle_calls += 1
+            if runtime.lifecycle_calls == 1:
+                return {"runs": [unreconciled]}
+            if isinstance(after, BaseException):
+                raise after
+            return after  # type: ignore[return-value]
+
+        runtime.lifecycle_status = lifecycle_status  # type: ignore[method-assign]
+
+        async def launch(_raw_request: bytes, **kwargs: object) -> int:
+            kwargs["output_sink"](
+                "stdout",
+                _terminal(
+                    {
+                        "cleanup_degraded": terminal_run_id is not None,
+                        "error_code": "run_not_adoptable",
+                        "exit_code": 2,
+                        "ok": False,
+                        "run_id": terminal_run_id,
+                    }
+                ),
+            )
+            return 2
+
+        real_execute = dayz_test_tool._execute_request
+
+        async def execute(*args: object, **kwargs: object) -> dict[str, object]:
+            result = await real_execute(*args, **kwargs)
+            self.assertEqual(result["error_code"], "run_not_adoptable")
+            result["error_code"] = error_code
+            return result
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(lfv)),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch,
+        ), patch.object(dayz_test_tool, "_execute_request", new=execute):
+            return await dayz_test_tool.execute_dayz_test_stop(runtime, RUN_ID)
+
+    def _assert_reaped_race_succeeded(self, result: dict[str, object]) -> None:
+        # run_id is not pinned: the worker's terminal carries none.
+        self.assertEqual(
+            {
+                key: result.get(key)
+                for key in self._REAPED_RACE_KEYS
+                if key != "run_id"
+            },
+            {
+                "status": "succeeded",
+                "phase": "completed",
+                "error_code": None,
+                "cleanup_degraded": False,
+                "stop_method": "forced_kill",
+                "exit_metrics_valid": False,
+            },
+        )
+        self.assertIs(result["cleanup_degraded"], False)
+        self.assertIs(result["exit_metrics_valid"], False)
+
+    def _assert_reaped_race_kept(
+        self,
+        result: dict[str, object],
+        error_code: str,
+        *,
+        run_id: str | None = None,
+    ) -> None:
+        self.assertEqual(
+            {key: result.get(key) for key in self._REAPED_RACE_KEYS},
+            {
+                "status": "failed",
+                "phase": "executing",
+                "error_code": error_code,
+                "run_id": run_id,
+                "cleanup_degraded": run_id is not None,
+                "stop_method": None,
+                "exit_metrics_valid": None,
+            },
+        )
+        self.assertNotIn("stop_method", result)
+        self.assertNotIn("exit_metrics_valid", result)
+
+    # Guards 8bed: the reaper's EXITED row, read after the worker's failure,
+    # is the stop the caller asked for. Red on e36a19f by design: the 744a
+    # fallback does not read run_not_adoptable or run_not_adopted.
+    async def test_stop_treats_exited_row_after_run_not_adoptable_as_success(
+        self,
+    ) -> None:
+        exited = {"runs": [self._reaped_race_row("EXITED", [])]}
+        for code in self._REAPED_RACE_CODES:
+            with self.subTest(error_code=code):
+                result = await self._stop_after_reaped_race(code, exited)
+                self._assert_reaped_race_succeeded(result)
+
+    # Guards 8bed: no row with the asked run_id left (pruned after the reap)
+    # is the same success, 2edd-2 keys included; the 744a run_not_found
+    # branch returns before setting them. Red on e36a19f by design, as above.
+    async def test_stop_treats_missing_row_after_run_not_adoptable_as_success(
+        self,
+    ) -> None:
+        for code in self._REAPED_RACE_CODES:
+            with self.subTest(error_code=code):
+                result = await self._stop_after_reaped_race(code, {"runs": []})
+                self._assert_reaped_race_succeeded(result)
+
+    # Control for 8bed: a RUNNING row keeps the failure as it is. Green on
+    # e36a19f and after the fix.
+    async def test_stop_keeps_run_not_adoptable_while_the_row_is_running(
+        self,
+    ) -> None:
+        running = {
+            "runs": [
+                self._reaped_race_row(
+                    "RUNNING",
+                    [
+                        {"pid": 58956, "role": "server"},
+                        {"pid": 76216, "role": "client"},
+                    ],
+                )
+            ]
+        }
+        for code in self._REAPED_RACE_CODES:
+            with self.subTest(error_code=code):
+                result = await self._stop_after_reaped_race(code, running)
+                self._assert_reaped_race_kept(result, code)
+
+    # Control for 8bed: an UNRECONCILED row that still lists a process keeps
+    # the failure as it is. Green on e36a19f and after the fix.
+    async def test_stop_keeps_run_not_adoptable_while_the_row_lists_a_process(
+        self,
+    ) -> None:
+        unreconciled = {
+            "runs": [
+                self._reaped_race_row(
+                    "UNRECONCILED", [{"pid": 76216, "role": "client"}]
+                )
+            ]
+        }
+        for code in self._REAPED_RACE_CODES:
+            with self.subTest(error_code=code):
+                result = await self._stop_after_reaped_race(code, unreconciled)
+                self._assert_reaped_race_kept(result, code)
+
+    # Control for 8bed: a lifecycle_status that raises after the worker's
+    # failure keeps that failure (fail-closed). Green on e36a19f and after the
+    # fix.
+    async def test_stop_keeps_run_not_adoptable_when_status_is_unreadable(
+        self,
+    ) -> None:
+        for code in self._REAPED_RACE_CODES:
+            with self.subTest(error_code=code):
+                result = await self._stop_after_reaped_race(
+                    code,
+                    ControlClientError(
+                        "daemon_unavailable",
+                        request_stage="pre_request",
+                        http_bytes_sent=0,
+                    ),
+                )
+                self._assert_reaped_race_kept(result, code)
+
+    # Control for 8bed: a failure that names another run is left untouched,
+    # even with the asked run's row EXITED. Green on e36a19f and after the fix.
+    async def test_stop_leaves_run_not_adoptable_for_another_run_untouched(
+        self,
+    ) -> None:
+        other = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        exited = {"runs": [self._reaped_race_row("EXITED", [])]}
+        for code in self._REAPED_RACE_CODES:
+            with self.subTest(error_code=code):
+                result = await self._stop_after_reaped_race(
+                    code, exited, terminal_run_id=other
+                )
+                self._assert_reaped_race_kept(result, code, run_id=other)
+
     async def test_worker_failed_carries_lifecycle_start_error(self) -> None:
         policy = _policy()
         # last_start_error is only written by _settle_failed_launch, which
