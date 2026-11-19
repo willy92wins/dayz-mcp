@@ -34,6 +34,7 @@ from tests.enforce_subset_helpers import (
     method_body,
     translate,
 )
+from tests.rest_holder_harness import make_forwarder, make_holder
 
 
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
@@ -231,6 +232,8 @@ def _execute_translated_client_poll(source: str, cleaned: str) -> list[str]:
         "MCPCameraPath": object,
         "MCPJobRunner": lambda: SimpleNamespace(Count=lambda: 0),
         "MCPClientPollCallback": lambda _owner: object(),
+        "MCPClientRestForwarder": lambda owner: make_forwarder(owner, bridge_source=source),
+        "MCPClientRestHolder": make_holder(),
         "GetPollVersion": lambda: WireString.of("12%7E1.30"),
         "LoadCounterQuery": lambda: WireString.of(""),
         "this": object(),
