@@ -68,9 +68,11 @@ class FreeCameraNoteTest(unittest.TestCase):
         self.assertTrue(any("view='player'" in s for s in about), about)
 
     def test_dev_free_camera_set_bounds_the_player_answer_to_the_off_state(self) -> None:
+        # "would answer with it off", not just "with it off": a mutation pass showed that the same sentence can say
+        # "with it off" about the screenshot while the player answer is left unbounded.
         about = [s for s in _sentences("dev_free_camera_set") if "camera_get" in s and "view='player'" in s]
         self.assertTrue(about, "no dev_free_camera_set sentence names camera_get with view='player'")
-        self.assertTrue(all("with it off" in s for s in about), about)
+        self.assertTrue(all("would answer with it off" in s for s in about), about)
 
 
 if __name__ == "__main__":
