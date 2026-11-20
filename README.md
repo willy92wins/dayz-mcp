@@ -198,7 +198,7 @@ DayZ-MCP is a local control and observation surface, not a hosted knowledge serv
 
 **Not tested:**
 
-- `OverrideAimChangeX` / `OverrideAimChangeY` on a spawned survivor; on the player they are driven by `player_look_at` and `weapon_aim`.
+- `OverrideAimChangeY` on a spawned survivor: there `survivor_drive` drives only `OverrideAimChangeX` (checked in game on 2026-11-12, run `9dc7726a`); on the player both are driven by `player_look_at` and `weapon_aim`.
 - A manual gearbox below idle, which none of the four vanilla cars tried reached: a CivilianSedan's rpm never fell below its idle of 900, and on 2026-11-20 (run `9f2f4872`) the rpm of a Hatchback_02, a Sedan_02 and an OffroadHatchback, three cars with a manual gearbox, went from 0 straight to their idle (1250, 900 and 800) and never fell below it, through five throttle taps and a restart.
 
 ## What you need
