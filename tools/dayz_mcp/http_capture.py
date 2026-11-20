@@ -9,9 +9,12 @@ import json
 import os
 import re
 import secrets
+import select
+import selectors
 import socket
 import threading
 import time
+import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -19,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 MAX_CAPTURES = 4
+MAX_RETAINED_CAPTURES = 8
 MAX_IN_FLIGHT = 4
 MAX_BODY_BYTES = 65536
 MAX_TARGET_BYTES = 8192
@@ -33,7 +37,10 @@ MIN_TTL_S = 30
 MAX_TTL_S = 3600
 RETENTION_AFTER_STOP_S = 600
 SOCKET_TIMEOUT_S = 10.0
+SOCKET_POLL_SLICE_S = 0.05
 POLL_INTERVAL_S = 0.01
+AUTO_CLOSE_GRACE_S = 0.15
+ACTIVE_CLOSE_WAIT_S = 0.5
 
 REDACTED = "<redacted>"
 DEFAULT_RESPONSE_BODY = b'{"ok":true}'
@@ -65,6 +72,7 @@ _SECRET_SINGLE_SEGMENTS = frozenset(
 def capture_limits() -> dict[str, int]:
     return {
         "max_captures": MAX_CAPTURES,
+        "max_retained_captures": MAX_RETAINED_CAPTURES,
         "max_in_flight": MAX_IN_FLIGHT,
         "max_body_bytes": MAX_BODY_BYTES,
         "max_target_bytes": MAX_TARGET_BYTES,
@@ -97,6 +105,11 @@ def _is_secret_key(name: str) -> bool:
         ):
             return True
     return False
+
+
+def _is_url_secret_key(name: str) -> bool:
+    decoded = urllib.parse.unquote(name, encoding="utf-8", errors="replace")
+    return _is_secret_key(decoded)
 
 
 def _reject_json_constant(token: str) -> Any:
@@ -144,7 +157,7 @@ def _parse_and_redact_target(
     for part in query_raw.split("&"):
         if "=" in part:
             name, value = part.split("=", 1)
-            if _is_secret_key(name):
+            if _is_url_secret_key(name):
                 query_pairs.append([name, REDACTED])
                 redacted_parts.append(f"{name}={REDACTED}")
                 redacted_pointers.append(f"query.{name}")
@@ -172,7 +185,7 @@ def _parse_and_redact_form(text: str) -> tuple[str, list[str]] | None:
         name, _value = part.split("=", 1)
         if not name:
             return None
-        if _is_secret_key(name):
+        if _is_url_secret_key(name):
             redacted_parts.append(f"{name}={REDACTED}")
             redacted_pointers.append(f"body.{name}")
         else:
@@ -316,6 +329,7 @@ class _CaptureSession:
     expires_mono: float
     rules: tuple[_ResponseRule, ...]
     store_text_bodies: bool
+    created_order: int = 0
     state: str = "armed"
     retain_until_mono: float | None = None
     next_seq: int = 0
@@ -359,9 +373,24 @@ class _SinkHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         self.handle_one_request()
 
+    def _wait_readable(self, deadline: float) -> bool:
+        while True:
+            if getattr(self.server, "is_closing", False):
+                return False
+            left = deadline - time.monotonic()
+            if left <= 0.0:
+                return False
+            ready, _, _ = select.select(
+                [self.connection], [], [], min(SOCKET_POLL_SLICE_S, left)
+            )
+            if ready:
+                return True
+
     def handle_one_request(self) -> None:
         self.close_connection = True
         try:
+            if not self._wait_readable(time.monotonic() + SOCKET_TIMEOUT_S):
+                return
             self.raw_requestline = self.rfile.readline(65537)
             if not self.raw_requestline:
                 return
@@ -371,7 +400,7 @@ class _SinkHandler(BaseHTTPRequestHandler):
             if not self.parse_request():
                 return
             self._dispatch()
-        except (TimeoutError, socket.timeout, ConnectionError, OSError):
+        except (TimeoutError, socket.timeout, ConnectionError, OSError, ValueError):
             return
 
     def _send_bytes(self, status: int, content_type: str, body: bytes) -> None:
@@ -399,15 +428,35 @@ class _SinkHandler(BaseHTTPRequestHandler):
             return b""
         chunks: list[bytes] = []
         remaining = length
-        while remaining > 0:
-            chunk = self.rfile.read(remaining)
-            if not chunk:
-                return None
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        return b"".join(chunks)
+        deadline = time.monotonic() + SOCKET_TIMEOUT_S
+        read_fn = getattr(self.rfile, "read1", self.rfile.read)
+        prev_timeout = self.connection.gettimeout()
+        try:
+            while remaining > 0:
+                if getattr(self.server, "is_closing", False):
+                    return None
+                left = deadline - time.monotonic()
+                if left <= 0.0:
+                    raise TimeoutError("sink body read timed out")
+                self.connection.settimeout(min(SOCKET_POLL_SLICE_S, left))
+                try:
+                    chunk = read_fn(remaining)
+                except (TimeoutError, socket.timeout):
+                    continue
+                if not chunk:
+                    return None
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+        finally:
+            try:
+                self.connection.settimeout(prev_timeout)
+            except OSError:
+                pass
 
     def _dispatch(self) -> None:
+        if getattr(self.server, "is_closing", False):
+            return
         method = self.command
         if method not in ALLOWED_METHODS:
             self._send_not_found()
@@ -507,7 +556,10 @@ class _SinkHandler(BaseHTTPRequestHandler):
 
         raw_body = self._read_exact(body_length)
         if raw_body is None:
-            self._send_json(400, {"error": "bad_framing"})
+            if not getattr(self.server, "is_closing", False):
+                self._send_json(400, {"error": "bad_framing"})
+            return
+        if getattr(self.server, "is_closing", False):
             return
 
         (
@@ -549,27 +601,113 @@ class SinkHTTPServer(ThreadingHTTPServer):
         registry: "HttpCaptureRegistry",
     ) -> None:
         self.registry = registry
-        self._in_flight = threading.BoundedSemaphore(MAX_IN_FLIGHT)
+        self._stop_event = threading.Event()
+        self._stopped_event = threading.Event()
+        self._active_lock = threading.Lock()
+        self._active_cv = threading.Condition(self._active_lock)
+        self._active_sockets: set[socket.socket] = set()
+        self._closing = False
+        self._idle_since_real: float | None = None
         super().__init__(server_address, _SinkHandler)
+
+    @property
+    def is_closing(self) -> bool:
+        return self._closing
+
+    def reset_idle(self) -> None:
+        self._idle_since_real = None
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         return
 
+    def begin_close(self) -> None:
+        with self._active_lock:
+            self._closing = True
+            sockets = list(self._active_sockets)
+        self._stop_event.set()
+        for conn in sockets:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def wait_active_closed(self, timeout: float = ACTIVE_CLOSE_WAIT_S) -> None:
+        deadline = time.monotonic() + timeout
+        with self._active_cv:
+            while self._active_sockets:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    break
+                self._active_cv.wait(timeout=remaining)
+
+    def server_close(self) -> None:
+        self.begin_close()
+        super().server_close()
+
+    def serve_forever(self, poll_interval: float = POLL_INTERVAL_S) -> None:
+        self._stopped_event.clear()
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(self, selectors.EVENT_READ)
+                while not self._stop_event.is_set():
+                    ready = selector.select(poll_interval)
+                    if self._stop_event.is_set():
+                        break
+                    if ready:
+                        self._handle_request_noblock()
+                    if self._try_auto_close(selector):
+                        break
+        finally:
+            self._stopped_event.set()
+
+    def shutdown(self) -> None:
+        self._stop_event.set()
+        self._stopped_event.wait()
+
+    def _try_auto_close(self, selector: selectors.BaseSelector) -> bool:
+        if self._stop_event.is_set():
+            return False
+        if self.registry._has_armed_after_sweep():
+            self._idle_since_real = None
+            return False
+        now_real = time.monotonic()
+        if self._idle_since_real is None:
+            self._idle_since_real = now_real
+            return False
+        if now_real - self._idle_since_real < AUTO_CLOSE_GRACE_S:
+            return False
+        return self.registry._auto_close_listener(self, selector)
+
     def process_request(self, request: Any, client_address: Any) -> None:
-        if not self._in_flight.acquire(blocking=False):
+        with self._active_lock:
+            if self._closing:
+                admitted = False
+            else:
+                admitted = self.registry._in_flight.acquire(blocking=False)
+                if admitted:
+                    self._active_sockets.add(request)
+        if not admitted:
             self.shutdown_request(request)
             return
         try:
             super().process_request(request, client_address)
         except BaseException:
-            self._in_flight.release()
+            self.registry._in_flight.release()
+            with self._active_cv:
+                self._active_sockets.discard(request)
+                if not self._active_sockets:
+                    self._active_cv.notify_all()
             raise
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self._in_flight.release()
+            self.registry._in_flight.release()
+            with self._active_cv:
+                self._active_sockets.discard(request)
+                if not self._active_sockets:
+                    self._active_cv.notify_all()
 
 
 class HttpCaptureRegistry:
@@ -587,7 +725,9 @@ class HttpCaptureRegistry:
         self._bound_run_ids_fn = bound_run_ids_fn
         self._lock = threading.Lock()
         self._listener_lock = threading.Lock()
+        self._in_flight = threading.BoundedSemaphore(MAX_IN_FLIGHT)
         self._captures: dict[str, _CaptureSession] = {}
+        self._capture_seq = 0
         self.listener: SinkHTTPServer | None = None
         self._listener_thread: threading.Thread | None = None
 
@@ -621,6 +761,62 @@ class HttpCaptureRegistry:
     def _armed_count_locked(self) -> int:
         return sum(1 for cap in self._captures.values() if cap.state == "armed")
 
+    def _evict_retained_locked(self) -> None:
+        while len(self._captures) >= MAX_RETAINED_CAPTURES:
+            oldest_id: str | None = None
+            oldest_key: tuple[float, float, int] | None = None
+            for capture_id, cap in self._captures.items():
+                if cap.state == "armed":
+                    continue
+                key = (
+                    cap.retain_until_mono
+                    if cap.retain_until_mono is not None
+                    else float("inf"),
+                    cap.started_mono,
+                    cap.created_order,
+                )
+                if oldest_key is None or key < oldest_key:
+                    oldest_key = key
+                    oldest_id = capture_id
+            if oldest_id is None:
+                break
+            del self._captures[oldest_id]
+
+    def _has_armed_after_sweep(self) -> bool:
+        now_mono = float(self.clock())
+        with self._lock:
+            self._sweep_locked(now_mono)
+            return self._armed_count_locked() > 0
+
+    def _auto_close_listener(
+        self, server: SinkHTTPServer, selector: selectors.BaseSelector
+    ) -> bool:
+        if not self._listener_lock.acquire(blocking=False):
+            return False
+        try:
+            if server.is_closing:
+                return False
+            now_mono = float(self.clock())
+            with self._lock:
+                self._sweep_locked(now_mono)
+                if self.listener is not server or self._armed_count_locked() > 0:
+                    server.reset_idle()
+                    return False
+            server.begin_close()
+            try:
+                selector.unregister(server)
+            except Exception:
+                pass
+            try:
+                server.server_close()
+            except Exception:
+                pass
+            self.listener = None
+            self._listener_thread = None
+            return True
+        finally:
+            self._listener_lock.release()
+
     def _ensure_listener_open_under_listener_lock(self) -> SinkHTTPServer:
         if self.listener is not None:
             return self.listener
@@ -633,7 +829,11 @@ class HttpCaptureRegistry:
             kwargs={"poll_interval": POLL_INTERVAL_S},
             daemon=True,
         )
-        thread.start()
+        try:
+            thread.start()
+        except BaseException:
+            server.server_close()
+            raise
         self.listener = server
         self._listener_thread = thread
         return server
@@ -650,18 +850,20 @@ class HttpCaptureRegistry:
         thread = self._listener_thread
         if server is None:
             return
-        self.listener = None
-        self._listener_thread = None
+        server.begin_close()
         try:
             server.shutdown()
         except Exception:
             pass
-        if thread is not None:
+        if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
         try:
             server.server_close()
         except Exception:
             pass
+        server.wait_active_closed()
+        self.listener = None
+        self._listener_thread = None
 
     def close(self) -> None:
         """Stop every armed capture and close the sink listener."""
@@ -719,6 +921,7 @@ class HttpCaptureRegistry:
                 capture_id = secrets.token_hex(16)
                 while capture_id in self._captures:
                     capture_id = secrets.token_hex(16)
+                self._capture_seq += 1
                 session = _CaptureSession(
                     capture_id=capture_id,
                     token_bytes=token_bytes,
@@ -726,6 +929,7 @@ class HttpCaptureRegistry:
                     expires_mono=now_mono + ttl_s,
                     rules=rules,
                     store_text_bodies=store_text_bodies,
+                    created_order=self._capture_seq,
                 )
             try:
                 listener = self._ensure_listener_open_under_listener_lock()
@@ -734,7 +938,10 @@ class HttpCaptureRegistry:
                 raise
             port = int(listener.server_address[1])
             with self._lock:
+                self._sweep_locked(now_mono)
+                self._evict_retained_locked()
                 self._captures[capture_id] = session
+            listener.reset_idle()
             return 200, {
                 "capture_id": capture_id,
                 "base_url": f"http://127.0.0.1:{port}/sink/{token}/",

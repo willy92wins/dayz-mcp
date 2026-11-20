@@ -11514,6 +11514,8 @@ class LoopbackServer:
         exec_audit: ExecAudit | None = None,
         status_provider: Callable[[], dict] | None = None,
         reclaim_orphans: bool = True,
+        live_profile: bool | None = None,
+        live_admin_enabled: bool | None = None,
     ) -> None:
         self.port = port
         self.key = key
@@ -11521,6 +11523,11 @@ class LoopbackServer:
         self.poll_interval = poll_interval
         self.status_provider = status_provider
         self.reclaim_orphans = reclaim_orphans
+        env_live, env_admin = live_profile_from_env()
+        resolved_live = env_live if live_profile is None else live_profile
+        resolved_admin = (
+            env_admin if live_admin_enabled is None else live_admin_enabled
+        )
         self.state = ServerState(
             key,
             enable_exec_enforce=enable_exec_enforce,
@@ -11528,6 +11535,8 @@ class LoopbackServer:
             exec_allowlist=exec_allowlist,
             exec_audit=exec_audit,
             config_port=port,
+            live_profile=resolved_live,
+            live_admin_enabled=resolved_admin,
         )
         self.httpd: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None

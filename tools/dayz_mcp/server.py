@@ -1416,6 +1416,13 @@ class Runtime:
         if self.loopback is not None:
             return
         key = self.config.key if self.config.key is not None else read_key(required_keyfile(self.config))
+        profile_kwargs: dict[str, Any] = {}
+        live_profile = getattr(self.config, "live_profile", None)
+        if isinstance(live_profile, bool):
+            profile_kwargs["live_profile"] = live_profile
+        live_admin = getattr(self.config, "live_admin_enabled", None)
+        if isinstance(live_admin, bool):
+            profile_kwargs["live_admin_enabled"] = live_admin
         self.loopback = LoopbackServer(
             self.config.port,
             key,
@@ -1425,6 +1432,7 @@ class Runtime:
             exec_allowlist=self.exec_allowlist,
             exec_audit=self.audit_exec if self.config.enable_exec_enforce else None,
             status_provider=lambda: self.status(),
+            **profile_kwargs,
         )
         self.loopback.start()
 
