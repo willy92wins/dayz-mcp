@@ -132,6 +132,7 @@ from dayz_mcp.loopback import (
     INPUT_TRIGGER_DIK_MAX,
     INPUT_TRIGGER_HOLD_MAX_S,
     INPUT_TRIGGER_PRESS_MAX_TTL_S,
+    LIVE_PROFILE_REFUSED,
     MAX_CLIENT_DUMP_RUN_IDS,
     NOTIFY_STRING_MAX_BYTES,
     SCENE_ID_MAX_CHARS,
@@ -1421,6 +1422,13 @@ class Runtime:
         if self.loopback is not None:
             return
         key = self.config.key if self.config.key is not None else read_key(required_keyfile(self.config))
+        profile_kwargs: dict[str, Any] = {}
+        live_profile = getattr(self.config, "live_profile", None)
+        if isinstance(live_profile, bool):
+            profile_kwargs["live_profile"] = live_profile
+        live_admin = getattr(self.config, "live_admin_enabled", None)
+        if isinstance(live_admin, bool):
+            profile_kwargs["live_admin_enabled"] = live_admin
         self.loopback = LoopbackServer(
             self.config.port,
             key,
@@ -1430,6 +1438,7 @@ class Runtime:
             exec_allowlist=self.exec_allowlist,
             exec_audit=self.audit_exec if self.config.enable_exec_enforce else None,
             status_provider=lambda: self.status(),
+            **profile_kwargs,
         )
         self.loopback.start()
 
@@ -1715,6 +1724,54 @@ class Runtime:
         if isinstance(body, dict):
             return body
         return {"status": "noop"}
+
+    async def http_capture_start(
+        self,
+        *,
+        ttl_s: int = 900,
+        responses: list[dict[str, Any]] | None = None,
+        store_text_bodies: bool = False,
+    ) -> dict[str, Any]:
+        self.touch()
+        if getattr(self.state, "live_profile", False):
+            raise ToolError(LIVE_PROFILE_REFUSED)
+        status, payload = await asyncio.to_thread(
+            self.state.http_capture.start,
+            ttl_s=ttl_s,
+            responses=[] if responses is None else responses,
+            store_text_bodies=store_text_bodies,
+        )
+        if status != 200:
+            raise ToolError(str(payload.get("error") or "bad_args"))
+        return payload
+
+    async def http_capture_read(
+        self,
+        *,
+        capture_id: str,
+        since_seq: int = 0,
+        max_entries: int = 32,
+    ) -> dict[str, Any]:
+        self.touch()
+        status, payload = await asyncio.to_thread(
+            self.state.http_capture.read,
+            capture_id=capture_id,
+            since_seq=since_seq,
+            max_entries=max_entries,
+        )
+        if status != 200:
+            raise ToolError(str(payload.get("error") or "bad_args"))
+        return payload
+
+    async def http_capture_stop(self, *, capture_id: str) -> dict[str, Any]:
+        self.touch()
+        status, payload = await asyncio.to_thread(
+            self.state.http_capture.stop,
+            capture_id=capture_id,
+        )
+        if status != 200:
+            raise ToolError(str(payload.get("error") or "bad_args"))
+        return payload
 
     async def await_enqueued(
         self, cmd: str, command_id: int, peer: str, timeout_s: float
@@ -2762,6 +2819,40 @@ class ClientRuntime:
 
     async def client_dumps_get(self, run_ids: list[str]) -> dict[str, Any]:
         return await self._control.client_dumps_get(run_ids)
+
+    async def http_capture_start(
+        self,
+        *,
+        ttl_s: int = 900,
+        responses: list[dict[str, Any]] | None = None,
+        store_text_bodies: bool = False,
+    ) -> dict[str, Any]:
+        return await self._control_with_lazy_spawn(
+            self._control.http_capture_start,
+            ttl_s=ttl_s,
+            responses=responses,
+            store_text_bodies=store_text_bodies,
+        )
+
+    async def http_capture_read(
+        self,
+        *,
+        capture_id: str,
+        since_seq: int = 0,
+        max_entries: int = 32,
+    ) -> dict[str, Any]:
+        return await self._control_with_lazy_spawn(
+            self._control.http_capture_read,
+            capture_id=capture_id,
+            since_seq=since_seq,
+            max_entries=max_entries,
+        )
+
+    async def http_capture_stop(self, *, capture_id: str) -> dict[str, Any]:
+        return await self._control_with_lazy_spawn(
+            self._control.http_capture_stop,
+            capture_id=capture_id,
+        )
 
     async def session_box_status(
         self,
@@ -8369,6 +8460,54 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if errors:
             response["errors"] = errors
         return response
+
+    @app.tool(
+        description=(
+            "Arm a loopback HTTP capture sink on 127.0.0.1 and return base_url "
+            "for RestApi. No lease; refused in live profile."
+        )
+    )
+    async def http_capture_start(
+        ttl_s: StrictInt = 900,
+        responses: list[dict[str, Any]] | None = None,
+        store_text_bodies: StrictBool = False,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await runtime.http_capture_start(
+                ttl_s=ttl_s,
+                responses=responses,
+                store_text_bodies=store_text_bodies,
+            )
+
+    @app.tool(
+        description=(
+            "Read redacted HTTP requests captured by capture_id since "
+            "since_seq (up to 32 entries or 256 KiB of bodies). No lease."
+        )
+    )
+    async def http_capture_read(
+        capture_id: StrictStr,
+        since_seq: StrictInt = 0,
+        max_entries: StrictInt = 32,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await runtime.http_capture_read(
+                capture_id=capture_id,
+                since_seq=since_seq,
+                max_entries=max_entries,
+            )
+
+    @app.tool(
+        description=(
+            "Disarm an HTTP capture sink and close the listener if none remain "
+            "armed; entries stay readable for 600 s. No lease."
+        )
+    )
+    async def http_capture_stop(
+        capture_id: StrictStr,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await runtime.http_capture_stop(capture_id=capture_id)
 
     @app.tool(
         description=(

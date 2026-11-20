@@ -150,9 +150,11 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 2 from fa2b (query_player_state trigger_cursor/trigger_run, both StrictInt).
         # + 5 from players_kinematics (cursor/limit/sample_hz/max_samples/timeout_s;
         # mode and trace_id are strings, uids a string list, include_unverified a bool).
+        # + 3 from f078 (http_capture_start ttl_s; http_capture_read since_seq/max_entries;
+        # capture_id is a string and responses a list, not in this census).
         # + 3 from players_los_cone (radius_m/half_yaw_deg/timeout_s; uids a string
         # list, include_unverified a bool).
-        self.assertEqual(len(rows), 270)
+        self.assertEqual(len(rows), 273)
         self.assertIn(("players_los_cone", "radius_m", "float"), rows)
         self.assertIn(("players_los_cone", "half_yaw_deg", "float"), rows)
         self.assertIn(("players_los_cone", "timeout_s", "float"), rows)

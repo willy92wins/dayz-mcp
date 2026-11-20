@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 118 typed
+game, put the world into a state, act, and read back what the engine did — 121 typed
 tools, server-authoritative, no keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
@@ -105,10 +105,10 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` writes nothing unless the client starts with `-autotest` (T165276),
 and dayz-mcp does not start it that way yet, so frames come from an external window grab of the rendered client, which only reads pixels.
 
-**118 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**121 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
 `action_cursor`, `action_hold`, `action_use`, `actor_emote`, `ai_group_order`, `ai_group_spawn`, `ai_group_state`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_path_play`, `camera_path_release`, `camera_set`, `camera_set_focus`, `capture_screenshot`, `chat_read`, `gameplay_state`,
-`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `dev_free_camera_set`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `hud_set`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `inventory_move`, `key_press`,
+`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `dev_free_camera_set`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `http_capture_read`, `http_capture_start`, `http_capture_stop`, `hud_set`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `inventory_move`, `key_press`,
 `lease_acquire`, `list_projects`, `loadout_apply`, `loadout_get`, `logs_since`, `nav_path_query`, `notify_players`, `object_anim`,
 `object_delete`, `object_doors`, `object_inspect`, `object_resolve`, `object_set_health`, `pipeline_feedback`, `pipeline_inbox`,
 `pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_find`, `player_godmode`, `player_heal`, `player_kill`, `player_look_at`, `player_move`, `player_respawn`, `player_set_stance`, `player_teleport`, `player_trace`, `player_view_set`, `players_kinematics`, `players_los_cone`, `players_visibility`, `bot_start`, `bot_stop`, `query_all_players`, `query_get_in_condition`,
@@ -192,11 +192,14 @@ DayZ-MCP is a local control and observation surface, not a hosted knowledge serv
 - Survivor locomotion: `survivor_drive` on a `SurvivorM_Mirek` moves on the requested heading, at 1.53 m/s walking and 6.75 m/s sprinting forward and 4.08 m/s jogging sideways, but the body keeps the heading it spawned with, so a drive behind it walks backwards at 1.26 m/s and cannot sprint (2.98 m/s) (inbox 851c). Fifty driven survivors at once took the server from 2433 to 1899 average fps (minimum 1273), and all fifty moved. Driven point by point along a `nav_path_query` path, a survivor stays within 0.3 to 1.2 m of it on flat ground but sticks at steps and stairs. The vanilla bot FSM (`bot_start`) starts and stops all ten actions; on the server, four inventory actions raise vanilla Virtual Machine Exceptions, two of them about 30 a second, and `PLAYER_BOT_RANDOMIZE_MOVEMENT` only moves forward (inbox 6b52).
 - `infected_drive`: one call moves the infected for 1.6 to 8.5 s, then it stops (inbox 7c86). Re-sent every second, `speed` 0.5, 1, 1.5, 2, 2.5, 3 and 4 gave 0.24, 0.45, 0.52, 2.0, 4.9, 5.5 and 5.9 m/s, within 0.5° of the heading; with the player 1 m away it barely moves.
 
+**Measured in game on 2026-11-20** (DayZDiag 1.30.164289, main `43215db`; run `9f2f4872`):
+
+- The DayZDiag free camera: `PluginKeyBinding` reads the physical key state, so `input_trigger` cannot toggle it, but `dev_free_camera_set` does, through `PluginDeveloper.ToggleFreeCameraBackPos`. `active=true` answered `active_before` 0 and `active_after` 1 without moving the player, a second `active=true` answered 1 and 1, and `active=false` answered 1 and 0. Turned on 3 s into a `camera_path_play`, it ended the path `aborted`, and `restore_gameplay` turned it off. `camera_get` did not see it: with the player on foot and the free camera on, `camera_get` answered `view` `player`, the player's camera pose and `viewport_moved` 0, as with it off, though a screenshot showed the free camera's view.
+
 **Not tested:**
 
 - `OverrideAimChangeX` / `OverrideAimChangeY` on a spawned survivor; on the player they are driven by `player_look_at` and `weapon_aim`.
-- A manual gearbox below idle: a CivilianSedan's rpm never fell below its idle of 900.
-- The DayZDiag free camera: `PluginKeyBinding` reads the physical key state, so `input_trigger` cannot toggle it; `dev_free_camera_set` turns it on and off with `PluginDeveloper.ToggleFreeCameraBackPos` instead, and has not been tried in game yet.
+- A manual gearbox below idle, which none of the four vanilla cars tried reached: a CivilianSedan's rpm never fell below its idle of 900, and on 2026-11-20 (run `9f2f4872`) the rpm of a Hatchback_02, a Sedan_02 and an OffroadHatchback, three cars with a manual gearbox, went from 0 straight to their idle (1250, 900 and 800) and never fell below it, through five throttle taps and a restart.
 
 ## What you need
 

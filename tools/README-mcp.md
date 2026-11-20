@@ -383,6 +383,8 @@ Requires a lease (these mutate the game): `world_spawn`, `world_spawn_batch`, `s
 
 No lease (read-only): `action_cursor`, `player_find`, `query_all_players`, `query_player_state`, `weapon_state`, `entities_query`, `scene_entities`, `ai_group_state`, `surface_query`, `scene_raycast`, `object_inspect`, `object_doors`, `input_describe`, `world_time_get`, `loadout_get`, `server_perf`, `nav_path_query`, `players_visibility`, `telemetry_read`, `vehicle_telemetry`, `camera_get`, `gameplay_state`, `logs_since`, `chat_read`, `ui_tree`, `query_get_in_condition`, `bridge_status`, `session_status`, `capture_screenshot`, `pipeline_*`.
 
+No lease (host-side loopback HTTP capture sink, listed in the initial catalog; `http_capture_start` is refused in the live profile): `http_capture_start`, `http_capture_read`, `http_capture_stop`. They arm an ephemeral `127.0.0.1` sink listener (open only while at least one capture is armed) with a per-capture 128-bit URL token under `/sink/<token>/`, keep only `Content-Type` and `Content-Length`, redact secret keys in JSON bodies, form bodies (`store_text_bodies=true`) and query strings, and retain entries in memory for 600 s after stop.
+
 `gameplay_state()` reads `gameplay.controls_suppressed` (bridge flag),
 `engine_controls_disabled` (`MissionGameplay.IsControlDisabled()`), `hud_shown`
 (`IngameHud.GetHudPanelWidget().IsVisible()`, the widget flag changed by

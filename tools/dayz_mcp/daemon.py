@@ -1888,6 +1888,12 @@ def _run_daemon_body(
             if stop_declared[0]:
                 return
             stop_declared[0] = True
+        http_capture = getattr(state, "http_capture", None)
+        if http_capture is not None:
+            try:
+                http_capture.close()
+            except Exception:
+                pass
         lifecycle = getattr(state, "lifecycle", None)
         if lifecycle is not None:
             try:
