@@ -834,7 +834,13 @@ WORLD_SPAWN_FLAGS_LINE = (
     "health with telemetry_read object_at (field health01) immediately "
     "before judging it visually; the living-infected recipe is flags=3108 "
     "(ECE_PLACE_ON_SURFACE|ECE_INITAI), which initializes the AI and does "
-    "not guarantee survival."
+    "not guarantee survival. "
+    "Spawning ContaminatedArea_Dynamic creates the object but does not "
+    "start its zone: in game no trigger and no gas appeared in 310 s, and "
+    "a player 42.6 m away got no entry event (run 274f00ae). For an active "
+    "zone, spawn ContaminatedArea_Local, whose trigger appeared after "
+    "1.4 s (a 10 m cylinder, +/-3 m) and which deletes itself after 360 s "
+    "(runs d08dc725 and c61637df)."
 )
 # world_spawn lifetime_s upper bound, in seconds. Mirrors SPAWN_LIFETIME_MAX_S in
 # addon/scripts/5_Mission/MCPBridge.c: 3888000 (45 days) is the largest
