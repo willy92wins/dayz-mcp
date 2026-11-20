@@ -78,19 +78,19 @@ class MCPBridge : Managed
 	// sent on the poll: the poll sends SERVER_CAPABILITIES_MASK instead.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "lease_close,loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_set_stance,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "lease_close,loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_set_stance,player_teleport," + "players_kinematics,players_visibility,query_all_players,query_get_in_condition,query_player_state," + "scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
 	// Compact announcement sent on every poll as cm=<epoch>.<hex>: the census
 	// above as a bitmask. Bit order is bridge_readiness.SERVER_CAPABILITY_BITS
 	// in tools/dayz_mcp/bridge_readiness.py (append only, never reorder);
 	// bit i set means the census name at index i is dispatched. Precomputed:
 	// no runtime code computes it, and the tests tie it bit for bit to
 	// SERVER_CAPABILITIES and to Dispatch().
-	protected const string SERVER_CAPABILITIES_MASK = "1.1ffffffffffff";
+	protected const string SERVER_CAPABILITIES_MASK = "1.3ffffffffffff";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "3b800b7c7ee0674c";
+	protected const string SERVER_ARG_CONTRACT_HASH = "3b7a1b143153de71";
 
 	// Extension hooks (expansion-ai-adapter plan 2.1): no Expansion types and
 	// no ifdef here, so the base PBO compiles and polls byte-identically
@@ -944,6 +944,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "nav_path_query")
 		{
 			postNow = DispatchNavPathQuery(command, result);
+		}
+		else if (command.cmd == "players_kinematics")
+		{
+			postNow = DispatchPlayersKinematics(command, result);
 		}
 		else if (command.cmd == "players_visibility")
 		{
@@ -4088,6 +4092,125 @@ class MCPBridge : Managed
 		{
 			result.ok = false;
 			result.error = stanceError;
+			return true;
+		}
+		result.ok = true;
+		return true;
+	}
+
+	// players_kinematics: server-side per-player kinematic sampler.
+	// Synchronous on every mode: start, status, stop, read, clear.
+	protected bool DispatchPlayersKinematics(MCPCommand command, MCPResult result)
+	{
+		MCPArgs args;
+		MCPPlayersKinematicsRead clearView;
+		int uidIndex;
+		string uidEntry;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		args = command.args;
+		if (args.mode != "start" && args.mode != "status" && args.mode != "stop" && args.mode != "read" && args.mode != "clear")
+		{
+			result.ok = false;
+			result.error = "bad_mode";
+			return true;
+		}
+		if (args.trace_id == "" || args.cursor < 0 || args.limit < 1 || args.limit > MCPPlayersKinematics.LIMIT_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (args.sample_hz < MCPPlayersKinematics.SAMPLE_HZ_MIN || args.sample_hz > MCPPlayersKinematics.SAMPLE_HZ_MAX || args.max_samples < MCPPlayersKinematics.MAX_SAMPLES_MIN || args.max_samples > MCPPlayersKinematics.MAX_SAMPLES_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (args.uids)
+		{
+			if (args.uids.Count() > MCPPlayersKinematics.UIDS_MAX)
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+			uidIndex = 0;
+			while (uidIndex < args.uids.Count())
+			{
+				uidEntry = args.uids.Get(uidIndex);
+				if (uidEntry == "" || uidEntry.Trim() == "")
+				{
+					result.ok = false;
+					result.error = "bad_args";
+					return true;
+				}
+				uidIndex = uidIndex + 1;
+			}
+		}
+
+		if (args.mode == "start")
+		{
+			if (!MCPPlayersKinematics.Start(args.trace_id, args.sample_hz, args.max_samples, args.uids))
+			{
+				result.ok = false;
+				result.error = MCPPlayersKinematics.GetLastError();
+				return true;
+			}
+			result.players_kinematics = MCPPlayersKinematics.View("start", args.trace_id, 0, 1);
+			result.ok = result.players_kinematics != null;
+			if (!result.ok)
+			{
+				result.error = MCPPlayersKinematics.GetLastError();
+			}
+			return true;
+		}
+
+		if (!MCPPlayersKinematics.Matches(args.trace_id))
+		{
+			result.ok = false;
+			result.error = "trace_not_found";
+			return true;
+		}
+		if (args.mode == "stop")
+		{
+			if (!MCPPlayersKinematics.Stop(args.trace_id))
+			{
+				result.ok = false;
+				result.error = MCPPlayersKinematics.GetLastError();
+				return true;
+			}
+			result.players_kinematics = MCPPlayersKinematics.View("stop", args.trace_id, 0, 1);
+			result.ok = result.players_kinematics != null;
+			if (!result.ok)
+			{
+				result.error = MCPPlayersKinematics.GetLastError();
+			}
+			return true;
+		}
+		else if (args.mode == "clear")
+		{
+			clearView = MCPPlayersKinematics.View("clear", args.trace_id, 0, 1);
+			if (!clearView || !MCPPlayersKinematics.Clear(args.trace_id))
+			{
+				result.ok = false;
+				result.error = MCPPlayersKinematics.GetLastError();
+				return true;
+			}
+			result.players_kinematics = clearView;
+			result.ok = true;
+			return true;
+		}
+
+		result.players_kinematics = MCPPlayersKinematics.View(args.mode, args.trace_id, args.cursor, args.limit);
+		if (!result.players_kinematics)
+		{
+			result.ok = false;
+			result.error = MCPPlayersKinematics.GetLastError();
 			return true;
 		}
 		result.ok = true;
@@ -8868,6 +8991,7 @@ class MCPBridge : Managed
 			}
 		}
 		AddCloseEntry(census, "deletion_pending", DeletionPendingActive(), "deletion_pending");
+		AddCloseEntry(census, "samplers", MCPPlayersKinematics.IsActive(), "samplers");
 		LeaseCloseExtensionCensus(census);
 		if (LeaseCloseCensusClean(census))
 		{
@@ -8938,6 +9062,7 @@ class MCPBridge : Managed
 		// The registry re-applies the overrides every tick, so the close
 		// must empty it, with the three overrides set to false on each entry.
 		MCPInfectedDrive.ShutdownAll();
+		MCPPlayersKinematics.Abort("lease_close");
 		// §2.7 step 2: release every recorded infected with the same three
 		// calls. The registry and the debt stay: the native lifetime cannot
 		// be read back, so this is unverified until the process exits.
@@ -9331,6 +9456,7 @@ class MCPBridge : Managed
 		MCPBotControl.ShutdownAll(this);
 		MCPSurvivorDrive.ShutdownAll(this);
 		MCPInfectedDrive.ShutdownAll();
+		MCPPlayersKinematics.Abort("shutdown");
 		// A completed cached callback is no longer in m_CallbackRefs.
 		if (m_PollCallback)
 		{
