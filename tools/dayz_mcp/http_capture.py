@@ -429,19 +429,25 @@ class _SinkHandler(BaseHTTPRequestHandler):
         chunks: list[bytes] = []
         remaining = length
         deadline = time.monotonic() + SOCKET_TIMEOUT_S
-        read_fn = getattr(self.rfile, "read1", self.rfile.read)
         prev_timeout = self.connection.gettimeout()
         try:
+            # Non-blocking reads avoid marking SocketIO as timed out across gaps.
+            self.connection.setblocking(False)
             while remaining > 0:
                 if getattr(self.server, "is_closing", False):
                     return None
-                left = deadline - time.monotonic()
-                if left <= 0.0:
+                if time.monotonic() >= deadline:
                     raise TimeoutError("sink body read timed out")
-                self.connection.settimeout(min(SOCKET_POLL_SLICE_S, left))
+                chunk: bytes | None
                 try:
-                    chunk = read_fn(remaining)
-                except (TimeoutError, socket.timeout):
+                    chunk = self.rfile.read(remaining)
+                except BlockingIOError:
+                    chunk = None
+                if chunk is None:
+                    if not self._wait_readable(deadline):
+                        if getattr(self.server, "is_closing", False):
+                            return None
+                        raise TimeoutError("sink body read timed out")
                     continue
                 if not chunk:
                     return None
