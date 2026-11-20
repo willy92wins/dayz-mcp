@@ -527,6 +527,44 @@ class ControlClient:
             "/client-dumps", {"op": "get", "run_ids": list(run_ids)}
         )
 
+    async def http_capture_start(
+        self,
+        ttl_s: int = 900,
+        responses: list[dict[str, object]] | None = None,
+        store_text_bodies: bool = False,
+    ) -> dict[str, object]:
+        return await self._session_call(
+            "/http-capture",
+            {
+                "op": "start",
+                "ttl_s": ttl_s,
+                "responses": [] if responses is None else list(responses),
+                "store_text_bodies": store_text_bodies,
+            },
+        )
+
+    async def http_capture_read(
+        self,
+        capture_id: str,
+        since_seq: int = 0,
+        max_entries: int = 32,
+    ) -> dict[str, object]:
+        return await self._session_call(
+            "/http-capture",
+            {
+                "op": "read",
+                "capture_id": capture_id,
+                "since_seq": since_seq,
+                "max_entries": max_entries,
+            },
+        )
+
+    async def http_capture_stop(self, capture_id: str) -> dict[str, object]:
+        return await self._session_call(
+            "/http-capture",
+            {"op": "stop", "capture_id": capture_id},
+        )
+
     async def lifecycle_status(self) -> dict[str, object]:
         return await self._session_call("/lifecycle/status")
 

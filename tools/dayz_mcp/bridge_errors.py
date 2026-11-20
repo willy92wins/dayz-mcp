@@ -134,6 +134,10 @@ _REMOTE_ERROR_CODES = frozenset({
     "foreground_failed",
     # 5c8e: the launch focus guard's give-back has not settled yet.
     "focus_guard_busy",
+    # Loopback HTTP capture sink refusals.
+    "http_capture_limit",
+    "live_profile_refused",
+    "unknown_capture",
 })
 _STALE_TICKET_ERRORS = frozenset({"ticket_expired", "ticket_invalid"})
 _STALE_LEASE_ERRORS = frozenset({"lease_expired", "lease_invalid"})
