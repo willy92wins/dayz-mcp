@@ -34,9 +34,11 @@ LIMIT_MIN = 1
 # vehicle_type, longest command "unconscious" and vehicle_class "aircraft",
 # 24-char numbers, all 24 keys) * LIMIT_MAX (256) ~= 246 KB, plus 16384 B for
 # the rest of the MCPResult body and MCPPlayersKinematicsRead header ~= 262 KB,
-# staying well below half of MAX_BODY_BYTES (524288 B).
+# staying well below half of MAX_BODY_BYTES (524288 B). The header's echoed
+# uids list is bounded by UIDS_MAX and UID_MAX_CHARS.
 LIMIT_MAX = 256
 UIDS_MAX = 16
+UID_MAX_CHARS = 64
 PASS_BUDGET_TICKS = 5000
 
 # Closed vocabularies mirrored in addon/scripts/4_World/MCP_PlayersKinematics.c.
@@ -109,12 +111,12 @@ def _is_one_of(names: frozenset[str]) -> Callable[[object], bool]:
 
 
 def is_uids_list(value: object) -> bool:
-    """List of 0..UIDS_MAX unique non-blank uid strings."""
+    """List of 0..UIDS_MAX unique non-blank uid strings of at most UID_MAX_CHARS chars."""
     if not isinstance(value, list) or len(value) > UIDS_MAX:
         return False
     seen: set[str] = set()
     for item in value:
-        if not isinstance(item, str) or item.strip() == "":
+        if not isinstance(item, str) or item.strip() == "" or len(item) > UID_MAX_CHARS:
             return False
         if item in seen:
             return False

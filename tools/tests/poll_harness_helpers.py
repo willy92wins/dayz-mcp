@@ -21,6 +21,7 @@ from tests.enforce_subset_helpers import (
     method_body,
     translate,
 )
+from tests.rest_holder_harness import make_forwarder, make_holder
 
 
 _MISSION = addon_root() / "scripts" / "5_Mission"
@@ -234,6 +235,13 @@ def _bridge_harness(name: str, *, source: str | None = None) -> dict:
         clock.ticks += command.duration_ticks
         ns["PostResult"](command)
 
+    # Real Hold/Drop/Count and Disconnect/IsConnected/IsPollActive,
+    # translated from the addon sources (rest_holder_harness), not copies.
+    rest_holder = make_holder()
+
+    def rest_forwarder(owner):
+        return make_forwarder(owner, bridge_source=source)
+
     ns.update(
         _S=WireString,
         array=Pending,
@@ -253,6 +261,10 @@ def _bridge_harness(name: str, *, source: str | None = None) -> dict:
         MCPPollCallback=lambda owner: object(),
         MCPClientPollCallback=lambda owner: object(),
         MCPClientResultCallback=lambda owner: object(),
+        MCPClientRestSink=object,
+        MCPClientRestForwarder=rest_forwarder,
+        MCPClientRestHolder=rest_holder,
+        rest_holder=rest_holder,
         AcquireResultCallback=lambda: SimpleNamespace(),
         JsonSerializer=Serializer,
         QueuePendingOrFail=lambda command: ns["m_Pending"].Insert(command),
@@ -342,6 +354,8 @@ def _bridge_harness(name: str, *, source: str | None = None) -> dict:
                 "MCPClientResultCallback",
                 "MCPPollCallback",
                 "MCPClientPollCallback",
+                "MCPClientRestHolder",
+                "MCPClientRestForwarder",
             ),
         )
 

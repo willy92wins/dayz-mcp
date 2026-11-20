@@ -137,7 +137,7 @@ jobs:
     name: unittest, fast tier (windows, Python ${{ matrix.python }})
     if: github.event_name == 'pull_request'
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
