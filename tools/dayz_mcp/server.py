@@ -836,11 +836,15 @@ WORLD_SPAWN_FLAGS_LINE = (
     "(ECE_PLACE_ON_SURFACE|ECE_INITAI), which initializes the AI and does "
     "not guarantee survival. "
     "Spawning ContaminatedArea_Dynamic creates the object but does not "
-    "start its zone: in game no trigger and no gas appeared in 310 s, and "
-    "a player 42.6 m away got no entry event (run 274f00ae). For an active "
-    "zone, spawn ContaminatedArea_Local, whose trigger appeared after "
-    "1.4 s (a 10 m cylinder, +/-3 m) and which deletes itself after 360 s "
-    "(runs d08dc725 and c61637df)."
+    "start its zone: its vanilla script starts a new area's zone only from "
+    "EEOnCECreate, which the central economy triggers and world_spawn does "
+    "not. In game with flags=0 (the default), no trigger and no gas "
+    "grenades appeared in 310 s, and a player 42.6 m from its centre got "
+    "no entry event (run 274f00ae). For an active zone, spawn "
+    "ContaminatedArea_Local: its trigger was already there at the first "
+    "check, 1.4-1.5 s after spawn (runs d08dc725 and c61637df). By its "
+    "vanilla script its zone is a cylinder of radius 10 m reaching 3 m "
+    "above and below, and the area deletes itself after 360 s."
 )
 # world_spawn lifetime_s upper bound, in seconds. Mirrors SPAWN_LIFETIME_MAX_S in
 # addon/scripts/5_Mission/MCPBridge.c: 3888000 (45 days) is the largest
