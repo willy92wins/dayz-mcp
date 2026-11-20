@@ -299,6 +299,7 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
         "trace_id",
         "uids",
     ),
+    "players_los_cone": ("half_yaw_deg", "radius", "uids"),
     "players_visibility": ("pos", "radius"),
     "scene_clear": ("scene_id",),
     "scene_entities": ("scene_id",),
@@ -479,6 +480,7 @@ SERVER_CAPABILITY_BITS: tuple[str, ...] = (
     "world_weather_set",
     "player_set_stance",
     "players_kinematics",
+    "players_los_cone",
 )
 CLIENT_CAPABILITY_BITS: tuple[str, ...] = (
     "action_cursor",
@@ -655,6 +657,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "player_set_stance": "player_set_stance",
         "player_teleport": "player_teleport",
         "players_kinematics": "players_kinematics",
+        "players_los_cone": "players_los_cone",
         "players_visibility": "players_visibility",
         "query_all_players": "query_all_players",
         "query_get_in_condition": "query_get_in_condition",

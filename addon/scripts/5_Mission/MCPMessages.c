@@ -389,7 +389,11 @@ class MCPArgs
 	string survivor_type;
 	// players_kinematics: optional list of up to 16 player uids (GetPlainId).
 	// Empty means sample every connected living player with an identity.
+	// players_los_cone reuses uids (1 to 4 observer uids) and radius.
 	ref array<string> uids;
+	// players_los_cone: half-cone yaw angle in degrees, strictly above 0 and
+	// at most LOS_CONE_HALF_YAW_MAX_DEG. An absent key reads 0, which the bridge refuses.
+	float half_yaw_deg;
 
 	void MCPArgs()
 	{
@@ -1560,6 +1564,81 @@ class MCPDevFreeCamera
 	bool active_after;
 };
 
+// players_los_cone raw row (one living candidate inside an observer's yaw cone).
+// JsonSerializer always writes every member; unavailable optional fields travel
+// with their *_available flag set to false and are omitted by the Python layer.
+// Primitives and float arrays only: no entity reference.
+class MCPPlayersLosConeRow
+{
+	string uid;
+	int tick_ms;
+	string gap_kind;
+	string target_uid;
+	ref array<float> observer_head;
+	ref array<float> target_head;
+	bool observer_head_bone;
+	bool target_head_bone;
+	float distance_m;
+	float yaw_deg;
+	float yaw_off_deg;
+	float pitch_deg;
+	bool pitch_deg_available;
+	bool ray_hit;
+	ref array<float> hit_pos;
+	bool hit_pos_available;
+	float hit_distance_m;
+	bool hit_distance_m_available;
+	float clearance_m;
+	bool clearance_m_available;
+	string hit_type;
+	bool hit_type_available;
+	string hit_class;
+	bool hit_class_available;
+
+	void MCPPlayersLosConeRow()
+	{
+		observer_head = new array<float>();
+		target_head = new array<float>();
+		hit_pos = new array<float>();
+	}
+};
+
+// players_los_cone per-observer summary. yaw_deg is meaningful only when
+// yaw_deg_available is true; the Python layer omits yaw_deg otherwise.
+class MCPPlayersLosConeObserver
+{
+	string uid;
+	bool found;
+	bool yaw_deg_available;
+	float yaw_deg;
+	int in_radius;
+	int in_cone;
+	int rays;
+	int rows;
+};
+
+// players_los_cone header, per-observer summaries, and raw cone rows.
+class MCPPlayersLosConeRead
+{
+	string schema;
+	int tick_ms;
+	float radius_m;
+	float half_yaw_deg;
+	bool pitch_filter_applied;
+	int observers_max;
+	int rays_per_observer_max;
+	int rows_per_observer_max;
+	bool truncated;
+	ref array<ref MCPPlayersLosConeObserver> observers;
+	ref array<ref MCPPlayersLosConeRow> rows;
+
+	void MCPPlayersLosConeRead()
+	{
+		observers = new array<ref MCPPlayersLosConeObserver>();
+		rows = new array<ref MCPPlayersLosConeRow>();
+	}
+};
+
 class MCPResult
 {
 	int id;
@@ -1683,6 +1762,8 @@ class MCPResult
 	ref MCPPlayerKill player_kill;
 	// players_kinematics header and paged rows. Unassigned on other commands.
 	ref MCPPlayersKinematicsRead players_kinematics;
+	// players_los_cone header, observer summaries, and raw cone rows. Unassigned on other commands.
+	ref MCPPlayersLosConeRead players_los_cone;
 	// bot_start / bot_stop reply. Unassigned on their refusals and on other commands.
 	ref MCPBotReport bot;
 	// player_set_stance reply. Unassigned on its refusals and on other commands.

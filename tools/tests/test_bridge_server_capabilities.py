@@ -108,6 +108,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "player_set_stance",
     "player_teleport",
     "players_kinematics",
+    "players_los_cone",
     "players_visibility",
     "query_all_players",
     "query_get_in_condition",

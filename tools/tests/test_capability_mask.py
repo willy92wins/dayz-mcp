@@ -72,7 +72,7 @@ CLIENT_EPOCH1 = (
 SERVER_CAPS_MAIN = ",".join(SERVER_EPOCH1)
 CLIENT_CAPS_MAIN_WIRE = "%2C".join(CLIENT_EPOCH1)
 SERVER_CAPS_TODAY = ",".join(SERVER_CAPABILITY_BITS)
-SERVER_CM_TODAY = "1.3ffffffffffff"
+SERVER_CM_TODAY = "1.7ffffffffffff"
 
 _PEER_FIXTURE = {
     "server": (INST_SERVER, PID_SERVER),
@@ -252,23 +252,23 @@ class AppendRetireRegressionTest(unittest.TestCase):
         variant = variant.replace(
             "action_cursor_ids,bot_start,bot_stop", "action_cursor_ids,bot_stop", 1
         )
-        self.assertEqual(variant.count('SERVER_CAPABILITIES_MASK = "1.3ffffffffffff"'), 1)
+        self.assertEqual(variant.count('SERVER_CAPABILITIES_MASK = "1.7ffffffffffff"'), 1)
         variant = variant.replace(
-            'SERVER_CAPABILITIES_MASK = "1.3ffffffffffff"',
-            'SERVER_CAPABILITIES_MASK = "1.3fffffffffffd"',
+            'SERVER_CAPABILITIES_MASK = "1.7ffffffffffff"',
+            'SERVER_CAPABILITIES_MASK = "1.7fffffffffffd"',
             1,
         )
         self.assertNotEqual(variant, source)
         # Table unchanged: bot_start keeps its slot, it is simply never set.
         self.assertEqual(CAPABILITY_MASK_TABLES["server"][1], SERVER_CAPABILITY_BITS)
         constant = _mask_constant(variant, "SERVER_CAPABILITIES_MASK")
-        self.assertEqual(constant, "1.3fffffffffffd")
+        self.assertEqual(constant, "1.7fffffffffffd")
         census = _const_census(variant, "SERVER_CAPABILITIES")
         names, reason = parse_capability_mask("server", constant)
         self.assertEqual(reason, "ok")
         self.assertEqual(set(names), set(census))
         self.assertEqual(set(names), set(_dispatch_branches(variant)))
-        self.assertEqual(len(names), 49)
+        self.assertEqual(len(names), 50)
         self.assertIn("bot_stop", names)
         self.assertNotIn("bot_start", names)
         self.assertEqual(encode_capability_mask("server", census), constant)
@@ -387,7 +387,7 @@ class OldFormatCompatibilityTest(unittest.TestCase):
         self.assertEqual(len(_view(historical, "server")["announced_commands"]), 48)
         _poll(state, "server", caps=SERVER_CAPS_TODAY, ach=EXPECTED_SERVER_ARG_CONTRACT_HASH)
         _poll(state, "client", caps=client_caps)
-        for peer, count in (("server", 50), ("client", 46)):
+        for peer, count in (("server", 51), ("client", 46)):
             view = _view(state, peer)
             self.assertEqual(view["state"], "announced")
             self.assertEqual(view["reason"], "ok")

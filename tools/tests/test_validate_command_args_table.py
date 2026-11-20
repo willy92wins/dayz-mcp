@@ -718,6 +718,116 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             (False, "bad_args"),
         ),
     ),
+    "players_los_cone": (
+        (
+            "valid_defaults",
+            {
+                "uids": ["76561198000000001"],
+                "radius": 50.0,
+                "half_yaw_deg": 10.0,
+            },
+            (True, None),
+        ),
+        (
+            "valid_four_uids_max_bounds",
+            {
+                "uids": ["u1", "u2", "u3", "u" * 64],
+                "radius": 50.0,
+                "half_yaw_deg": 30.0,
+            },
+            (True, None),
+        ),
+        (
+            "empty_uids",
+            {
+                "uids": [],
+                "radius": 50.0,
+                "half_yaw_deg": 10.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "five_uids",
+            {
+                "uids": ["u1", "u2", "u3", "u4", "u5"],
+                "radius": 50.0,
+                "half_yaw_deg": 10.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "duplicate_uid",
+            {
+                "uids": ["u1", "u1"],
+                "radius": 50.0,
+                "half_yaw_deg": 10.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "uid_too_long",
+            {
+                "uids": ["u" * 65],
+                "radius": 50.0,
+                "half_yaw_deg": 10.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "radius_zero",
+            {
+                "uids": ["u1"],
+                "radius": 0.0,
+                "half_yaw_deg": 10.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "radius_above_max",
+            {
+                "uids": ["u1"],
+                "radius": 50.01,
+                "half_yaw_deg": 10.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "half_yaw_zero",
+            {
+                "uids": ["u1"],
+                "radius": 50.0,
+                "half_yaw_deg": 0.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "half_yaw_above_max",
+            {
+                "uids": ["u1"],
+                "radius": 50.0,
+                "half_yaw_deg": 30.01,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "missing_half_yaw_deg",
+            {
+                "uids": ["u1"],
+                "radius": 50.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "extra_key",
+            {
+                "uids": ["u1"],
+                "radius": 50.0,
+                "half_yaw_deg": 10.0,
+                "extra": 1,
+            },
+            (False, "bad_args"),
+        ),
+    ),
     "bot_start": (
         (
             "valid",

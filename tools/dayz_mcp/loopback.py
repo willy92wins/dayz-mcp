@@ -39,6 +39,7 @@ from dayz_mcp import (
     player_move,
     player_trace,
     players_kinematics,
+    players_los_cone,
     ui_dialog,
 )
 from dayz_mcp.client_dump_registry import ClientDumpRegistry
@@ -136,6 +137,7 @@ SERVER_COMMANDS = {
     "server_perf",
     "nav_path_query",
     "players_kinematics",
+    "players_los_cone",
     "players_visibility",
     "world_spawn_batch",
     "scene_entities",
@@ -1610,6 +1612,7 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "server_perf",
     "nav_path_query",
     "players_kinematics",
+    "players_los_cone",
     "players_visibility",
     "world_spawn_batch",
     "scene_entities",
@@ -2716,6 +2719,31 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                     maximum=players_kinematics.MAX_SAMPLES_MAX,
                 ),
                 "uids": players_kinematics.is_uids_list,
+            },
+        )
+    ),
+    # Narrow server-side head-to-head LOS cone read (MCPBridge.c
+    # DispatchPlayersLosCone). All three keys are required; uids holds 1..4
+    # unique non-blank plain ids of at most 64 chars each.
+    "players_los_cone": _command_schema(
+        _schema_variant(
+            required=("uids", "radius", "half_yaw_deg"),
+            validators={
+                "uids": players_los_cone.is_uids_list,
+                "radius": _reject_numeric_errors(
+                    _real_in_range(
+                        minimum=0.0,
+                        maximum=players_los_cone.RADIUS_MAX_M,
+                        minimum_inclusive=False,
+                    )
+                ),
+                "half_yaw_deg": _reject_numeric_errors(
+                    _real_in_range(
+                        minimum=0.0,
+                        maximum=players_los_cone.HALF_YAW_MAX_DEG,
+                        minimum_inclusive=False,
+                    )
+                ),
             },
         )
     ),
