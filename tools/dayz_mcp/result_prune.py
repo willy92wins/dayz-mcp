@@ -96,6 +96,8 @@ PRUNABLE_FIELDS = (
     "click_sequence",
     # player_kill fills it when death was attempted (f4de).
     "player_kill",
+    # players_kinematics fills it with the trace header and paged wire rows.
+    "players_kinematics",
     # bot_start / bot_stop fill it on success (120f).
     "bot",
     # player_set_stance fills it, also on its refusals once the body is known.

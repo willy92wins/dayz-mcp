@@ -576,7 +576,7 @@ class MCPPlayerTrace
 	// (miscgameplayfunctions.c:726-733), so h = 0 faces +Z, h grows
 	// counter-clockwise and the compass yaw is -h (crosshairselector.c:254).
 	// 0.0 minus the product keeps a heading of 0 at +0, never -0.
-	protected static float CompassDeg(float headingRad)
+	static float CompassDeg(float headingRad)
 	{
 		float compass;
 		compass = 0.0 - headingRad * Math.RAD2DEG;
@@ -631,7 +631,7 @@ class MCPPlayerTrace
 
 	// DayZPlayerConstants.COMMANDID_* are set by the engine (dayzplayer.c:695-708),
 	// so the id is named against them at run time.
-	protected static string CommandName(int commandId)
+	static string CommandName(int commandId)
 	{
 		if (commandId == DayZPlayerConstants.COMMANDID_MOVE)
 		{

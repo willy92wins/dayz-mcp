@@ -148,7 +148,14 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 1 from player_set_stance (timeout_s; uid and stance are strings,
         # recover a bool, not in this census).
         # + 2 from fa2b (query_player_state trigger_cursor/trigger_run, both StrictInt).
-        self.assertEqual(len(rows), 262)
+        # + 5 from players_kinematics (cursor/limit/sample_hz/max_samples/timeout_s;
+        # mode and trace_id are strings, uids a string list, include_unverified a bool).
+        self.assertEqual(len(rows), 267)
+        self.assertIn(("players_kinematics", "cursor", "int"), rows)
+        self.assertIn(("players_kinematics", "limit", "int"), rows)
+        self.assertIn(("players_kinematics", "sample_hz", "int"), rows)
+        self.assertIn(("players_kinematics", "max_samples", "int"), rows)
+        self.assertIn(("players_kinematics", "timeout_s", "float"), rows)
         self.assertIn(("player_set_stance", "timeout_s", "float"), rows)
         self.assertIn(("actor_emote", "object_id", "int"), rows)
         self.assertIn(("ai_group_order", "group_id", "int"), rows)

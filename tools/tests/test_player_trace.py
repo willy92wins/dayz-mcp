@@ -118,9 +118,9 @@ MATCHES = "static bool Matches(string traceId)"
 DUMP = "static bool Dump(string traceId)"
 VIEW = "static MCPPlayerTraceRead View(string mode, string traceId, int cursor, int limit)"
 CAPTURE = "protected static void CaptureNow(float nowS, int bridgeTick)"
-COMPASS = "protected static float CompassDeg(float headingRad)"
+COMPASS = "static float CompassDeg(float headingRad)"
 DESCRIBE = "protected static MCPPlayerTraceEntity DescribeEntity(IEntity entity)"
-COMMAND_NAME = "protected static string CommandName(int commandId)"
+COMMAND_NAME = "static string CommandName(int commandId)"
 CLEAR_STATE = "protected static void ClearState()"
 TRACE_METHODS = (
     START, TICK, CHECK, STOP, CLEAR, ABORT, FAIL, MATCHES, DUMP, VIEW, CAPTURE,
@@ -583,7 +583,7 @@ class PlayerTraceCensusTest(unittest.TestCase):
     def test_the_version_and_the_server_arg_contract_hash_stay(self) -> None:
         # A client command: the hash covers the server's arguments only.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b800b7c7ee0674c")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b7a1b143153de71")
         self.assertIn('const string MCP_BRIDGE_VERSION = "13";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:

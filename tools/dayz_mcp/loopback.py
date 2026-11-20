@@ -38,6 +38,7 @@ from dayz_mcp import (
     pinned_keyfile,
     player_move,
     player_trace,
+    players_kinematics,
     ui_dialog,
 )
 from dayz_mcp.client_dump_registry import ClientDumpRegistry
@@ -133,6 +134,7 @@ SERVER_COMMANDS = {
     # players could see a point. None of them writes the world.
     "server_perf",
     "nav_path_query",
+    "players_kinematics",
     "players_visibility",
     "world_spawn_batch",
     "scene_entities",
@@ -1605,6 +1607,7 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "loadout_clear",
     "server_perf",
     "nav_path_query",
+    "players_kinematics",
     "players_visibility",
     "world_spawn_batch",
     "scene_entities",
@@ -2676,6 +2679,41 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "snap_radius": _reject_numeric_errors(
                     _real_in_range(minimum=0.0, maximum=50.0, minimum_inclusive=False)
                 ),
+            },
+        )
+    ),
+    # Every key travels in every mode, like player_trace. The bounds mirror
+    # MCPPlayersKinematics (addon/scripts/4_World/MCP_PlayersKinematics.c)
+    # through players_kinematics.py; uids is a list of 0..16 unique non-blank
+    # plain ids (empty means all living players with an identity).
+    "players_kinematics": _command_schema(
+        _schema_variant(
+            required=(
+                "mode",
+                "trace_id",
+                "cursor",
+                "limit",
+                "sample_hz",
+                "max_samples",
+                "uids",
+            ),
+            validators={
+                "mode": _one_of(*sorted(players_kinematics.TRACE_MODES)),
+                "trace_id": _lower_hex(32),
+                "cursor": _integer_in_range(minimum=0),
+                "limit": _integer_in_range(
+                    minimum=players_kinematics.LIMIT_MIN,
+                    maximum=players_kinematics.LIMIT_MAX,
+                ),
+                "sample_hz": _integer_in_range(
+                    minimum=players_kinematics.SAMPLE_HZ_MIN,
+                    maximum=players_kinematics.SAMPLE_HZ_MAX,
+                ),
+                "max_samples": _integer_in_range(
+                    minimum=players_kinematics.MAX_SAMPLES_MIN,
+                    maximum=players_kinematics.MAX_SAMPLES_MAX,
+                ),
+                "uids": players_kinematics.is_uids_list,
             },
         )
     ),

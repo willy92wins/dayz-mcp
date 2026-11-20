@@ -1013,7 +1013,8 @@ class LeaseCloseCensusTests(unittest.TestCase):
     def test_k27_k30_server_census_and_registers(self):
         source = _read(SERVER_PATH)
         body = method_body(source, "protected bool DispatchLeaseClose(MCPCommand command, MCPResult result)")
-        for step in ("MCPBotControl.ShutdownAll(this)", "MCPSurvivorDrive.ShutdownAll(this)", "MCPMoveCloseServer(carried.move_id, carried.conn_gen)",
+        for step in ("MCPBotControl.ShutdownAll(this)", "MCPSurvivorDrive.ShutdownAll(this)",
+                     'MCPPlayersKinematics.Abort("lease_close")', "MCPMoveCloseServer(carried.move_id, carried.conn_gen)",
                      "MCPWeaponCloseServer(carried.weapon_id, carried.conn_gen)", "MCPLookCloseServer(carried.look_id, carried.conn_gen)",
                      "MCPStanceCloseServer(carried.conn_gen)", "PostJobTimeout(job)",
                      "LeaseCloseExtensionStop()", "BuildLeaseCloseCensus(command.args)"):
@@ -1023,7 +1024,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertIn('closeJob.kind = "lease_close";', body)
         self.assertIn("m_ElapsedS + 25.0", body)
         census = method_body(source, "protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)")
-        for name in ("bots", "survivor_drive", "infected_drive", "move_copy", "look_copy", "stance_copy", "weapon", "jobs", "rpc_in_flight", "deletion_pending"):
+        for name in ("bots", "survivor_drive", "infected_drive", "move_copy", "look_copy", "stance_copy", "weapon", "jobs", "rpc_in_flight", "deletion_pending", "samplers"):
             self.assertIn(f'"{name}"', census, name)
         self.assertIn("LeaseCloseExtensionCensus(census);", census)
         # H7: registration sits at the real send, not in Dispatch.
@@ -1352,6 +1353,9 @@ class LeaseCloseCensusTests(unittest.TestCase):
                 "LeaseCloseBusy": staticmethod(lambda: bool(flags.get("survivor_drive"))),
                 "ShutdownAll": staticmethod(lambda b: None),
             }),
+            "MCPPlayersKinematics": type("PK", (), {
+                "IsActive": staticmethod(lambda: bool(flags.get("samplers"))),
+            }),
             "MCPJob": _Job,
             "EntityAI": object,
             "MCPSceneEntry": type("SE", (), {}),
@@ -1404,6 +1408,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
             ({"flags": {"bots": True}}, "bots", "residue"),
             ({"flags": {"survivor_drive": True}}, "survivor_drive", "residue"),
             ({"deletion": (object(),)}, "deletion_pending", "residue"),
+            ({"flags": {"samplers": True}}, "samplers", "residue"),
         ]
         for kwargs, name, want_state in cases:
             with self.subTest(entry=name):
