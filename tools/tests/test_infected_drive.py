@@ -543,7 +543,7 @@ class InfectedDriveEnforceSourceTest(unittest.TestCase):
         self.assertNotIn(DRIVE_RELEASE, loopback.SERVER_COMMANDS)
         self.assertNotIn(DRIVE_RELEASE, self.bridge)
         self.assertNotIn(DRIVE_RELEASE, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b7a1b143153de71")
+        self.assertEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, "fe4cd4a4597078cf")
 
     def test_the_lease_close_shuts_the_registry_down_before_the_infected_record(self) -> None:
         close = _method_body(

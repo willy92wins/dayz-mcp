@@ -91,11 +91,13 @@ SERVER_CONTRACT = {
     "loadout_apply": ("loadout_items", "object_id", "uid"),
     "loadout_clear": ("object_id", "uid"),
     "loadout_get": ("object_id", "uid"),
+    "loot_los_cone": ("half_yaw_deg", "radius", "uids"),
     "nav_path_query": ("from", "snap_radius", "to"),
     "object_resolve": ("pos", "radius", "type"),
     "object_set_health": ("health01", "object_id", "pos", "slot", "type", "zone"),
     "player_kill": ("uid",),
     "players_kinematics": ("cursor", "limit", "max_samples", "mode", "sample_hz", "trace_id", "uids"),
+    "players_los_cone": ("half_yaw_deg", "radius", "uids"),
     "players_visibility": ("pos", "radius"),
     "scene_clear": ("scene_id",),
     "scene_entities": ("scene_id",),
@@ -353,12 +355,12 @@ class EnforceSourceTest(unittest.TestCase):
         self.assertEqual(CLIENT_CAPABILITY_BITS[46], COMMAND)
         self.assertEqual(CLIENT_CAPABILITY_BITS[47:], ("ui_menu_set", "ui_map_set"))
         self.assertEqual(SERVER_CAPABILITY_BITS[:48], SERVER_BITS)
-        self.assertEqual(SERVER_CAPABILITY_BITS[48:], ("player_set_stance", "players_kinematics"))
+        self.assertEqual(SERVER_CAPABILITY_BITS[48:], ("player_set_stance", "players_kinematics", "players_los_cone", "loot_los_cone"))
         self.assertEqual(SERVER_ARG_CONTRACT, SERVER_CONTRACT)
-        self.assertEqual(server_arg_contract_hash(), "3b7a1b143153de71")
-        self.assertEqual(bridge_readiness.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b7a1b143153de71")
+        self.assertEqual(server_arg_contract_hash(), "fe4cd4a4597078cf")
+        self.assertEqual(bridge_readiness.EXPECTED_SERVER_ARG_CONTRACT_HASH, "fe4cd4a4597078cf")
         self.assertIn(
-            'SERVER_ARG_CONTRACT_HASH = "3b7a1b143153de71"',
+            'SERVER_ARG_CONTRACT_HASH = "fe4cd4a4597078cf"',
             SERVER_BRIDGE_PATH.read_text(encoding="utf-8"),
         )
         self.assertIsNone(_BRIDGE_COMMAND_TOOLS["client"][COMMAND])
@@ -392,7 +394,7 @@ class CompatibilityTest(unittest.TestCase):
         state = _state()
         status, body = state.record_poll(
             "server", VERSION, instance=INST_SERVER, source_pid=PID_SERVER,
-            cm="1.ffffffffffff", ach="3b7a1b143153de71",
+            cm="1.ffffffffffff", ach="fe4cd4a4597078cf",
         )
         self.assertEqual(status, 200, body)
         _poll_client(state, without_pinned)

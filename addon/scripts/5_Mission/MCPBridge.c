@@ -54,6 +54,22 @@ class MCPBridge : Managed
 	protected const string VISIBILITY_HEAD_BONE = "Head";
 	protected const float VISIBILITY_HEAD_FALLBACK_M = 1.6;
 	protected const float VISIBILITY_RAY_RADIUS = 0.05;
+	// players_los_cone schema and bounds. Mirrored in tools/dayz_mcp/players_los_cone.py
+	// and loopback.py; a test pins every constant in both files.
+	protected const string LOS_CONE_SCHEMA = "dayz-mcp-players-los-cone-v1";
+	protected const float LOS_CONE_RADIUS_MAX = 50.0;
+	protected const float LOS_CONE_HALF_YAW_MAX_DEG = 30.0;
+	protected const int LOS_CONE_OBSERVERS_MAX = 4;
+	protected const int LOS_CONE_RAYS_PER_OBSERVER_MAX = 8;
+	protected const int LOS_CONE_ROWS_PER_OBSERVER_MAX = 32;
+	// loot_los_cone schema and bounds. Mirrored in tools/dayz_mcp/loot_los_cone.py
+	// and loopback.py; a test pins every constant in both files. Half-yaw cap is
+	// shared with players_los_cone (LOS_CONE_HALF_YAW_MAX_DEG).
+	protected const string LOOT_CONE_SCHEMA = "dayz-mcp-loot-los-cone-v1";
+	protected const float LOOT_CONE_RADIUS_MAX = 15.0;
+	protected const int LOOT_CONE_OBSERVERS_MAX = 4;
+	protected const int LOOT_CONE_RAYS_PER_OBSERVER_MAX = 4;
+	protected const int LOOT_CONE_ROWS_PER_OBSERVER_MAX = 16;
 	// 165a scene registry. scene_id is 1 to SCENE_ID_MAX_CHARS characters (loopback.py
 	// SCENE_ID_MAX_CHARS). A spawn that would take a scene past SCENE_ENTRIES_MAX
 	// entries is refused, so one scene_entities reply stays far below the daemon's
@@ -78,19 +94,19 @@ class MCPBridge : Managed
 	// sent on the poll: the poll sends SERVER_CAPABILITIES_MASK instead.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "lease_close,loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_set_stance,player_teleport," + "players_kinematics,players_visibility,query_all_players,query_get_in_condition,query_player_state," + "scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "lease_close,loadout_apply,loadout_clear,loadout_get,loot_los_cone,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_set_stance,player_teleport," + "players_kinematics,players_los_cone,players_visibility,query_all_players,query_get_in_condition,query_player_state," + "scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
 	// Compact announcement sent on every poll as cm=<epoch>.<hex>: the census
 	// above as a bitmask. Bit order is bridge_readiness.SERVER_CAPABILITY_BITS
 	// in tools/dayz_mcp/bridge_readiness.py (append only, never reorder);
 	// bit i set means the census name at index i is dispatched. Precomputed:
 	// no runtime code computes it, and the tests tie it bit for bit to
 	// SERVER_CAPABILITIES and to Dispatch().
-	protected const string SERVER_CAPABILITIES_MASK = "1.3ffffffffffff";
+	protected const string SERVER_CAPABILITIES_MASK = "1.fffffffffffff";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "3b7a1b143153de71";
+	protected const string SERVER_ARG_CONTRACT_HASH = "fe4cd4a4597078cf";
 
 	// Extension hooks (expansion-ai-adapter plan 2.1): no Expansion types and
 	// no ifdef here, so the base PBO compiles and polls byte-identically
@@ -948,6 +964,14 @@ class MCPBridge : Managed
 		else if (command.cmd == "players_kinematics")
 		{
 			postNow = DispatchPlayersKinematics(command, result);
+		}
+		else if (command.cmd == "players_los_cone")
+		{
+			postNow = DispatchPlayersLosCone(command, result);
+		}
+		else if (command.cmd == "loot_los_cone")
+		{
+			postNow = DispatchLootLosCone(command, result);
 		}
 		else if (command.cmd == "players_visibility")
 		{
@@ -6777,6 +6801,658 @@ class MCPBridge : Managed
 
 		hitPos = Vector(hit.pos.Get(0), hit.pos.Get(1), hit.pos.Get(2));
 		return vector.Distance(hitPos, target) <= radius;
+	}
+
+	// Compass bearing minus observer yaw, wrapped to (-180, 180]. Positive when
+	// the candidate lies to the right of the observer's heading.
+	protected float LosConeYawOffDeg(float bearingDeg, float yawDeg)
+	{
+		float offDeg;
+		offDeg = bearingDeg - yawDeg;
+		while (offDeg <= -180.0)
+		{
+			offDeg = offDeg + 360.0;
+		}
+		while (offDeg > 180.0)
+		{
+			offDeg = offDeg - 360.0;
+		}
+		return offDeg;
+	}
+
+	// Narrow yaw cone acceptance: strict radius upper bound, inclusive yaw edge.
+	protected bool LosConeInCone(float distanceM, float radiusM, float yawOffDeg, float halfYawDeg)
+	{
+		float absYawOff;
+		if (distanceM >= radiusM)
+		{
+			return false;
+		}
+		absYawOff = Math.AbsFloat(yawOffDeg);
+		return absYawOff <= halfYawDeg;
+	}
+
+	// Lowest index with the smallest distance among untaken entries, or -1 if none.
+	protected int LosConeNearest(array<float> distances, array<bool> taken)
+	{
+		int bestIndex;
+		float bestDistance;
+		int i;
+		float d;
+		bestIndex = -1;
+		bestDistance = 0.0;
+		if (!distances || !taken)
+		{
+			return -1;
+		}
+		i = 0;
+		while (i < distances.Count() && i < taken.Count())
+		{
+			if (!taken.Get(i))
+			{
+				d = distances.Get(i);
+				if (bestIndex < 0 || d < bestDistance)
+				{
+					bestIndex = i;
+					bestDistance = d;
+				}
+			}
+			i = i + 1;
+		}
+		return bestIndex;
+	}
+
+	// Empty string while position is within the ray budget; ray_budget_exceeded past it.
+	protected string LosConeGapKind(int position, int raysMax)
+	{
+		if (position < raysMax)
+		{
+			return "";
+		}
+		return "ray_budget_exceeded";
+	}
+
+	// Single view-geometry rvproxy ray from observer head to target head,
+	// ignoring the observer entity. Caller supplies a fresh MCPRaycastHit per ray.
+	protected void LosConeCastRay(vector fromPos, vector toPos, PlayerBase observer, MCPRaycastHit hit)
+	{
+		MCPRaycastValidation ray;
+		ray = new MCPRaycastValidation();
+		ray.from = fromPos;
+		ray.to = toPos;
+		ray.radius = VISIBILITY_RAY_RADIUS;
+		ray.intersect_type = ObjIntersectView;
+		PopulateRaycastRVProxy(ray, observer, hit);
+	}
+
+	// players_los_cone: narrow server-side head-to-head view raycast to living
+	// players inside each named observer's yaw cone. Synchronous read; no world writes.
+	protected bool DispatchPlayersLosCone(MCPCommand command, MCPResult result)
+	{
+		MCPArgs args;
+		float radius;
+		float halfYawDeg;
+		int uidIndex;
+		int dupIndex;
+		string uidEntry;
+		int tickMs;
+		MCPPlayersLosConeRead read;
+		int obsIndex;
+		string obsUid;
+		MCPPlayersLosConeObserver obsSummary;
+		PlayerBase obsPlayer;
+		vector obsHead;
+		bool obsHeadBone;
+		HumanInputController hic;
+		HumanCommandWeapons weaponCmd;
+		float obsPitchDeg;
+		bool obsPitchAvailable;
+		array<string> candUids;
+		array<vector> candHeads;
+		array<bool> candHeadBones;
+		array<float> candDistances;
+		array<float> candYawOffs;
+		array<bool> candTaken;
+		int candIndex;
+		PlayerBase candPlayer;
+		PlayerIdentity candIdentity;
+		string candUid;
+		vector candHead;
+		bool candHeadBone;
+		float candDist;
+		float dx;
+		float dz;
+		float bearingDeg;
+		float yawOffDeg;
+		int rowPosition;
+		int bestIndex;
+		vector rowTargetHead;
+		string gapKind;
+		MCPPlayersLosConeRow row;
+		MCPRaycastHit hit;
+		vector hitPos;
+
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		args = command.args;
+		if (!args.uids || args.uids.Count() == 0 || args.uids.Count() > LOS_CONE_OBSERVERS_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		uidIndex = 0;
+		while (uidIndex < args.uids.Count())
+		{
+			uidEntry = args.uids.Get(uidIndex);
+			if (uidEntry == "" || uidEntry.Trim() == "")
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+			dupIndex = 0;
+			while (dupIndex < uidIndex)
+			{
+				if (args.uids.Get(dupIndex) == uidEntry)
+				{
+					result.ok = false;
+					result.error = "bad_args";
+					return true;
+				}
+				dupIndex = dupIndex + 1;
+			}
+			uidIndex = uidIndex + 1;
+		}
+
+		radius = args.radius;
+		if (!IsFiniteFloat(radius) || radius <= 0.0 || radius > LOS_CONE_RADIUS_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		halfYawDeg = args.half_yaw_deg;
+		if (!IsFiniteFloat(halfYawDeg) || halfYawDeg <= 0.0 || halfYawDeg > LOS_CONE_HALF_YAW_MAX_DEG)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		tickMs = GetGame().GetTime();
+		read = new MCPPlayersLosConeRead();
+		read.schema = LOS_CONE_SCHEMA;
+		read.tick_ms = tickMs;
+		read.radius_m = radius;
+		read.half_yaw_deg = halfYawDeg;
+		read.pitch_filter_applied = false;
+		read.observers_max = LOS_CONE_OBSERVERS_MAX;
+		read.rays_per_observer_max = LOS_CONE_RAYS_PER_OBSERVER_MAX;
+		read.rows_per_observer_max = LOS_CONE_ROWS_PER_OBSERVER_MAX;
+		read.truncated = false;
+
+		obsIndex = 0;
+		while (obsIndex < args.uids.Count())
+		{
+			obsUid = args.uids.Get(obsIndex);
+			obsSummary = new MCPPlayersLosConeObserver();
+			obsSummary.uid = obsUid;
+			obsSummary.found = false;
+			obsSummary.yaw_deg_available = false;
+			obsSummary.yaw_deg = 0.0;
+			obsSummary.in_radius = 0;
+			obsSummary.in_cone = 0;
+			obsSummary.rays = 0;
+			obsSummary.rows = 0;
+			read.observers.Insert(obsSummary);
+
+			obsPlayer = PlayerBase.Cast(FindHumanByUid(obsUid));
+			if (obsPlayer && obsPlayer.IsAlive())
+			{
+				obsSummary.found = true;
+				obsHead = PlayerHeadPosition(obsPlayer);
+				obsHeadBone = obsPlayer.GetBoneIndexByName(VISIBILITY_HEAD_BONE) >= 0;
+				hic = obsPlayer.GetInputController();
+				if (hic)
+				{
+					obsSummary.yaw_deg = MCPPlayerTrace.CompassDeg(hic.GetHeadingAngle());
+					obsSummary.yaw_deg_available = true;
+				}
+				weaponCmd = obsPlayer.GetCommandModifier_Weapons();
+				obsPitchDeg = 0.0;
+				obsPitchAvailable = false;
+				if (weaponCmd)
+				{
+					obsPitchDeg = weaponCmd.GetBaseAimingAngleUD();
+					obsPitchAvailable = true;
+				}
+
+				candUids = new array<string>();
+				candHeads = new array<vector>();
+				candHeadBones = new array<bool>();
+				candDistances = new array<float>();
+				candYawOffs = new array<float>();
+				candTaken = new array<bool>();
+				m_Players.Clear();
+				GetGame().GetPlayers(m_Players);
+				candIndex = 0;
+				while (candIndex < m_Players.Count())
+				{
+					candPlayer = PlayerBase.Cast(m_Players.Get(candIndex));
+					if (candPlayer && candPlayer != obsPlayer && candPlayer.IsAlive())
+					{
+						candIdentity = candPlayer.GetIdentity();
+						if (candIdentity)
+						{
+							candUid = candIdentity.GetPlainId();
+							if (candUid != "")
+							{
+								candHead = PlayerHeadPosition(candPlayer);
+								candDist = vector.Distance(obsHead, candHead);
+								if (candDist < radius)
+								{
+									obsSummary.in_radius = obsSummary.in_radius + 1;
+								}
+								if (obsSummary.yaw_deg_available)
+								{
+									dx = candHead[0] - obsHead[0];
+									dz = candHead[2] - obsHead[2];
+									bearingDeg = Math.Atan2(dx, dz) * Math.RAD2DEG;
+									yawOffDeg = LosConeYawOffDeg(bearingDeg, obsSummary.yaw_deg);
+									if (LosConeInCone(candDist, radius, yawOffDeg, halfYawDeg))
+									{
+										obsSummary.in_cone = obsSummary.in_cone + 1;
+										candHeadBone = candPlayer.GetBoneIndexByName(VISIBILITY_HEAD_BONE) >= 0;
+										candUids.Insert(candUid);
+										candHeads.Insert(candHead);
+										candHeadBones.Insert(candHeadBone);
+										candDistances.Insert(candDist);
+										candYawOffs.Insert(yawOffDeg);
+										candTaken.Insert(false);
+									}
+								}
+							}
+						}
+					}
+					candIndex = candIndex + 1;
+				}
+
+				rowPosition = 0;
+				while (rowPosition < LOS_CONE_ROWS_PER_OBSERVER_MAX)
+				{
+					bestIndex = LosConeNearest(candDistances, candTaken);
+					if (bestIndex < 0)
+					{
+						rowPosition = LOS_CONE_ROWS_PER_OBSERVER_MAX;
+					}
+					else
+					{
+						candTaken.Set(bestIndex, true);
+						rowTargetHead = candHeads.Get(bestIndex);
+						gapKind = LosConeGapKind(rowPosition, LOS_CONE_RAYS_PER_OBSERVER_MAX);
+						row = new MCPPlayersLosConeRow();
+						row.uid = obsUid;
+						row.tick_ms = tickMs;
+						row.gap_kind = gapKind;
+						row.target_uid = candUids.Get(bestIndex);
+						VectorToArray(obsHead, row.observer_head);
+						VectorToArray(rowTargetHead, row.target_head);
+						row.observer_head_bone = obsHeadBone;
+						row.target_head_bone = candHeadBones.Get(bestIndex);
+						row.distance_m = candDistances.Get(bestIndex);
+						row.yaw_deg = obsSummary.yaw_deg;
+						row.yaw_off_deg = candYawOffs.Get(bestIndex);
+						row.pitch_deg = obsPitchDeg;
+						row.pitch_deg_available = obsPitchAvailable;
+						if (gapKind == "")
+						{
+							hit = new MCPRaycastHit();
+							LosConeCastRay(obsHead, rowTargetHead, obsPlayer, hit);
+							obsSummary.rays = obsSummary.rays + 1;
+							row.ray_hit = hit.hit;
+							if (hit.hit)
+							{
+								hitPos = Vector(hit.pos.Get(0), hit.pos.Get(1), hit.pos.Get(2));
+								VectorToArray(hitPos, row.hit_pos);
+								row.hit_pos_available = true;
+								row.hit_distance_m = hit.distance;
+								row.hit_distance_m_available = true;
+								row.clearance_m = vector.Distance(hitPos, rowTargetHead);
+								row.clearance_m_available = true;
+								if (hit.object_type != "")
+								{
+									row.hit_type = hit.object_type;
+									row.hit_type_available = true;
+								}
+								if (hit.object_class != "")
+								{
+									row.hit_class = hit.object_class;
+									row.hit_class_available = true;
+								}
+							}
+						}
+						read.rows.Insert(row);
+						obsSummary.rows = obsSummary.rows + 1;
+						rowPosition = rowPosition + 1;
+					}
+				}
+				if (obsSummary.in_cone > obsSummary.rows)
+				{
+					read.truncated = true;
+				}
+			}
+
+			obsIndex = obsIndex + 1;
+		}
+
+		result.players_los_cone = read;
+		result.ok = true;
+		return true;
+	}
+
+	// Loose world item candidate: an InventoryItem not inside any inventory,
+	// hands, cargo, or attachment hierarchy.
+	protected InventoryItem LootConeCandidate(Object found)
+	{
+		InventoryItem item;
+		if (!found)
+		{
+			return null;
+		}
+		item = InventoryItem.Cast(found);
+		if (!item)
+		{
+			return null;
+		}
+		if (item.GetHierarchyParent())
+		{
+			return null;
+		}
+		return item;
+	}
+
+	// loot_los_cone: narrow short-range server-side view raycast from each named
+	// observer's head to loose world InventoryItem objects inside the yaw cone.
+	// Synchronous read; no world writes.
+	protected bool DispatchLootLosCone(MCPCommand command, MCPResult result)
+	{
+		MCPArgs args;
+		float radius;
+		float halfYawDeg;
+		int uidIndex;
+		int dupIndex;
+		string uidEntry;
+		int tickMs;
+		MCPLootLosConeRead read;
+		int obsIndex;
+		string obsUid;
+		MCPLootLosConeObserver obsSummary;
+		PlayerBase obsPlayer;
+		vector obsHead;
+		bool obsHeadBone;
+		HumanInputController hic;
+		HumanCommandWeapons weaponCmd;
+		float obsPitchDeg;
+		bool obsPitchAvailable;
+		array<int> candNetLows;
+		array<int> candNetHighs;
+		array<string> candTypes;
+		array<vector> candPositions;
+		array<float> candDistances;
+		array<float> candYawOffs;
+		array<bool> candTaken;
+		int candIndex;
+		InventoryItem candItem;
+		vector candPos;
+		float candDist;
+		float dx;
+		float dz;
+		float bearingDeg;
+		float yawOffDeg;
+		int candNetLow;
+		int candNetHigh;
+		string candType;
+		int rowPosition;
+		int bestIndex;
+		vector rowItemPos;
+		string gapKind;
+		MCPLootLosConeRow row;
+		MCPRaycastHit hit;
+		vector hitPos;
+
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		args = command.args;
+		if (!args.uids || args.uids.Count() == 0 || args.uids.Count() > LOOT_CONE_OBSERVERS_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		uidIndex = 0;
+		while (uidIndex < args.uids.Count())
+		{
+			uidEntry = args.uids.Get(uidIndex);
+			if (uidEntry == "" || uidEntry.Trim() == "")
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+			dupIndex = 0;
+			while (dupIndex < uidIndex)
+			{
+				if (args.uids.Get(dupIndex) == uidEntry)
+				{
+					result.ok = false;
+					result.error = "bad_args";
+					return true;
+				}
+				dupIndex = dupIndex + 1;
+			}
+			uidIndex = uidIndex + 1;
+		}
+
+		radius = args.radius;
+		if (!IsFiniteFloat(radius) || radius <= 0.0 || radius > LOOT_CONE_RADIUS_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		halfYawDeg = args.half_yaw_deg;
+		if (!IsFiniteFloat(halfYawDeg) || halfYawDeg <= 0.0 || halfYawDeg > LOS_CONE_HALF_YAW_MAX_DEG)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		tickMs = GetGame().GetTime();
+		read = new MCPLootLosConeRead();
+		read.schema = LOOT_CONE_SCHEMA;
+		read.tick_ms = tickMs;
+		read.radius_m = radius;
+		read.half_yaw_deg = halfYawDeg;
+		read.pitch_filter_applied = false;
+		read.observers_max = LOOT_CONE_OBSERVERS_MAX;
+		read.rays_per_observer_max = LOOT_CONE_RAYS_PER_OBSERVER_MAX;
+		read.rows_per_observer_max = LOOT_CONE_ROWS_PER_OBSERVER_MAX;
+		read.truncated = false;
+
+		obsIndex = 0;
+		while (obsIndex < args.uids.Count())
+		{
+			obsUid = args.uids.Get(obsIndex);
+			obsSummary = new MCPLootLosConeObserver();
+			obsSummary.uid = obsUid;
+			obsSummary.found = false;
+			obsSummary.yaw_deg_available = false;
+			obsSummary.yaw_deg = 0.0;
+			obsSummary.scanned = 0;
+			obsSummary.in_radius = 0;
+			obsSummary.in_cone = 0;
+			obsSummary.rays = 0;
+			obsSummary.rows = 0;
+			read.observers.Insert(obsSummary);
+
+			obsPlayer = PlayerBase.Cast(FindHumanByUid(obsUid));
+			if (obsPlayer && obsPlayer.IsAlive())
+			{
+				obsSummary.found = true;
+				obsHead = PlayerHeadPosition(obsPlayer);
+				obsHeadBone = obsPlayer.GetBoneIndexByName(VISIBILITY_HEAD_BONE) >= 0;
+				hic = obsPlayer.GetInputController();
+				if (hic)
+				{
+					obsSummary.yaw_deg = MCPPlayerTrace.CompassDeg(hic.GetHeadingAngle());
+					obsSummary.yaw_deg_available = true;
+				}
+				weaponCmd = obsPlayer.GetCommandModifier_Weapons();
+				obsPitchDeg = 0.0;
+				obsPitchAvailable = false;
+				if (weaponCmd)
+				{
+					obsPitchDeg = weaponCmd.GetBaseAimingAngleUD();
+					obsPitchAvailable = true;
+				}
+
+				candNetLows = new array<int>();
+				candNetHighs = new array<int>();
+				candTypes = new array<string>();
+				candPositions = new array<vector>();
+				candDistances = new array<float>();
+				candYawOffs = new array<float>();
+				candTaken = new array<bool>();
+
+				m_ReadyObjects.Clear();
+				m_ReadyProxyCargos.Clear();
+				GetGame().GetObjectsAtPosition3D(obsHead, radius, m_ReadyObjects, m_ReadyProxyCargos);
+				obsSummary.scanned = m_ReadyObjects.Count();
+
+				candIndex = 0;
+				while (candIndex < m_ReadyObjects.Count())
+				{
+					candItem = LootConeCandidate(m_ReadyObjects.Get(candIndex));
+					if (candItem)
+					{
+						candPos = candItem.GetPosition();
+						candDist = vector.Distance(obsHead, candPos);
+						if (candDist < radius)
+						{
+							obsSummary.in_radius = obsSummary.in_radius + 1;
+						}
+						if (obsSummary.yaw_deg_available)
+						{
+							dx = candPos[0] - obsHead[0];
+							dz = candPos[2] - obsHead[2];
+							bearingDeg = Math.Atan2(dx, dz) * Math.RAD2DEG;
+							yawOffDeg = LosConeYawOffDeg(bearingDeg, obsSummary.yaw_deg);
+							if (LosConeInCone(candDist, radius, yawOffDeg, halfYawDeg))
+							{
+								obsSummary.in_cone = obsSummary.in_cone + 1;
+								candNetLow = 0;
+								candNetHigh = 0;
+								candItem.GetNetworkID(candNetLow, candNetHigh);
+								candType = candItem.GetType();
+								if (candType == "")
+								{
+									candType = candItem.ClassName();
+								}
+								candNetLows.Insert(candNetLow);
+								candNetHighs.Insert(candNetHigh);
+								candTypes.Insert(candType);
+								candPositions.Insert(candPos);
+								candDistances.Insert(candDist);
+								candYawOffs.Insert(yawOffDeg);
+								candTaken.Insert(false);
+							}
+						}
+					}
+					candIndex = candIndex + 1;
+				}
+
+				rowPosition = 0;
+				while (rowPosition < LOOT_CONE_ROWS_PER_OBSERVER_MAX)
+				{
+					bestIndex = LosConeNearest(candDistances, candTaken);
+					if (bestIndex < 0)
+					{
+						rowPosition = LOOT_CONE_ROWS_PER_OBSERVER_MAX;
+					}
+					else
+					{
+						candTaken.Set(bestIndex, true);
+						rowItemPos = candPositions.Get(bestIndex);
+						gapKind = LosConeGapKind(rowPosition, LOOT_CONE_RAYS_PER_OBSERVER_MAX);
+						row = new MCPLootLosConeRow();
+						row.uid = obsUid;
+						row.tick_ms = tickMs;
+						row.gap_kind = gapKind;
+						row.net_low = candNetLows.Get(bestIndex);
+						row.net_high = candNetHighs.Get(bestIndex);
+						row.item_type = candTypes.Get(bestIndex);
+						VectorToArray(rowItemPos, row.item_pos);
+						VectorToArray(obsHead, row.observer_head);
+						row.observer_head_bone = obsHeadBone;
+						row.distance_m = candDistances.Get(bestIndex);
+						row.yaw_deg = obsSummary.yaw_deg;
+						row.yaw_off_deg = candYawOffs.Get(bestIndex);
+						row.pitch_deg = obsPitchDeg;
+						row.pitch_deg_available = obsPitchAvailable;
+						if (gapKind == "")
+						{
+							hit = new MCPRaycastHit();
+							LosConeCastRay(obsHead, rowItemPos, obsPlayer, hit);
+							obsSummary.rays = obsSummary.rays + 1;
+							row.ray_hit = hit.hit;
+							if (hit.hit)
+							{
+								hitPos = Vector(hit.pos.Get(0), hit.pos.Get(1), hit.pos.Get(2));
+								VectorToArray(hitPos, row.hit_pos);
+								row.hit_pos_available = true;
+								row.hit_distance_m = hit.distance;
+								row.hit_distance_m_available = true;
+								row.clearance_m = vector.Distance(hitPos, rowItemPos);
+								row.clearance_m_available = true;
+								if (hit.object_type != "")
+								{
+									row.hit_type = hit.object_type;
+									row.hit_type_available = true;
+								}
+								if (hit.object_class != "")
+								{
+									row.hit_class = hit.object_class;
+									row.hit_class_available = true;
+								}
+							}
+						}
+						read.rows.Insert(row);
+						obsSummary.rows = obsSummary.rows + 1;
+						rowPosition = rowPosition + 1;
+					}
+				}
+				if (obsSummary.in_cone > obsSummary.rows)
+				{
+					read.truncated = true;
+				}
+			}
+
+			obsIndex = obsIndex + 1;
+		}
+
+		result.loot_los_cone = read;
+		result.ok = true;
+		return true;
 	}
 
 	protected bool IsFiniteVec3(array<float> values)

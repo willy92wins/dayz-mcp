@@ -573,7 +573,10 @@ class PlayerTraceCensusTest(unittest.TestCase):
 
     def test_the_server_bridge_neither_implements_nor_announces_it(self) -> None:
         self.assertNotIn(COMMAND, _source(SERVER_BRIDGE_PATH))
-        self.assertNotIn("MCPPlayerTrace", _source(SERVER_BRIDGE_PATH))
+        # The server bridge calls MCPPlayerTrace.CompassDeg for players_los_cone's
+        # bearing and nothing else of that class.
+        bridge = _source(SERVER_BRIDGE_PATH)
+        self.assertEqual(bridge.count("MCPPlayerTrace"), bridge.count("MCPPlayerTrace.CompassDeg("))
         fixture = json.loads(CENSUS_FIXTURE.read_text(encoding="utf-8"))
         self.assertNotIn(COMMAND, fixture["peers"]["server"])
         self.assertEqual(fixture["peers"]["client"].get(COMMAND), COMMAND)
@@ -583,7 +586,7 @@ class PlayerTraceCensusTest(unittest.TestCase):
     def test_the_version_and_the_server_arg_contract_hash_stay(self) -> None:
         # A client command: the hash covers the server's arguments only.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b7a1b143153de71")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "fe4cd4a4597078cf")
         self.assertIn('const string MCP_BRIDGE_VERSION = "13";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
