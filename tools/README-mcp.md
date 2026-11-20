@@ -560,10 +560,25 @@ dispatches no game command. Empty polls leave work counters unchanged, though
 previously queued dispatch or a pending job's result can still add work.
 
 Requires a rebuilt PBO for the new counters; bridge version and argument
-contracts are unchanged. The idle/load/idle experiment is still pending; unit
-tests with a fake clock do not establish the engine clock's resolution or that
-`busy_ms` will increase for a particular workload. The four-state process-CPU
-baseline remains separately unmeasured (`empty_load_baseline_record()`).
+contracts are unchanged. Measured in game on 2026-11-20 (DayZDiag 1.30.164289,
+main `43215db`, runs `133714d1` and `b1c542af`, no other session sending
+commands):
+
+- At rest, 120 s with no calls but `session_heartbeat` left `cmds`,
+  `cmd_bytes` and `busy_ms` unchanged on both peers while `polls` rose by 133
+  or 134, before a load and again after one.
+- Under load, 100 server calls (`telemetry_read(mode="object_at")`) and then
+  100 client calls (`camera_get`) raised each peer's `cmds` by exactly 100,
+  `cmd_bytes` by 297000 on the server and 225642 on the client, and `busy_ms`
+  by 25 or 26 on the server and 14 or 15 on the client (about 0.25 and 0.15 ms
+  per call); `last_cmds_per_poll` read 1.
+- `last_poll_interval_s` read about 0.9 s at rest and 0.299 s under load on
+  both peers.
+- A reading taken right after a peer's last call was one command behind: that
+  command reached status on the next poll.
+
+The four-state process-CPU baseline remains separately unmeasured
+(`empty_load_baseline_record()`).
 
 ### Wait for a player
 
