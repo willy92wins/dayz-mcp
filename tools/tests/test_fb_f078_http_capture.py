@@ -13,6 +13,13 @@ and fail in its setUp on main; test_p15 to test_p17 live in
 HttpCaptureToolsTest, have no sink setUp, and fail on main on their own
 because the tool names are missing.
 
+Extended after the second cross-family review _ref/REVIEW-r1.md: negatives
+test_n26 to test_n30 were added, one per P1 item, after every existing
+method (nothing earlier was changed or reordered). They are written against
+the implementation on this branch: each fails there, on the defect its
+comment names, and passes once that item is fixed. Their readings, decided
+by the receiver, are listed last under "Readings the tests pin".
+
 Seams the implementation provides, exactly as these tests use them
 ------------------------------------------------------------------
 1. Module ``dayz_mcp.http_capture`` with class ``HttpCaptureRegistry``.
@@ -175,6 +182,61 @@ review.
   ``op`` ``start``, ``read`` or ``stop``. Only the names are pinned.
 - N5 waits, bounded, until the sink can hold ``MAX_IN_FLIGHT`` requests at
   once again (so every slow handler has finished) before its final reads.
+
+Still under "Readings the tests pin": the ones below were added after the
+second review (_ref/REVIEW-r1.md, items P1-1 to P1-5, tested by test_n26 to
+test_n30). Where one refines an earlier reading above, the later one wins.
+
+- Live profile in embedded mode (N26). The embedded build is
+  ``server.Runtime(ServerConfig(...)).start_loopback()``, which constructs
+  ``loopback.LoopbackServer`` and with it the ``ServerState``
+  (server.py:1415-1429, loopback.py:11504-11531); the test builds it that way
+  with ``key`` given and ``port=0``. With ``DAYZ_MCP_LIVE_PROFILE=1`` in the
+  environment while it is built and used, ``POST /http-capture`` ``op``
+  ``start`` on that server's port answers 403 ``live_profile_refused``, and
+  ``Runtime.http_capture_start`` raises a ``ToolError`` whose text is
+  ``live_profile_refused``; ``registry.listener`` stays ``None`` after both.
+  Without the variable both entries arm a capture (positive control). How the
+  profile reaches the embedded state (environment read in ``LoopbackServer``,
+  in ``Runtime``, or ``ServerConfig.live_profile`` falling back to the
+  environment like daemon.py:488) is not pinned.
+- Expiry closes the listener on its own (N27). This refines "Expiry is
+  observed lazily" above: when the fake ``registry.clock`` passes the
+  ``expires_at`` of the last armed capture, the listener closes with no
+  control op and no sink request: within 2 s of real time
+  ``registry.listener`` is ``None`` and a connect to the old port is refused.
+  The fake clock does not move with real time, so the implementation must
+  re-read ``registry.clock`` by itself (for example on a short timer); a
+  ``threading.Timer`` armed for the real TTL would not satisfy this. A later
+  ``read`` still answers ``state`` ``expired`` with the entries.
+- Retention budget (N28). At most 8 captures are retained in total: armed
+  ones plus stopped or expired ones still inside their 600 s read window. A
+  ``start`` that would retain a ninth drops the oldest stopped or expired
+  capture (in the test start, stop and age order coincide, so which "oldest"
+  is meant is not pinned further); a dropped capture's ``read`` gets the same
+  status and body as a capture id that never existed. Armed captures are never
+  dropped, and with four armed a fifth ``start`` is still refused with
+  ``http_capture_limit``. Whether a refused ``start`` drops anything is not
+  pinned.
+- Stop closes accepted connections (N29). When ``stop`` leaves no capture
+  armed, the connections the listener accepted are closed too: four slow
+  requests (head sent, body pending) each see EOF or a reset within 2 s of
+  the ``stop`` answer (bytes before that, if any, are not a 2xx answer), and
+  none of them becomes an accepted entry. The in-flight cap is one budget for
+  the registry: pinned only as "never more than ``MAX_IN_FLIGHT`` handled at
+  once", tested as: if a request to a capture B started right after that
+  ``stop`` is answered, at most three of A's four slow sockets are still open
+  (no EOF, reset or answer) at that moment. A slow socket is "open" while a
+  non-blocking ``MSG_PEEK`` finds nothing to read.
+- Percent-encoded secret names (N30). This refines the secret-name reading
+  above (which said "nothing decoded" for form bodies): a query or form key
+  name is percent-decoded (as UTF-8) only to decide whether it is secret,
+  then matched with the same segment rule; the stored key keeps its raw
+  spelling in ``target``, ``query``, ``query_pairs``, the form ``body`` and
+  the pointers (``query.api%5Fkey``, ``query.%74oken``, ``body.api%5Fkey``),
+  and values that are not secret (``version=1``) are untouched. The form body
+  hash is over that redacted raw text. Whether ``+`` decodes to a space, and
+  whether JSON object keys are percent-decoded, is not pinned.
 
 Note for the implementer
 ------------------------
@@ -2093,6 +2155,306 @@ class HttpCaptureTest(unittest.TestCase):
         tail = self._read(self.d, cap.id, since_seq=third["next_seq"], max_entries=32)
         self.assertEqual(tail["entries"], [])
         self.assertEqual(tail["next_seq"], third["next_seq"])
+
+    # -- negatives added after the second review (_ref/REVIEW-r1.md) ----------
+
+    # Defect (REVIEW-r1 P1-1): embedded mode builds its ServerState with live_profile=False.
+    @slow_test
+    def test_n26_live_profile_refuses_capture_start_in_embedded_mode(self) -> None:
+        os.environ.setdefault(
+            "LOCALAPPDATA", str(Path(tempfile.gettempdir()) / "dayz-mcp-localapp")
+        )
+        server = importlib.import_module("dayz_mcp.server")
+
+        def embedded() -> tuple[object, _Daemon]:
+            # Built the way embedded mode builds it: Runtime.start_loopback()
+            # constructs the LoopbackServer and its ServerState.
+            log: list[str] = []
+            runtime = server.Runtime(
+                server.ServerConfig(key=KEY, port=0, log_sink=log.append)
+            )
+            runtime.start_loopback()
+            self.addCleanup(runtime.stop_loopback)
+            loop = runtime.loopback
+            daemon = _Daemon(runtime.state, loop.httpd, loop.thread, _FakeClock(), log)
+            return runtime, daemon
+
+        # Positive control: without the variable both entries arm a capture.
+        with mock.patch.dict(os.environ):
+            os.environ.pop(loopback.LIVE_PROFILE_ENV, None)
+            runtime, plain = embedded()
+            status, body, _ = self._op(plain, "start", ttl_s=30)
+            self.assertEqual(status, 200, f"embedded POST start without the profile: {body}")
+            self.assertIsNotNone(plain.registry.listener)
+            status, body, _ = self._op(plain, "stop", capture_id=body["capture_id"])
+            self.assertEqual(status, 200, body)
+            started = asyncio.run(runtime.http_capture_start(ttl_s=30))
+            self.assertIsInstance(started.get("capture_id"), str, started)
+            asyncio.run(runtime.http_capture_stop(capture_id=started["capture_id"]))
+            self.assertIsNone(plain.registry.listener)
+
+        with mock.patch.dict(os.environ, {loopback.LIVE_PROFILE_ENV: "1"}):
+            self.assertTrue(loopback.live_profile_from_env()[0])
+            runtime, live = embedded()
+            status, body, _ = self._op(live, "start", ttl_s=30)
+            self.assertEqual(status, 403, f"embedded POST start under the live profile: {body}")
+            self.assertEqual(body.get("error"), "live_profile_refused")
+            self.assertIsNone(live.registry.listener, "a refused POST start opens no socket")
+            with self.assertRaises(Exception) as raised:
+                asyncio.run(runtime.http_capture_start(ttl_s=30))
+            self.assertIsInstance(raised.exception, server.ToolError)
+            self.assertIn("live_profile_refused", str(raised.exception))
+            self.assertIsNone(live.registry.listener, "a refused tool start opens no socket")
+
+    # Defect (REVIEW-r1 P1-2): an expired TTL leaves the listener open until a read, stop or close.
+    @slow_test
+    def test_n27_expiry_closes_the_listener_with_no_op_and_no_request(self) -> None:
+        cap = self._start(ttl_s=30)
+        # Positive control: before the clock passes expires_at the listener answers.
+        self._assert_default_ok(self._post_json(cap, "n27/before", {"n": 1}))
+        self.assertIsNotNone(self.registry.listener)
+
+        self.d.clock.advance(31)
+        # No control op and no sink request from here until the listener is gone.
+        deadline = time.monotonic() + 2.0
+        while self.registry.listener is not None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertIsNone(
+            self.registry.listener,
+            "the TTL passed 2 s ago with nothing else happening: the listener must be closed",
+        )
+        self._assert_refused(cap.port)
+        read = self._read(self.d, cap.id)
+        self.assertEqual(read.get("state"), "expired")
+        self.assertEqual([e["target"] for e in read["entries"]], ["n27/before"])
+
+    # Defect (REVIEW-r1 P1-3): only armed captures are counted; stopped ones pile up for 600 s.
+    @slow_test
+    def test_n28_retention_budget_of_eight_drops_the_oldest_stopped_capture(self) -> None:
+        d = self.d
+        max_retained = 8
+        never_status, never_body, _ = self._op(d, "read", capture_id=secrets.token_hex(16))
+        self.assertTrue(400 <= never_status < 500, f"unknown id: {never_status} {never_body}")
+        self.assertEqual(never_body.get("error"), UNKNOWN_CAPTURE)
+
+        def assert_unknown(cap: _Capture, label: str) -> None:
+            status, body, _ = self._op(d, "read", capture_id=cap.id)
+            self.assertEqual(
+                (status, body),
+                (never_status, never_body),
+                f"{label} must be dropped, answered like an unknown id: {status} {body}",
+            )
+
+        def assert_readable(cap: _Capture, state: str, label: str) -> None:
+            status, body, _ = self._op(d, "read", capture_id=cap.id)
+            self.assertEqual(status, 200, f"{label} must be readable: {status} {body}")
+            self.assertEqual(body.get("state"), state, label)
+
+        cycles: list[_Capture] = []
+        for index in range(max_retained + 1):
+            cap = self._start(ttl_s=30)
+            status, stopped, _ = self._op(d, "stop", capture_id=cap.id)
+            self.assertEqual(status, 200, stopped)
+            cycles.append(cap)
+            d.clock.advance(1)
+            if index == max_retained - 1:
+                # Positive control: eight retained captures are all still readable.
+                for number, kept in enumerate(cycles, start=1):
+                    assert_readable(kept, "stopped", f"cycle {number} of {max_retained}")
+        self.assertLess(d.clock.mono - MONO_START, RETENTION_AFTER_STOP_S)
+        assert_unknown(cycles[0], "the first of nine stopped captures")
+        for number, kept in enumerate(cycles[1:], start=2):
+            assert_readable(kept, "stopped", f"cycle {number}")
+
+        # Armed starts push out the oldest stopped ones; armed ones are never dropped.
+        armed = [self._start() for _ in range(MAX_CAPTURES)]
+        for number, cap in enumerate(cycles[1 : 1 + MAX_CAPTURES], start=2):
+            assert_unknown(cap, f"cycle {number}, the oldest when an armed start came")
+        for number, cap in enumerate(cycles[1 + MAX_CAPTURES :], start=2 + MAX_CAPTURES):
+            assert_readable(cap, "stopped", f"cycle {number}")
+        for number, cap in enumerate(armed, start=1):
+            assert_readable(cap, "armed", f"armed capture {number}")
+        status, body, _ = self._op(d, "start")
+        self.assertTrue(400 <= status < 500, f"fifth armed capture: {status} {body}")
+        self.assertEqual(body.get("error"), "http_capture_limit")
+        for number, cap in enumerate(armed, start=1):
+            assert_readable(cap, "armed", f"armed capture {number} after the refused fifth")
+
+    # Defect (REVIEW-r1 P1-4): stop closes only the listening socket; accepted workers live on.
+    @slow_test
+    def test_n29_stop_closes_accepted_connections_and_in_flight_is_one_budget(self) -> None:
+        d = self.d
+        a = self._start()
+        self._assert_default_ok(self._post_json(a, "n29/before", {"n": 1}))
+
+        slow: list[socket.socket] = []
+
+        def close_slow() -> None:
+            while slow:
+                try:
+                    slow.pop().close()
+                except OSError:
+                    pass
+
+        def still_open(sock: socket.socket) -> bool:
+            """True while the sink holds the socket: no EOF, reset or answer yet."""
+            sock.settimeout(0.0)
+            try:
+                sock.recv(1, socket.MSG_PEEK)
+            except (BlockingIOError, TimeoutError):
+                return True
+            except OSError:
+                return False
+            finally:
+                sock.settimeout(IO_TIMEOUT_S)
+            return False
+
+        self.addCleanup(close_slow)
+        for index in range(MAX_IN_FLIGHT):
+            sock = socket.create_connection(("127.0.0.1", a.port), timeout=IO_TIMEOUT_S)
+            slow.append(sock)
+            sock.sendall(
+                (
+                    f"POST /sink/{a.token}/n29/slow{index} HTTP/1.1\r\n"
+                    f"Host: 127.0.0.1:{a.port}\r\n"
+                    f"{CT_JSON}\r\n"
+                    "Content-Length: 10\r\n"
+                    "\r\n"
+                    "{"
+                ).encode("ascii")
+            )
+        # Positive control: the four slow requests were accepted and fill the
+        # in-flight cap (a fifth is closed unanswered), and they are held open.
+        fifth = _tolerant_exchange(
+            a.port,
+            _http_request(
+                a.port, "POST", f"/sink/{a.token}/n29/fifth", body=b"{}", headers=(CT_JSON,)
+            ),
+        )
+        self.assertFalse(
+            fifth.startswith(b"HTTP/"), f"the fifth in-flight request was served: {fifth[:200]!r}"
+        )
+        self.assertEqual(
+            [still_open(sock) for sock in slow],
+            [True] * MAX_IN_FLIGHT,
+            "the four slow requests must be held open before the stop",
+        )
+
+        status, stopped, _ = self._op(d, "stop", capture_id=a.id)
+        closed_deadline = time.monotonic() + 2.0
+        self.assertEqual(status, 200, stopped)
+        self.assertIsNone(self.registry.listener, "last stop closes the listener")
+
+        # Observed now, asserted after the firm part: a request to a capture
+        # started right after the stop, and how many of A's are still open.
+        b = self._start()
+        b_answer = _tolerant_exchange(
+            b.port,
+            _http_request(
+                b.port, "POST", f"/sink/{b.token}/n29/b", body=b"{}", headers=(CT_JSON,)
+            ),
+        )
+        open_when_b_answered = sum(1 for sock in slow if still_open(sock))
+
+        # Firm part: stop closed every connection the old listener accepted.
+        for index, sock in enumerate(slow):
+            received = b""
+            closed = False
+            while True:
+                remaining = closed_deadline - time.monotonic()
+                sock.settimeout(max(remaining, 0.01))
+                try:
+                    data = sock.recv(4096)
+                except TimeoutError:
+                    break
+                except OSError:
+                    closed = True
+                    break
+                if not data:
+                    closed = True
+                    break
+                received += data
+                if remaining <= 0:
+                    break
+            with self.subTest(slow=index):
+                self.assertTrue(
+                    closed,
+                    f"slow request {index} still open 2 s after the last stop: {received[:80]!r}",
+                )
+                if received.startswith(b"HTTP/"):
+                    answer = _parse_response(received).status
+                    self.assertFalse(
+                        200 <= answer < 300, f"slow request {index} answered {received[:200]!r}"
+                    )
+
+        # Loose part: never more than MAX_IN_FLIGHT requests handled at once.
+        if b_answer.startswith(b"HTTP/"):
+            self.assertLessEqual(
+                open_when_b_answered,
+                MAX_IN_FLIGHT - 1,
+                "capture B was served while all four slow requests of A were still held",
+            )
+
+        read = self._read(d, a.id)
+        self.assertEqual(read.get("state"), "stopped")
+        self.assertEqual(read.get("accepted"), 1, read)
+        accepted = [e["target"] for e in read["entries"] if e["rejected"] is None]
+        self.assertEqual(accepted, ["n29/before"])
+
+    # Defect (REVIEW-r1 P1-5): secret names are matched raw, so api%5Fkey and %74oken keep values.
+    def test_n30_percent_encoded_secret_names_are_redacted_and_keep_spelling(self) -> None:
+        cap = self._start(store_text_bodies=True)
+        s1, s2, s3, s4, s5 = (f"f078-sentinel-n30-s{n}" for n in range(1, 6))
+        form_ct = "Content-Type: application/x-www-form-urlencoded"
+        # Positive control: the same names spelled plainly are redacted.
+        self._assert_default_ok(
+            self._sink(
+                cap,
+                "POST",
+                f"n30/plain?api_key={s4}&version=1",
+                body=f"token={s5}&version=1".encode("utf-8"),
+                headers=(form_ct,),
+            )
+        )
+        query = f"api%5Fkey={s1}&%74oken={s2}&version=1"
+        form = f"api%5Fkey={s3}&version=1"
+        self._assert_default_ok(
+            self._sink(
+                cap, "POST", f"n30/check?{query}", body=form.encode("utf-8"), headers=(form_ct,)
+            )
+        )
+
+        read, raw = self._read_raw(self.d, cap.id)
+        by_path = {e["path"]: e for e in read["entries"]}
+        self.assertEqual(sorted(by_path), ["n30/check", "n30/plain"])
+        plain = by_path["n30/plain"]
+        self.assertEqual(plain["query"], f"api_key={REDACTED}&version=1")
+        self.assertEqual(plain["body"], f"token={REDACTED}&version=1")
+        self.assertEqual(sorted(plain["redacted"]), ["body.token", "query.api_key"])
+
+        for name, value in (("S1", s1), ("S2", s2), ("S3", s3), ("S4", s4), ("S5", s5)):
+            with self.subTest(secret=name):
+                self.assertNotIn(value, raw)
+        entry = by_path["n30/check"]
+        expected_query = f"api%5Fkey={REDACTED}&%74oken={REDACTED}&version=1"
+        expected_body = f"api%5Fkey={REDACTED}&version=1"
+        self.assertEqual(entry["target"], "n30/check?" + expected_query)
+        self.assertEqual(entry["query"], expected_query)
+        self.assertEqual(
+            entry["query_pairs"],
+            [["api%5Fkey", REDACTED], ["%74oken", REDACTED], ["version", "1"]],
+        )
+        self.assertEqual(entry["body_kind"], "text")
+        self.assertEqual(entry["body"], expected_body)
+        self.assertEqual(
+            entry["body_sha256"], hashlib.sha256(expected_body.encode("utf-8")).hexdigest()
+        )
+        self.assertEqual(entry["content_length"], len(form.encode("utf-8")))
+        self.assertIsNone(entry["rejected"])
+        self.assertEqual(
+            sorted(entry["redacted"]),
+            sorted(["query.api%5Fkey", "query.%74oken", "body.api%5Fkey"]),
+        )
 
 
 def _control_policy(policy_cls: object, keyfile: Path) -> object:
