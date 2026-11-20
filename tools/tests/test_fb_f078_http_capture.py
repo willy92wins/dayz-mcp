@@ -243,6 +243,9 @@ Note for the implementer
 - The sink listener must shut down promptly: serve it with a poll interval of
   0.05 s or less (or an equivalent wake-up), because every fast-tier test
   stops it in cleanup and the fast tier has a 0.2 s budget per test.
+- A body may arrive in several TCP segments with gaps (tested with 120 ms), far below the 10 s socket
+  timeout: it is answered and stored whole (test_n31; the one test that sleeps, since the gap is the
+  scenario).
 """
 
 from __future__ import annotations
@@ -2455,6 +2458,51 @@ class HttpCaptureTest(unittest.TestCase):
             sorted(entry["redacted"]),
             sorted(["query.api%5Fkey", "query.%74oken", "body.api%5Fkey"]),
         )
+
+
+    @slow_test
+    def test_n31_body_arriving_in_fragments_with_gaps_is_stored_whole(self) -> None:
+        # Naive: a sink that reads the body with a short socket timeout on the file object loses the request.
+        cap = self._start()
+        value = {"event_name": "player.kill", "n": 31}
+        payload = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        head = (
+            f"POST /sink/{cap.token}/n31/frag HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(payload)}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("ascii")
+        chunks: list[bytes] = []
+        sock = socket.create_connection(("127.0.0.1", cap.port), timeout=IO_TIMEOUT_S)
+        try:
+            sock.sendall(head)
+            for index, piece in enumerate((payload[:7], payload[7:15], payload[15:])):
+                if index:
+                    # The gap a busy client can leave between segments: well under the 10 s socket timeout.
+                    time.sleep(0.12)
+                try:
+                    sock.sendall(piece)
+                except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError) as exc:
+                    self.fail(f"the sink dropped the connection while the body was still arriving: {exc!r}")
+            while True:
+                try:
+                    data = sock.recv(65536)
+                except (ConnectionResetError, ConnectionAbortedError):
+                    break
+                if not data:
+                    break
+                chunks.append(data)
+        finally:
+            sock.close()
+        response = _parse_response(b"".join(chunks))
+        self._assert_default_ok(response)
+        entries = self._entries_all(self.d, cap.id)
+        self.assertEqual(len(entries), 1, entries)
+        self.assertEqual(entries[0]["target"], "n31/frag")
+        self.assertIsNone(entries[0]["rejected"], entries[0])
+        self.assertEqual(entries[0]["body"], value)
 
 
 def _control_policy(policy_cls: object, keyfile: Path) -> object:
