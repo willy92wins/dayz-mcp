@@ -14,8 +14,10 @@ from typing import Any
 from dayz_mcp import box_holder, box_reservation
 from dayz_mcp.process_lifecycle import (
     ADOPTION_REVERT_PENDING,
+    PORT_HELD_BY_CRASH_REPORTER,
     caller_launched_row,
     caller_may_adopt_ownerless,
+    crash_reporter_box_hint,
     empty_box,
     occupancy_error_fields,
     protection_fields,
@@ -507,6 +509,33 @@ def _port_conflict_fields(
                 "(psutil/netstat): waiting does not help, restore that first"
             ),
         }
+    if isinstance(port, int) and not isinstance(port, bool):
+        foreign = box.get("foreign")
+        if isinstance(foreign, list):
+            for item in foreign:
+                if not isinstance(item, dict) or item.get("source") != "crash_reporter":
+                    continue
+                held_ports = item.get("ports")
+                if isinstance(held_ports, (list, tuple)):
+                    matched = any(
+                        isinstance(held, int)
+                        and not isinstance(held, bool)
+                        and held == port
+                        for held in held_ports
+                    )
+                else:
+                    held = item.get("port")
+                    matched = (
+                        isinstance(held, int)
+                        and not isinstance(held, bool)
+                        and held == port
+                    )
+                if matched:
+                    return {
+                        "reason": PORT_HELD_BY_CRASH_REPORTER,
+                        "port": port,
+                        "hint": crash_reporter_box_hint(box),
+                    }
     # Prefer the full table when present (option A); fall back to the default
     # DayZ-related list for older payloads that never emitted foreign_ports_all.
     foreign_ports_all = box.get("foreign_ports_all")
@@ -560,9 +589,13 @@ def _apply_takeover_required(
     *,
     caller_session: str | None = None,
 ) -> dict[str, Any]:
-    # A reserved box is not taken over: dayz_test_run evicts nothing while the
-    # M1 reservation exists, since the launch after the eviction is refused.
-    if payload.get("reason") in {"port_in_use_foreign", box_reservation.BOX_RESERVED}:
+    # A reserved box or a port held outside managed runs (including a crash
+    # reporter) is not taken over: evicting a managed run does not free it.
+    if payload.get("reason") in {
+        "port_in_use_foreign",
+        PORT_HELD_BY_CRASH_REPORTER,
+        box_reservation.BOX_RESERVED,
+    }:
         return payload
     target = takeover_target_run_id(box, caller_session=caller_session)
     if target is None:
@@ -893,6 +926,10 @@ def _session_status_blocked_on(
         idle = _ownerless_idle_runs(box)
         if len(idle) == 1 and _row_is_protected(idle[0], caller_session):
             return _protection_blocked_on(idle[0])
+    if isinstance(box, dict):
+        reporter_blocked = crash_reporter_box_hint(box)
+        if reporter_blocked is not None:
+            return reporter_blocked
     if isinstance(box, dict) and box.get("occupied") is True:
         return (
             'DayZ test box; next: call dayz_test_run(..., on_busy="queue") '

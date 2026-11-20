@@ -140,6 +140,7 @@ _PORT_SCAN_UNKNOWN_HINT = (
     "port_scan_unknown: the daemon could not read the host UDP socket table "
     "(psutil/netstat); waiting does not help, restore that first"
 )
+PORT_HELD_BY_CRASH_REPORTER = "port_held_by_crash_reporter"
 _ACTIVITY_STALE_S = 900.0
 # 250f (D-80): an ownerless run with no input in its windows for this long is
 # past the cut. The use_state published in box rows is measured against it.
@@ -1489,11 +1490,61 @@ def _derive_box(snapshot: _BoxSnapshot, probes: _BoxProbes) -> dict[str, object]
     return box
 
 
+def crash_reporter_box_hint(box: object) -> str | None:
+    """Remedy text when a foreign row is a CrashReporter.exe holding a UDP port."""
+    if not isinstance(box, dict):
+        return None
+    foreign = box.get("foreign")
+    if not isinstance(foreign, list):
+        return None
+    ports: list[int] = []
+    found = False
+    for item in foreign:
+        if not isinstance(item, dict) or item.get("source") != "crash_reporter":
+            continue
+        found = True
+        raw_ports = item.get("ports")
+        added = False
+        if isinstance(raw_ports, (list, tuple)):
+            for port in raw_ports:
+                if (
+                    isinstance(port, int)
+                    and not isinstance(port, bool)
+                    and 1 <= port <= 65535
+                ):
+                    if port not in ports:
+                        ports.append(port)
+                    added = True
+        if not added:
+            port = item.get("port")
+            if (
+                isinstance(port, int)
+                and not isinstance(port, bool)
+                and 1 <= port <= 65535
+                and port not in ports
+            ):
+                ports.append(port)
+    if not found:
+        return None
+    if ports:
+        holds = "UDP " + ", ".join(str(port) for port in sorted(ports))
+    else:
+        holds = "a UDP port"
+    return (
+        "DayZ test box: a Crash Reporter window left by a crashed DayZ holds "
+        f"{holds}; next: close that window or wait until it exits "
+        "(the daemon never closes a process it did not launch)"
+    )
+
+
 def _wait_hint(box: object) -> str:
     if not isinstance(box, dict):
         return _ACTIVE_RUN_WAIT_HINT
     if box.get("port_scan_known") is False:
         return _PORT_SCAN_UNKNOWN_HINT
+    reporter_hint = crash_reporter_box_hint(box)
+    if reporter_hint is not None:
+        return reporter_hint
     claimed_s = box.get("claimed_s")
     if (
         isinstance(claimed_s, (int, float))
@@ -6500,6 +6551,21 @@ class ProcessLifecycle:
             observed.append({"pid": pid, "ppid": ppid, "name": name})
         return None, observed
 
+    def _crash_reporter_parent_pids(self) -> set[int] | None:
+        """Parent PIDs of live CrashReporter.exe rows, or None when unknown.
+
+        Reuses _crash_reporter_probe_rows (inbox d3b7): no probe wired yields
+        an empty set; a probe error, known!=True, or malformed row yields None.
+        """
+        reason, rows = self._crash_reporter_probe_rows()
+        if reason is not None or rows is None:
+            return None
+        return {
+            int(row["ppid"])
+            for row in rows
+            if str(row["name"]).casefold() == "crashreporter.exe"
+        }
+
     @staticmethod
     def _parent_anchor_key(
         run_id: str, record: ProcessRecord
@@ -10671,11 +10737,23 @@ class ProcessLifecycle:
         if reason is not None or holders is None:
             return reason or "port_scan_unknown"
         unattributed = False
+        crash_reporter_held = False
+        reporter_ppids_loaded = False
+        reporter_ppids: set[int] | None = None
         for holder in holders:
             pid = holder.get("pid")
             if isinstance(pid, int) and pid in registered_pids:
                 continue
             name = holder.get("name")
+            if name is None and isinstance(pid, int) and not isinstance(pid, bool):
+                if not reporter_ppids_loaded:
+                    reporter_ppids = self._crash_reporter_parent_pids()
+                    reporter_ppids_loaded = True
+                if reporter_ppids is not None and pid in reporter_ppids:
+                    if requested_port is not None and holder["port"] == requested_port:
+                        return PORT_HELD_BY_CRASH_REPORTER
+                    crash_reporter_held = True
+                    continue
             if _is_dayz_image(name) or (
                 requested_port is not None and holder["port"] == requested_port
             ):
@@ -10687,7 +10765,11 @@ class ProcessLifecycle:
         # Linux: "uid:<n>" is a socket the kernel says belongs to another user
         # (orphan_guard._label_other_users_sockets); it has no PID for this user
         # to read, and it already blocked above if it holds the requested port.
-        return "port_attribution_unknown" if unattributed else None
+        if unattributed:
+            return "port_attribution_unknown"
+        if crash_reporter_held:
+            return PORT_HELD_BY_CRASH_REPORTER
+        return None
 
     def box_occupancy(self, *, now: float | None = None) -> dict[str, object]:
         """The box is derived from one snapshot; live state is never re-read after it.
@@ -10814,6 +10896,8 @@ class ProcessLifecycle:
         unattributed = False
         foreign_ports: list[int] = []
         foreign_ports_dayz_related: list[int] = []
+        reporter_ppids_loaded = False
+        reporter_ppids: set[int] | None = None
         for holder in holders:
             pid = holder.get("pid")
             port = holder["port"]
@@ -10826,10 +10910,43 @@ class ProcessLifecycle:
                 continue
             if int(port) not in foreign_ports:
                 foreign_ports.append(int(port))
+            crash_reporter = False
+            if name is None and isinstance(pid, int) and not isinstance(pid, bool):
+                if not reporter_ppids_loaded:
+                    reporter_ppids = self._crash_reporter_parent_pids()
+                    reporter_ppids_loaded = True
+                crash_reporter = (
+                    reporter_ppids is not None and pid in reporter_ppids
+                )
+            if crash_reporter:
+                _remember_port(int(port))
             # This count is evidence from the image name or the established
             # DayZ UDP range. Unattributed or unrelated ports are never guessed.
-            if (dayz or int(port) in _DAYZ_PORT_RANGE) and int(port) not in foreign_ports_dayz_related:
+            if (
+                dayz or crash_reporter or int(port) in _DAYZ_PORT_RANGE
+            ) and int(port) not in foreign_ports_dayz_related:
                 foreign_ports_dayz_related.append(int(port))
+            if crash_reporter:
+                row = rows_by_pid.get(int(pid))
+                if row is None:
+                    row = {
+                        "port": int(port),
+                        "ports": [int(port)],
+                        "mods": [],
+                        "profiles": None,
+                        "image": "CrashReporter.exe",
+                        "source": "crash_reporter",
+                    }
+                    rows_by_pid[int(pid)] = row
+                    foreign.append(row)
+                else:
+                    row_ports = row.get("ports")
+                    if isinstance(row_ports, list) and int(port) not in row_ports:
+                        row_ports.append(int(port))
+                        row_ports.sort()
+                    if int(port) < int(row["port"]):
+                        row["port"] = int(port)
+                continue
             if _holder_unattributed(pid, name):
                 # A socket nobody can be named for cannot be cleared as
                 # not-DayZ: the scan is unknown, the box occupied.
@@ -11000,11 +11117,28 @@ class ProcessLifecycle:
         port_reason, holders = self._port_holders()
         if port_reason is not None or holders is None:
             return False, port_reason or "port_scan_unknown"
+        unattributed = False
+        crash_reporter_held = False
+        reporter_ppids_loaded = False
+        reporter_ppids: set[int] | None = None
         for holder in holders:
-            if _is_dayz_image(holder.get("name")):
+            pid = holder.get("pid")
+            name = holder.get("name")
+            if _is_dayz_image(name):
                 return False, "manual_cleanup_required"
-            if _holder_unattributed(holder.get("pid"), holder.get("name")):
-                return False, "port_attribution_unknown"
+            if name is None and isinstance(pid, int) and not isinstance(pid, bool):
+                if not reporter_ppids_loaded:
+                    reporter_ppids = self._crash_reporter_parent_pids()
+                    reporter_ppids_loaded = True
+                if reporter_ppids is not None and pid in reporter_ppids:
+                    crash_reporter_held = True
+                    continue
+            if _holder_unattributed(pid, name):
+                unattributed = True
+        if unattributed:
+            return False, "port_attribution_unknown"
+        if crash_reporter_held:
+            return False, PORT_HELD_BY_CRASH_REPORTER
         return True, ""
 
     def _foreign_diag_reason(self, registered_pids: set[int]) -> str | None:

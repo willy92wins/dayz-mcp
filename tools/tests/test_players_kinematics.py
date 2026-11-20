@@ -17,6 +17,7 @@ import json
 import re
 import sys
 import unittest
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -480,6 +481,33 @@ class RequestAndIngressTest(unittest.TestCase):
                 with self.assertRaises(ValueError) as raised:
                     players_kinematics.normalize_request(*arguments)
                 self.assertEqual(str(raised.exception), expected_code)
+
+    def test_t1_uid_max_chars_cap(self) -> None:
+        # Kills M9: removing the length comparison from is_uids_list accepts > UID_MAX_CHARS.
+        self.assertEqual(players_kinematics.UID_MAX_CHARS, 64)
+        at_cap = "u" * players_kinematics.UID_MAX_CHARS
+        over_cap = "u" * (players_kinematics.UID_MAX_CHARS + 1)
+
+        self.assertTrue(players_kinematics.is_uids_list([at_cap]))
+        normalized = players_kinematics.normalize_request(
+            "start", "", 0, 64, 10, 4096, [at_cap]
+        )
+        self.assertEqual(normalized["uids"], [at_cap])
+        self.assertEqual(
+            loopback.validate_command_args(COMMAND, _wire_args(uids=[at_cap])),
+            (True, None),
+        )
+
+        self.assertFalse(players_kinematics.is_uids_list([over_cap]))
+        with self.assertRaises(ValueError) as raised:
+            players_kinematics.normalize_request(
+                "start", "", 0, 64, 10, 4096, [over_cap]
+            )
+        self.assertEqual(str(raised.exception), "bad_uids")
+        self.assertEqual(
+            loopback.validate_command_args(COMMAND, _wire_args(uids=[over_cap])),
+            (False, "bad_args"),
+        )
 
     def test_t2_ingress_lease_admission_and_live_profile(self) -> None:
         self.assertIn(COMMAND, loopback.SERVER_COMMANDS)
@@ -1485,6 +1513,44 @@ class EnforceSourceContractTest(unittest.TestCase):
         self.assertEqual(capture.count("row.pos.Set("), 3)
         self.assertEqual(capture.count("row.vel.Set("), 6)
         self.assertEqual(capture.count("row.vel_engine.Set("), 6)
+
+        # Kills M10: pin exact assignment counts for every scalar row member in Capture
+        # so an extra line clobbering a scalar after its engine read fails T14.
+        expected_scalar_assignments = {
+            "uid": 1,
+            "tick_ms": 1,
+            "gap_kind": 1,
+            "expected_dt_s": 1,
+            "observed_dt_s": 2,
+            "vel_engine_available": 2,
+            "yaw_deg": 2,
+            "yaw_deg_available": 2,
+            "pitch_deg": 2,
+            "pitch_deg_available": 2,
+            "stance_idx": 1,
+            "command": 1,
+            "falling": 2,
+            "falling_available": 2,
+            "jump": 1,
+            "jump_available": 1,
+            "parachute": 1,
+            "parachute_available": 1,
+            "in_vehicle": 2,
+            "vehicle_type": 2,
+            "vehicle_class": 2,
+        }
+        self.assertEqual(
+            set(expected_scalar_assignments),
+            {
+                name
+                for type_, name in EXPECTED_ROW_MEMBERS
+                if not type_.startswith("ref array")
+            },
+        )
+        actual_scalar_assignments = dict(
+            Counter(re.findall(r"\brow\.(\w+)\s*(?:[+\-*/]?=(?!=)|\+\+|--)", capture))
+        )
+        self.assertEqual(actual_scalar_assignments, expected_scalar_assignments)
 
         # PhysicsIsFalling appears once and only with false (never true).
         self.assertEqual(self.sampler_code.count("PhysicsIsFalling("), 1)
