@@ -194,12 +194,12 @@ DayZ-MCP is a local control and observation surface, not a hosted knowledge serv
 
 **Measured in game on 2026-11-20** (DayZDiag 1.30.164289, main `43215db`; run `9f2f4872`):
 
-- The DayZDiag free camera: `PluginKeyBinding` reads the physical key state, so `input_trigger` cannot toggle it, but `dev_free_camera_set` does, through `PluginDeveloper.ToggleFreeCameraBackPos`. `active=true` answered `active_before` false and `active_after` true without moving the player, a second `active=true` answered true and true, and `active=false` answered true and false. Turned on 3 s into a `camera_path_play`, it ended the path `aborted`, and `restore_gameplay` turned it off. `camera_get` does not see it: while it is on, `camera_get` still answers `view` `player`, the player's camera pose and `viewport_moved` 0, though a screenshot shows the free camera's view.
+- The DayZDiag free camera: `PluginKeyBinding` reads the physical key state, so `input_trigger` cannot toggle it, but `dev_free_camera_set` does, through `PluginDeveloper.ToggleFreeCameraBackPos`. `active=true` answered `active_before` 0 and `active_after` 1 without moving the player, a second `active=true` answered 1 and 1, and `active=false` answered 1 and 0. Turned on 3 s into a `camera_path_play`, it ended the path `aborted`, and `restore_gameplay` turned it off. `camera_get` did not see it: with the player on foot and the free camera on, `camera_get` answered `view` `player`, the player's camera pose and `viewport_moved` 0, as with it off, though a screenshot showed the free camera's view.
 
 **Not tested:**
 
 - `OverrideAimChangeX` / `OverrideAimChangeY` on a spawned survivor; on the player they are driven by `player_look_at` and `weapon_aim`.
-- A manual gearbox below idle, which no vanilla car has reached: a CivilianSedan's rpm never fell below its idle of 900, and on 2026-11-20 (run `9f2f4872`) the rpm of a Hatchback_02, a Sedan_02 and an OffroadHatchback, three cars with a manual gearbox, went from 0 straight to their idle (1250, 900 and 800) and never fell below it, through five throttle taps and a restart.
+- A manual gearbox below idle, which none of the four vanilla cars tried reached: a CivilianSedan's rpm never fell below its idle of 900, and on 2026-11-20 (run `9f2f4872`) the rpm of a Hatchback_02, a Sedan_02 and an OffroadHatchback, three cars with a manual gearbox, went from 0 straight to their idle (1250, 900 and 800) and never fell below it, through five throttle taps and a restart.
 
 ## What you need
 
