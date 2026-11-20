@@ -42,6 +42,7 @@ from dayz_mcp import (
     ui_dialog,
 )
 from dayz_mcp.client_dump_registry import ClientDumpRegistry
+from dayz_mcp.http_capture import HttpCaptureRegistry
 from dayz_mcp.core import (
     BLOCKED_VERSION_STATES,
     EXPECTED_BRIDGE_VERSION,
@@ -394,6 +395,7 @@ LIFECYCLE_ROUTES = {
 }
 # 296b r3: the pre-launch client dump snapshot of a run (client_dump_registry).
 CLIENT_DUMPS_ROUTE = "/client-dumps"
+HTTP_CAPTURE_ROUTE = "/http-capture"
 MAX_CLIENT_DUMP_RUN_IDS = 64
 ADMIN_ROUTES = {
     "/admin/release": "release",
@@ -3548,6 +3550,9 @@ class ServerState:
         # 296b r3: which client launch owns which new ErrorMessage dump. Shared
         # by every MCP process; in memory only.
         self.client_dumps = ClientDumpRegistry()
+        self.http_capture = HttpCaptureRegistry(
+            bound_run_ids_fn=self.bound_run_ids
+        )
         self.retail_probe: Callable[[], dict[str, object]] | None = None
         # Embedded mode has no daemon bootstrap. A generation exists from
         # construction; the daemon replaces it with its process generation.
@@ -4952,6 +4957,19 @@ class ServerState:
                 _binding_run_id(binding) == run_id and binding.state == BINDING_BOUND
                 for binding in self._bindings.values()
             )
+
+    def bound_run_ids(self) -> list[str]:
+        """Sorted distinct run_ids of currently BOUND bindings."""
+
+        with self._lock:
+            run_ids = {
+                rid
+                for binding in self._bindings.values()
+                if binding.state == BINDING_BOUND
+                for rid in (_binding_run_id(binding),)
+                if isinstance(rid, str) and rid
+            }
+        return sorted(run_ids)
 
     def _retire_instance_locked(
         self,
@@ -9442,6 +9460,10 @@ class ServerState:
         with self._lock:
             close_outcomes = self._drain_close_outcomes_locked()
         self._flush_close_outcomes(close_outcomes)
+        try:
+            self.http_capture.close()
+        except Exception:
+            pass
 
     def resume_accepting(self) -> None:
         with self._lock:
@@ -9941,6 +9963,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == CLIENT_DUMPS_ROUTE:
             self.state.touch_client()
             self._handle_client_dumps()
+            return
+
+        if parsed.path == HTTP_CAPTURE_ROUTE:
+            self.state.touch_client()
+            self._handle_http_capture()
             return
 
         if parsed.path == "/result":
@@ -10738,6 +10765,44 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json(400, {"error": "invalid_op"})
 
+    def _handle_http_capture(self) -> None:
+        body = self._read_json()
+        if body is None:
+            return
+        try:
+            ClientIdentity.from_payload(body.get("identity"))
+        except ValueError:
+            self._json(400, {"error": "invalid_identity"})
+            return
+        registry = self.state.http_capture
+        op = body.get("op")
+        if op == "start":
+            if getattr(self.state, "live_profile", False):
+                self._json(403, {"error": LIVE_PROFILE_REFUSED})
+                return
+            status, result = registry.start_from_payload(body)
+            if status == 200:
+                port = urlparse(str(result.get("base_url") or "")).port
+                self._log(
+                    f"HTTP_CAPTURE start id={result.get('capture_id')} "
+                    f"port={port}"
+                )
+            self._json(status, result)
+        elif op == "read":
+            status, result = registry.read_from_payload(body)
+            self._json(status, result)
+        elif op == "stop":
+            status, result = registry.stop_from_payload(body)
+            if status == 200:
+                self._log(
+                    f"HTTP_CAPTURE stop id={body.get('capture_id')} "
+                    f"accepted={result.get('accepted')} "
+                    f"rejected={result.get('rejected')}"
+                )
+            self._json(status, result)
+        else:
+            self._json(400, {"error": "bad_args"})
+
     def _handle_admin(self, action: str) -> None:
         # B4 round 2: /admin/reconcile and
         # /admin/lifecycle-recovery-repair are external HTTP entry points
@@ -11357,6 +11422,13 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
                 pass
 
     def server_close(self) -> None:
+        state = getattr(self, "state", None)
+        http_capture = getattr(state, "http_capture", None)
+        if http_capture is not None:
+            try:
+                http_capture.close()
+            except Exception:
+                pass
         try:
             super().server_close()
         finally:
@@ -11480,6 +11552,8 @@ class LoopbackServer:
         exec_audit: ExecAudit | None = None,
         status_provider: Callable[[], dict] | None = None,
         reclaim_orphans: bool = True,
+        live_profile: bool | None = None,
+        live_admin_enabled: bool | None = None,
     ) -> None:
         self.port = port
         self.key = key
@@ -11487,6 +11561,11 @@ class LoopbackServer:
         self.poll_interval = poll_interval
         self.status_provider = status_provider
         self.reclaim_orphans = reclaim_orphans
+        env_live, env_admin = live_profile_from_env()
+        resolved_live = env_live if live_profile is None else live_profile
+        resolved_admin = (
+            env_admin if live_admin_enabled is None else live_admin_enabled
+        )
         self.state = ServerState(
             key,
             enable_exec_enforce=enable_exec_enforce,
@@ -11494,6 +11573,8 @@ class LoopbackServer:
             exec_allowlist=exec_allowlist,
             exec_audit=exec_audit,
             config_port=port,
+            live_profile=resolved_live,
+            live_admin_enabled=resolved_admin,
         )
         self.httpd: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
