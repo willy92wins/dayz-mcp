@@ -8188,8 +8188,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "A server-only run or a client-only reattach "
             "closes as before. Graceful only when every launched role wrote "
             "a new termination line and the run was retired as run_reaped. "
-            "When stop_required is true, release the lease and call "
-            "dayz_test_stop."
+            "Apart from that failed server close, when the game stays "
+            "open (a role still running, so the run is not retired) the "
+            "reply carries stop_required=true and a reason such as "
+            "timeout or process_alive, with no error field; then release "
+            "the lease and call dayz_test_stop, which ends the run with "
+            "a forced kill."
         )
     )
     async def dayz_test_close(
