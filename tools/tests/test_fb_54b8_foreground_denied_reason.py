@@ -13,7 +13,9 @@ Contract pinned here, through the real foreground_run path with a fake Win32 lay
 - a denied answer adds last_error, foreground_lock_timeout_ms, input_idle_s and minimized (IsIconic on the window);
   a read that fails, or that the layer does not have, gives None and the answer still comes;
 - a foreground or lost answer is unchanged, and the lock and idle reads are not made on it;
-- bind_real_win32 binds the three reads on Windows;
+- bind_real_win32 binds the three reads on Windows, and its ask clears the thread's last error right before
+  SetForegroundWindow, so 0 means the call left no code (with use_last_error=True a refusal that sets nothing would
+  read what an earlier call of the thread left);
 - the published description names the four fields and what to do (retry with the PC unused, or the person clicks the
   window).
 
@@ -23,12 +25,15 @@ module import another (test_suite_structure).
 
 from __future__ import annotations
 
+import ctypes
 import dataclasses
 import functools
 import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Callable
+from unittest import mock
 
 from dayz_mcp import window_close, window_foreground
 from dayz_mcp.effective_schema import resolve_effective_schemas
@@ -236,6 +241,61 @@ class RealBindingTest(unittest.TestCase):
         self.assertGreaterEqual(idle, 0.0)
         self.assertIsInstance(error, int)
         self.assertGreaterEqual(error, 0)
+
+
+class _Function:
+    """A user32 function of the fake DLL: callable, and argtypes and restype can be set on it."""
+
+    def __init__(self, body: Callable[..., int]) -> None:
+        self.body = body
+
+    def __call__(self, *args: object) -> int:
+        return self.body(*args)
+
+
+class _FakeUser32:
+    """user32 with SetForegroundWindow as given; every other function returns 0 and leaves the last error alone."""
+
+    def __init__(self, ask: Callable[[int], int]) -> None:
+        self.SetForegroundWindow = _Function(ask)
+
+    def __getattr__(self, name: str) -> _Function:
+        function = _Function(lambda *args: 0)
+        setattr(self, name, function)
+        return function
+
+
+@unittest.skipUnless(sys.platform == "win32", "ctypes keeps a per-thread last error only on Windows")
+class RealAskLastErrorTest(unittest.TestCase):
+    """SetForegroundWindow does not document setting the last error when it refuses. With use_last_error=True,
+    ctypes sets the thread's last error from its own per-thread copy before each call and saves it after, so a
+    refusal that sets nothing would read what an earlier call of the thread left: 1400 (invalid window handle)
+    after a GetClassNameW on a window that has just closed. The real layer clears that copy right before the ask,
+    so 0 means the call left no code, and a code the call leaves is still read."""
+
+    def setUp(self) -> None:
+        self.addCleanup(ctypes.set_last_error, ctypes.get_last_error())
+
+    def _bind(self, ask: Callable[[int], int]) -> window_foreground.Win32ForegroundFns:
+        fake = _FakeUser32(ask)
+        with mock.patch.object(ctypes, "WinDLL", lambda *args, **kwargs: fake):
+            return window_foreground.bind_real_win32()
+
+    def test_a_refusal_that_leaves_no_code_reads_zero(self) -> None:
+        fns = self._bind(lambda hwnd: 0)
+        ctypes.set_last_error(1400)
+        self.assertFalse(fns.set_foreground(CLIENT_WINDOW))
+        self.assertEqual(fns.last_error(), 0)
+
+    def test_a_code_the_ask_leaves_is_read(self) -> None:
+        def ask(hwnd: int) -> int:
+            ctypes.set_last_error(5)
+            return 0
+
+        fns = self._bind(ask)
+        ctypes.set_last_error(1400)
+        self.assertFalse(fns.set_foreground(CLIENT_WINDOW))
+        self.assertEqual(fns.last_error(), 5)
 
 
 @functools.lru_cache(maxsize=1)
