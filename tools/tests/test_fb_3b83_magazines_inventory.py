@@ -200,7 +200,13 @@ class BridgeSourceTest(unittest.TestCase):
     def test_the_ammo_checks_come_before_anything_is_created(self) -> None:
         body = _method_body(self.bridge, "protected bool DispatchInventoryGive(")
         create = min(body.index("CreateInHands("), body.index("CreateInInventory("))
-        for token in ("command.args.ammo_set", '"CfgMagazines ', 'result.error = "bad_args"'):
+        for token in (
+            "command.args.ammo_set",
+            "command.args.ammo < 0",
+            'ConfigIsExisting("CfgMagazines " + command.args.classname)',
+            'command.args.ammo > GetGame().ConfigGetInt("CfgMagazines " + command.args.classname + " count")',
+            'result.error = "bad_args"',
+        ):
             with self.subTest(token=token):
                 self.assertIn(token, body[:create])
         self.assertIn("ServerSetAmmoCount(", body[create:])
