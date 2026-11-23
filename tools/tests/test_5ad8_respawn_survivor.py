@@ -88,6 +88,7 @@ SERVER_CONTRACT = {
     "bot_start": ("action", "bot_ttl_s", "object_id"),
     "bot_stop": ("object_id",),
     "hands_attach": ("object_id", "slot", "uid"),
+    "inventory_give": ("ammo", "ammo_set", "classname", "dest", "uid"),
     "loadout_apply": ("loadout_items", "object_id", "uid"),
     "loadout_clear": ("object_id", "uid"),
     "loadout_get": ("object_id", "uid"),
