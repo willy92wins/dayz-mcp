@@ -1843,7 +1843,7 @@ class MCPJob
 	// parent and slot), so the confirmation can tell a move from an item
 	// that stayed.
 	int move_origin_type;
-	EntityAI move_origin_parent;
+	Object move_origin_parent;
 	int move_origin_slot;
 	float move_quantity;
 	// server_perf: phase 1 once the first tick has set sample_start_s

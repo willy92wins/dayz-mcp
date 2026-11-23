@@ -1267,6 +1267,28 @@ class MCPBridge : Managed
 				return true;
 			}
 		}
+		InventoryLocation originLoc = new InventoryLocation;
+		bool originRead = false;
+		if (item.GetInventory())
+		{
+			originRead = item.GetInventory().GetCurrentInventoryLocation(originLoc);
+		}
+		if (originRead)
+		{
+			if (op == "to_cargo" || op == "to_attachment" || op == "to_hands" || op == "to_inventory")
+			{
+				MCPJob destinationJob = new MCPJob();
+				destinationJob.args = command.args;
+				destinationJob.actor = player;
+				destinationJob.move_target = target;
+				if (MCPInventoryMoveAtDestination(destinationJob, item, originLoc, op == "to_inventory"))
+				{
+					result.ok = false;
+					result.error = "already_at_destination";
+					return true;
+				}
+			}
+		}
 		string roomError = MCPInventoryMoveRoom(player, item, target, op, command.args.slot);
 		if (roomError != "")
 		{
@@ -1296,26 +1318,11 @@ class MCPBridge : Managed
 		job.move_origin_type = -1;
 		job.move_origin_parent = null;
 		job.move_origin_slot = -1;
-		InventoryLocation originLoc = new InventoryLocation;
-		bool originRead = false;
-		if (item.GetInventory())
-		{
-			originRead = item.GetInventory().GetCurrentInventoryLocation(originLoc);
-		}
 		if (originRead)
 		{
 			job.move_origin_type = originLoc.GetType();
 			job.move_origin_parent = originLoc.GetParent();
 			job.move_origin_slot = originLoc.GetSlot();
-			if (op == "to_cargo" || op == "to_attachment" || op == "to_hands" || op == "to_inventory")
-			{
-				if (MCPInventoryMoveAtDestination(job, item, originLoc, op == "to_inventory"))
-				{
-					result.ok = false;
-					result.error = "already_at_destination";
-					return true;
-				}
-			}
 		}
 		string performError = "";
 		bool clientRpc = false;
