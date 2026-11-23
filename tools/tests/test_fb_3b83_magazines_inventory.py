@@ -118,6 +118,21 @@ class InventoryGiveAmmoToolTest(unittest.IsolatedAsyncioTestCase):
 
 
 class InventoryGiveAmmoDaemonTest(unittest.TestCase):
+    def test_inventory_give_joins_the_server_arg_contract(self) -> None:
+        # An older bridge reads the command without ammo and creates an empty magazine: only the arg contract hash
+        # (poll ach=) tells it from this one, as world_spawn joined for scene_id (165a).
+        from dayz_mcp import bridge_readiness
+
+        self.assertEqual(
+            ("ammo", "ammo_set", "classname", "dest", "uid"),
+            bridge_readiness.SERVER_ARG_CONTRACT["inventory_give"],
+        )
+        bridge = BRIDGE_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            'protected const string SERVER_ARG_CONTRACT_HASH = "%s";' % bridge_readiness.server_arg_contract_hash(),
+            bridge,
+        )
+
     def test_the_wire_shapes_the_tool_sends_are_accepted(self) -> None:
         for args in (
             GIVE_WIRE,
