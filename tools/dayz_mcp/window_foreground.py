@@ -93,6 +93,11 @@ def bind_real_win32() -> Win32ForegroundFns:
             return 0
         return max(0, rect.right - rect.left) * max(0, rect.bottom - rect.top)
 
+    def set_foreground(hwnd: int) -> bool:
+        # Clear the per-thread copy so a refusal that sets nothing reads 0.
+        ctypes.set_last_error(0)
+        return bool(user32.SetForegroundWindow(hwnd))
+
     def foreground_lock_timeout_ms() -> int:
         value = wintypes.DWORD()
         if not user32.SystemParametersInfoW(0x2000, 0, ctypes.byref(value), 0):
@@ -116,7 +121,7 @@ def bind_real_win32() -> Win32ForegroundFns:
         class_name=class_name,
         area=area,
         is_iconic=lambda hwnd: bool(user32.IsIconic(hwnd)),
-        set_foreground=lambda hwnd: bool(user32.SetForegroundWindow(hwnd)),
+        set_foreground=set_foreground,
         foreground=lambda: int(user32.GetForegroundWindow() or 0),
         last_error=lambda: int(ctypes.get_last_error()),
         foreground_lock_timeout_ms=foreground_lock_timeout_ms,
