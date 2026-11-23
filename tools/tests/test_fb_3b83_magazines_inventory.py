@@ -217,6 +217,12 @@ class BridgeSourceTest(unittest.TestCase):
             with self.subTest(call=call):
                 self.assertLess(refusal, body.index(call))
 
+    def test_an_item_already_there_is_answered_before_the_room_check(self) -> None:
+        # A target whose cargo is full holds the item already there: the room check would answer no_room, and the
+        # call must say already_at_destination instead.
+        body = _method_body(self.bridge, "protected bool DispatchInventoryMove(")
+        self.assertLess(body.index('"already_at_destination"'), body.index("MCPInventoryMoveRoom("))
+
     def test_the_job_keeps_where_the_item_was(self) -> None:
         job = _method_body(self.messages, "class MCPJob")
         for field in ("move_origin_type", "move_origin_parent", "move_origin_slot"):
