@@ -584,6 +584,15 @@ Whether `busy_ms` matches the real dispatch time was not measured. The
 four-state process-CPU baseline remains separately unmeasured
 (`empty_load_baseline_record()`).
 
+### Read a reply: `ok` and `error`
+
+Every reply from a tool that goes through the game bridge (the game verbs, such as `surface_query`, `scene_raycast` and `world_spawn`) is a bridge result with `ok` and `error`.
+`ok` arrives as 0 or 1, and `error` stays empty when nothing failed, so an `error` key that is present but empty is not a failure.
+In one measured run, 264 of 264 `surface_query` replies and 1489 of 1489 `scene_raycast` replies came with an empty `error`, `ok` 1 and valid data.
+A failure shows as `ok` 0 with a named error, or as an error of the tool call itself (`Error executing tool ...`).
+Where a tool has its own result field, that field decides: `wait_for` returns `ok` true on a timeout, so callers gate on `satisfied`, not `ok`.
+The lifecycle and session tools that the daemon answers itself (`dayz_test_run`, `dayz_test_close`, `session_*`, `bridge_status`) have their own shapes; `dayz_test_close` has no `ok` at all.
+
 ### Wait for a player
 
 1. `session_status()` — confirm the lease is free (`owner` null, `grace` null, empty `queue`; `claimable: true` alone does not say so) and read `box` (occupied runs/foreign/ports) before launching.
