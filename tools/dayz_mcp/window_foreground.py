@@ -42,9 +42,16 @@ class Win32ForegroundFns:
     is_iconic: Callable[[int], bool]
     set_foreground: Callable[[int], bool]
     foreground: Callable[[], int]
+    last_error: Callable[[], int] | None = None
+    foreground_lock_timeout_ms: Callable[[], int] | None = None
+    input_idle_s: Callable[[], float] | None = None
 
 
 _REAL: Win32ForegroundFns | None = None
+
+
+class _LastInputInfo(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", wintypes.DWORD)]
 
 
 def bind_real_win32() -> Win32ForegroundFns:
@@ -59,6 +66,20 @@ def bind_real_win32() -> Win32ForegroundFns:
     user32.SetForegroundWindow.restype = wintypes.BOOL
     user32.GetForegroundWindow.argtypes = []
     user32.GetForegroundWindow.restype = wintypes.HWND
+    system_parameters_info = getattr(user32, "SystemParametersInfoW", None)
+    if system_parameters_info is not None:
+        system_parameters_info.argtypes = [
+            wintypes.UINT,
+            wintypes.UINT,
+            wintypes.LPVOID,
+            wintypes.UINT,
+        ]
+        system_parameters_info.restype = wintypes.BOOL
+    get_last_input_info = getattr(user32, "GetLastInputInfo", None)
+    if get_last_input_info is not None:
+        get_last_input_info.argtypes = [ctypes.POINTER(_LastInputInfo)]
+        get_last_input_info.restype = wintypes.BOOL
+    kernel32: ctypes.WinDLL | None = None
 
     def class_name(hwnd: int) -> str:
         buffer = ctypes.create_unicode_buffer(256)
@@ -72,12 +93,34 @@ def bind_real_win32() -> Win32ForegroundFns:
             return 0
         return max(0, rect.right - rect.left) * max(0, rect.bottom - rect.top)
 
+    def foreground_lock_timeout_ms() -> int:
+        value = wintypes.DWORD()
+        if not user32.SystemParametersInfoW(0x2000, 0, ctypes.byref(value), 0):
+            raise OSError("SystemParametersInfoW failed")
+        return int(value.value)
+
+    def input_idle_s() -> float:
+        nonlocal kernel32
+        if kernel32 is None:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.GetTickCount.argtypes = []
+            kernel32.GetTickCount.restype = wintypes.DWORD
+        info = _LastInputInfo()
+        info.cbSize = ctypes.sizeof(info)
+        if not user32.GetLastInputInfo(ctypes.byref(info)):
+            raise OSError("GetLastInputInfo failed")
+        tick = int(kernel32.GetTickCount())
+        return ((tick - int(info.dwTime)) & 0xFFFFFFFF) / 1000.0
+
     return Win32ForegroundFns(
         class_name=class_name,
         area=area,
         is_iconic=lambda hwnd: bool(user32.IsIconic(hwnd)),
         set_foreground=lambda hwnd: bool(user32.SetForegroundWindow(hwnd)),
         foreground=lambda: int(user32.GetForegroundWindow() or 0),
+        last_error=lambda: int(ctypes.get_last_error()),
+        foreground_lock_timeout_ms=foreground_lock_timeout_ms,
+        input_idle_s=input_idle_s,
     )
 
 
@@ -132,6 +175,34 @@ def set_foreground(
     if int(listing.window_pid(hwnd)) != int(pid):
         return None
     return bool(api.set_foreground(hwnd))
+
+
+def set_foreground_with_last_error(
+    hwnd: int,
+    pid: int,
+    *,
+    windows: window_close.Win32WindowFns | None = None,
+    fns: Win32ForegroundFns | None = None,
+) -> tuple[bool | None, int | None]:
+    """Call SetForegroundWindow once, as set_foreground does, and read the
+    last error right after the call, before any other call on the layer.
+
+    The granted value is what set_foreground returns, and None for it means
+    the window was not asked. The last error is None when the layer has no
+    such read or that read fails.
+    """
+
+    listing = windows if windows is not None else window_close.real_win32()
+    api = fns if fns is not None else real_win32()
+    if int(listing.window_pid(hwnd)) != int(pid):
+        return None, None
+    granted = bool(api.set_foreground(hwnd))
+    if api.last_error is None:
+        return granted, None
+    try:
+        return granted, int(api.last_error())
+    except Exception:
+        return granted, None
 
 
 def read_limit(hold_s: float) -> int:
