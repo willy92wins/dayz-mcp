@@ -8530,10 +8530,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} Spawn a DayZ object through the existing "
-            "world_spawn bridge command. type is a CfgVehicles classname, for "
-            'example type="CivilianSedan"; a value that is not a loaded '
-            'CfgVehicles classname, such as "vehicle", returns unknown_type '
-            "naming the type received. "
+            "world_spawn bridge command. type is a classname of CfgVehicles, "
+            "CfgWeapons or CfgMagazines, for example "
+            'type="CivilianSedan" or type="Mag_AK74_30Rnd"; a value that is '
+            'none of them, such as "vehicle", returns unknown_type naming '
+            "the type received. "
             "rotation is an RF_* CreateObjectEx "
             "flag integer, not an angle; 0 uses the bridge default RF_DEFAULT. "
             f"{WORLD_SPAWN_FLAGS_LINE} "
@@ -10248,6 +10249,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "created, vanilla logs [wpnfsm] ... without FSM errors from the "
             "engine's save on the server and its load on the client, which a "
             "count of script errors should subtract; the item still arrives. "
+            "ammo (an integer, 0 or more) fills a magazine: the bridge calls "
+            "ServerSetAmmoCount on it right after creating it, and "
+            "object_inspect reads the count. ammo on a classname that is not "
+            "a magazine (CfgMagazines), above that magazine's capacity (its "
+            "config count) or below 0 returns bad_args and creates nothing. "
             "uid is required and never falls back to the first human; uid "
             "selects by PlayerIdentity.GetPlainId(). A PBO that answers "
             "success without a positive object_id still created the item: "
@@ -10258,6 +10264,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def inventory_give(
         classname: str,
         dest: str = "hands",
+        ammo: StrictInt | None = None,
         uid: str = "",
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
@@ -10272,6 +10279,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if not isinstance(uid, str) or not uid.strip():
             raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args: dict[str, Any] = {"classname": classname, "dest": dest}
+        if ammo is not None:
+            if ammo < 0:
+                raise ToolError(
+                    _bad_args("ammo", ammo, "be an integer of 0 or more")
+                )
+            args["ammo"] = ammo
+            args["ammo_set"] = True
         if uid != "":
             args["uid"] = uid
         async with runtime.tool_lock:
@@ -10378,19 +10392,26 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "ground when nothing has room. split_to_hands does not split a "
             "stack that already fits in the hand (vanilla ShouldSplitQuantity). "
             "to_inventory uses FindInventoryLocationType.ANY, which includes "
-            "hands, and confirmed is true when the item lands in this "
-            "player's hands. Magazine quantity is GetAmmoCount, not "
+            "hands: a move from elsewhere that lands in this player's hands "
+            "is confirmed, and an item that stays where it was, in the hands "
+            "or anywhere, is not. Magazine quantity is GetAmmoCount, not "
             "GetQuantity. accepted=true means the call was issued. "
             "confirmed=true means a later server read of the item matches "
             "the op (cargo or attachment parent, hands, player inventory, "
-            "receiver quantity up, or source quantity down). The "
+            "receiver quantity up, or source quantity down) and shows the "
+            "item no longer where it was at dispatch. The "
             "read is inventory_move: loc_type, parent_object_id, parent_type, "
             "slot, quantity. confirmed stays false on timeout. A client "
             "refusal after the job id is read returns accepted=false and "
             "that code (no_room, not_reachable, and the other client codes). "
-            "Only a failure to read the id ends as timeout. Refusals "
+            "Only a failure to read the id ends as timeout. An item already "
+            "at its destination at dispatch (in the target's cargo, in that "
+            "slot, in this player's hands, or stowed in this player's "
+            "inventory for to_inventory) returns already_at_destination and "
+            "moves nothing. Refusals "
             "before the call move nothing: object_not_found, not_reachable, "
-            "no_room, slot_not_found, slot_occupied. uid is required and "
+            "no_room, slot_not_found, slot_occupied, "
+            "already_at_destination. uid is required and "
             "never falls back to the first human for client moves, for "
             "to_hands, to_inventory, split_half and split_to_hands, and for "
             "a server-authority move whose item or target is in a player's "
