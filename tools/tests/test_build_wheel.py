@@ -52,6 +52,19 @@ class BuildWheelTest(unittest.TestCase):
                     b"{}",
                 )
 
+    def test_stage_copies_the_installer_modules_to_its_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            stage = base / "stage"
+            build_wheel.stage_wheel_tree(
+                _TOOLS_DIR, _REPO_ROOT / "playbooks", stage, b"{}"
+            )
+            for name in ("install_mcp.py", "p0s_gate.py"):
+                self.assertTrue((stage / name).is_file(), name)
+                self.assertEqual(
+                    (stage / name).read_bytes(), (_TOOLS_DIR / name).read_bytes()
+                )
+
     def test_build_failure_from_the_runner(self) -> None:
         def fake_run(command, capture_output, text):
             del command, capture_output, text
@@ -181,6 +194,17 @@ class BuildWheelTest(unittest.TestCase):
         self.assertIn("mcp_capture.py", contents)
         self.assertEqual(
             contents["mcp_capture.py"], (_TOOLS_DIR / "mcp_capture.py").read_bytes()
+        )
+        for name in ("install_mcp.py", "p0s_gate.py"):
+            self.assertIn(name, contents)
+            self.assertEqual(contents[name], (_TOOLS_DIR / name).read_bytes())
+        entry_points = [
+            name for name in names if name.endswith(".dist-info/entry_points.txt")
+        ]
+        self.assertEqual(len(entry_points), 1)
+        self.assertIn(
+            "dayz-mcp = dayz_mcp.entry:main",
+            contents[entry_points[0]].decode("utf-8"),
         )
 
         in_wheel = {
