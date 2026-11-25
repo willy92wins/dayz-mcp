@@ -682,6 +682,69 @@ class SetupCmdTest(unittest.TestCase):
         self.write_wheel_version("1.6", "0" * 64)
         self.assert_rejected(self.good_args(), [self._halves_problem("differs", "1.6", "1.6")])
 
+    def test_reject_workshop_item_unreadable(self) -> None:
+        pbo_path = self.item / "Addons" / "DayZ_MCP.pbo"
+        real_read_bytes = Path.read_bytes
+
+        def fake_read_bytes(
+            path: Path, *args: object, **kwargs: object
+        ) -> bytes:
+            if path == pbo_path:
+                raise PermissionError("the PBO is locked")
+            return real_read_bytes(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(Path, "read_bytes", fake_read_bytes):
+            self.assert_rejected(
+                self.good_args(),
+                [
+                    {
+                        "code": "workshop_item_unreadable",
+                        "path": str(pbo_path),
+                        "remedy": "close whatever holds DayZ_MCP.pbo open (Steam may still be updating the item), then run dayz-mcp setup --json again",
+                    }
+                ],
+            )
+
+    def test_reject_port_zero(self) -> None:
+        self.assert_rejected(
+            self.good_args() + ["--port", "0"],
+            [
+                {
+                    "code": "port_out_of_range",
+                    "remedy": "pass --port between 1 and 65535",
+                }
+            ],
+        )
+
+    def test_reject_port_above_65535(self) -> None:
+        self.assert_rejected(
+            self.good_args() + ["--port", "65536"],
+            [
+                {
+                    "code": "port_out_of_range",
+                    "remedy": "pass --port between 1 and 65535",
+                }
+            ],
+        )
+
+    def test_port_65535_passes(self) -> None:
+        code, payload, text = self.run_setup(
+            self.good_args() + ["--port", "65535"]
+        )
+        expected = self.expected_success()
+        expected["port"] = 65535
+        self.assertEqual(code, 0)
+        self.assertEqual(payload, expected)
+        self.assertEqual(text, json.dumps(expected, sort_keys=True) + "\n")
+
+    def test_reject_halves_with_a_non_decimal_digit_version(self) -> None:
+        self.write_item_version("1.\u00b2", self.pbo_sha)
+        self.write_wheel_version("1.6", "0" * 64)
+        self.assert_rejected(
+            self.good_args(),
+            [self._halves_problem("differs", "1.\u00b2", "1.6")],
+        )
+
     def test_reject_codex_home_unsupported(self) -> None:
         elsewhere = self.base / "elsewhere" / ".codex"
         with mock.patch.dict(os.environ, {"CODEX_HOME": str(elsewhere)}):
@@ -825,8 +888,9 @@ class FindNativeCliTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name).resolve()
 
-    def _find(self, mapping: dict[str, str | None], role: str = "codex") -> Path | None:
-        with mock.patch("shutil.which", side_effect=lambda name: mapping.get(name)):
+    def _find(self, path_dirs: list[Path], role: str = "codex") -> Path | None:
+        path_value = os.pathsep.join(str(path_dir) for path_dir in path_dirs)
+        with mock.patch.dict(os.environ, {"PATH": path_value}):
             return setup_cmd.find_native_cli(role)
 
     def test_exe_beside_the_cmd_shim(self) -> None:
@@ -836,7 +900,7 @@ class FindNativeCliTest(unittest.TestCase):
         write_fake_x64_pe(exe)
         shim = shim_dir / "codex.cmd"
         shim.write_text("@echo off\n", encoding="utf-8")
-        found = self._find({"codex.exe": None, "codex.cmd": str(shim)})
+        found = self._find([shim_dir])
         self.assertEqual(found, exe.resolve())
 
     def test_exe_named_inside_the_shim_text(self) -> None:
@@ -848,7 +912,7 @@ class FindNativeCliTest(unittest.TestCase):
         write_fake_x64_pe(exe)
         shim = shim_dir / "codex.cmd"
         shim.write_text(f'@echo off\n"{exe}" %*\n', encoding="utf-8")
-        found = self._find({"codex.exe": None, "codex.cmd": str(shim)})
+        found = self._find([shim_dir])
         self.assertEqual(found, exe.resolve())
 
     def test_non_pe_candidate_is_skipped_for_the_next_one(self) -> None:
@@ -861,9 +925,7 @@ class FindNativeCliTest(unittest.TestCase):
         write_fake_x64_pe(good)
         shim = good_dir / "claude.cmd"
         shim.write_text("@echo off\n", encoding="utf-8")
-        found = self._find(
-            {"claude.exe": str(bad), "claude.cmd": str(shim)}, role="claude"
-        )
+        found = self._find([bad.parent, good_dir], role="claude")
         self.assertEqual(found, good.resolve())
 
     def test_exe_on_the_path_wins_over_the_shim(self) -> None:
@@ -877,8 +939,52 @@ class FindNativeCliTest(unittest.TestCase):
         write_fake_x64_pe(second)
         shim = shim_dir / "codex.cmd"
         shim.write_text("@echo off\n", encoding="utf-8")
-        found = self._find({"codex.exe": str(first), "codex.cmd": str(shim)})
+        found = self._find([first_dir, shim_dir])
         self.assertEqual(found, first.resolve())
+
+    def test_exe_in_the_current_folder_is_not_found(self) -> None:
+        current = self.base / "current"
+        current.mkdir()
+        write_fake_x64_pe(current / "codex.exe")
+        empty = self.base / "empty"
+        empty.mkdir()
+        with mock.patch.dict(os.environ):
+            os.environ.pop("NoDefaultCurrentDirectoryInExePath", None)
+            self.addCleanup(os.chdir, os.getcwd())
+            os.chdir(current)
+            self.assertIsNotNone(shutil.which("codex.exe"))
+            found = self._find([empty])
+        self.assertIsNone(found)
+
+    def test_cmd_in_the_current_folder_is_not_found(self) -> None:
+        current = self.base / "current"
+        current.mkdir()
+        other = self.base / "other"
+        other.mkdir()
+        exe = other / "codex.exe"
+        write_fake_x64_pe(exe)
+        shim = current / "codex.cmd"
+        shim.write_text(f'@echo off\n"{exe}" %*\n', encoding="utf-8")
+        empty = self.base / "empty"
+        empty.mkdir()
+        with mock.patch.dict(os.environ):
+            os.environ.pop("NoDefaultCurrentDirectoryInExePath", None)
+            self.addCleanup(os.chdir, os.getcwd())
+            os.chdir(current)
+            self.assertIsNotNone(shutil.which("codex.cmd"))
+            found = self._find([empty])
+        self.assertIsNone(found)
+
+    def test_relative_path_entry_is_not_searched(self) -> None:
+        current = self.base / "current"
+        current.mkdir()
+        write_fake_x64_pe(current / "codex.exe")
+        empty = self.base / "empty"
+        empty.mkdir()
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(current)
+        found = self._find([Path("."), empty])
+        self.assertIsNone(found)
 
 
 if __name__ == "__main__":

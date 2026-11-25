@@ -8,7 +8,6 @@ import json
 import os
 import re
 import secrets
-import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -109,7 +108,7 @@ def _read_libraryfolders(path: Path) -> Path | None:
 
 def _version_key(version: str) -> tuple[int, ...] | None:
     parts = version.split(".")
-    if not parts or any(not part.isdigit() for part in parts):
+    if not parts or any(not part.isdecimal() for part in parts):
         return None
     return tuple(int(part) for part in parts)
 
@@ -141,16 +140,29 @@ def _read_version_json(path: Path) -> dict[str, object] | None:
     return payload
 
 
+def _first_file_on_path(name: str) -> Path | None:
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry or not os.path.isabs(entry):
+            continue
+        candidate = Path(entry) / name
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
 def find_native_cli(role: str) -> Path | None:
     """First native x64 ``ROLE.exe`` on the PATH or behind its ``ROLE.cmd`` shim."""
     expected = f"{role}.exe"
     candidates: list[Path] = []
-    found_exe = shutil.which(expected)
-    if found_exe:
-        candidates.append(Path(found_exe))
-    found_cmd = shutil.which(f"{role}.cmd")
-    if found_cmd:
-        shim = Path(found_cmd)
+    found_exe = _first_file_on_path(expected)
+    if found_exe is not None:
+        candidates.append(found_exe)
+    found_cmd = _first_file_on_path(f"{role}.cmd")
+    if found_cmd is not None:
+        shim = found_cmd
         candidates.append(shim.parent / expected)
         try:
             shim_text = shim.read_text(encoding="utf-8", errors="ignore")
@@ -237,6 +249,16 @@ def main(
         )
     venv_python = root / "Scripts" / "python.exe"
 
+    if not 1 <= port <= 65535:
+        return _reject(
+            [
+                {
+                    "code": "port_out_of_range",
+                    "remedy": "pass --port between 1 and 65535",
+                }
+            ]
+        )
+
     try:
         bind_instance_context(token, None, replace=True)
         reject_conflicting_environment(token, port)
@@ -305,6 +327,7 @@ def main(
         )
 
     item_root: Path | None = None
+    item_ok = False
     if args.item is not None:
         item_root = Path(args.item)
     elif library_root is not None and WORKSHOP_ITEM_ID != "":
@@ -450,7 +473,16 @@ def main(
         except OSError:
             pbo_readable = False
             pbo_sha256 = ""
-        if pbo_readable and pbo_sha256 != wheel_version.get("pbo_sha256"):
+        if not pbo_readable:
+            if item_ok:
+                missing.append(
+                    {
+                        "code": "workshop_item_unreadable",
+                        "path": str(pbo_path),
+                        "remedy": "close whatever holds DayZ_MCP.pbo open (Steam may still be updating the item), then run dayz-mcp setup --json again",
+                    }
+                )
+        elif pbo_sha256 != wheel_version.get("pbo_sha256"):
             item_text = str(item_version.get("version"))
             wheel_text = str(wheel_version.get("version"))
             direction = _compare_versions(item_text, wheel_text)
