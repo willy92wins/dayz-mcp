@@ -771,7 +771,11 @@ def _target_not_found_detail(result: dict[str, Any]) -> str:
                     nearest_overflow = True
         if items:
             pairs.append("nearest=" + ",".join(items))
-    if report.get("truncated") is True or nearest_overflow:
+    truncated = report.get("truncated")
+    # Enforce sends its bool truncated as the int 0 or 1 through JsonSerializer,
+    # as for created in _ai_group_spawn_detail; a Python True crosses too.
+    truncated_set = truncated is True or (type(truncated) is int and truncated == 1)
+    if truncated_set or nearest_overflow:
         pairs.append("nearest_truncated=1")
     if not pairs:
         return ""
