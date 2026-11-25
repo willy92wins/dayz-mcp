@@ -150,7 +150,7 @@ El PBO llega por Steam y la mitad Python por la release. `setup` es el único pu
 | Release de GitHub | Dos ficheros más: el wheel y su lock con hashes, cubiertos por `SHA256SUMS.txt`. El zip del addon pasa a llevar `.bisign`, `Keys/`, `mod.cpp` y `VERSION.json`, con la misma estructura que el item |
 | Paquete Python | Punto de entrada `dayz-mcp` con `setup` y `doctor`. Modo instalado, con el estado en `%LOCALAPPDATA%\DayZ_MCP`. `playbooks/`, `mcp-grab.ps1` y `VERSION.json` viajan dentro del wheel, y también el instalador. El modo de árbol fuente queda igual |
 | Item del Workshop | PBO firmado, clave, `mod.cpp` y `VERSION.json`. La descripción enlaza a `llms-install.md` |
-| Documentación | `llms-install.md` nuevo, enlazado desde `README.md` y `QUICKSTART.md` |
+| Documentación | `llms-install.md` nuevo, enlazado desde `README.md` y `QUICKSTART.md`. `QUICKSTART.md` pone la vía del Workshop primero |
 | Runbook de release | Pasos de firma y de publicación del item, y los recuentos nuevos del zip, de `SHA256SUMS.txt` y de los ficheros de la release en sus pasos 4 y 7 |
 
 ### Dos niveles
@@ -240,7 +240,7 @@ Resultados a 19/11:
 
 ### Revisión del plan, 25/11
 
-Neon (`gemini-4-neon-xhigh` por agy, en tu PC, sobre `254b4b6`) dio CHANGES con 14 hallazgos: 2 P0, 9 P1, 2 P2 y 1 P3. Contrastados con el código, se sostienen todos, y lo que piden ya está arriba, cada P0 y P1 como test o criterio con su código:
+Neon (por agy, en tu PC, sobre `254b4b6`) dio CHANGES con 14 hallazgos: 2 P0, 9 P1, 2 P2 y 1 P3. Contrastados con el código, se sostienen todos, y lo que piden ya está arriba, cada P0 y P1 como test o criterio con su código:
 
 - N1, la clave privada en el item: publicar desde una carpeta sacada del zip, y `private_key_present`.
 - N2, el intérprete aprobado: la regla de la fase 2 y tres negativos más de 78.
