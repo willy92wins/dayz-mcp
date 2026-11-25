@@ -12,13 +12,17 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+from dayz_mcp.dayz_tools_paths import tools_root_candidates
 
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -28,9 +32,34 @@ BRIDGE_FILE = REPO_ROOT / "addon" / "scripts" / "5_Mission" / "MCPMessages.c"
 PROVENANCE_TOOL = TOOLS_DIR / "dev" / "pbo_provenance.py"
 
 PBO_ASSET_NAME = "DayZ_MCP.pbo"
-PBO_ARCHIVE_PATH = f"@DayZ_MCP/Addons/{PBO_ASSET_NAME}"
+BISIGN_ASSET_NAME = "DayZ_MCP.pbo.DayZ_MCP.bisign"
+BIKEY_ASSET_NAME = "DayZ_MCP.bikey"
+MOD_CPP_ASSET_NAME = "mod.cpp"
 VERSION_ASSET_NAME = "VERSION.json"
 CHECKSUM_ASSET_NAME = "SHA256SUMS.txt"
+RELEASE_DIR = TOOLS_DIR / "release"
+DSCHECK_EXE_RELATIVE = Path("Bin") / "DsUtils" / "DSCheckSignatures.exe"
+
+ZIP_ENTRY_PATHS = (
+    "@DayZ_MCP/Addons/DayZ_MCP.pbo",
+    "@DayZ_MCP/Addons/DayZ_MCP.pbo.DayZ_MCP.bisign",
+    "@DayZ_MCP/Keys/DayZ_MCP.bikey",
+    "@DayZ_MCP/mod.cpp",
+    "@DayZ_MCP/VERSION.json",
+)
+PBO_ARCHIVE_PATH = ZIP_ENTRY_PATHS[0]
+BISIGN_ARCHIVE_PATH = ZIP_ENTRY_PATHS[1]
+BIKEY_ARCHIVE_PATH = ZIP_ENTRY_PATHS[2]
+MOD_CPP_ARCHIVE_PATH = ZIP_ENTRY_PATHS[3]
+VERSION_ARCHIVE_PATH = ZIP_ENTRY_PATHS[4]
+
+SHA256SUMS_ENTRY_NAMES = (
+    "DayZ_MCP.pbo",
+    "DayZ_MCP.pbo.DayZ_MCP.bisign",
+    "DayZ_MCP.bikey",
+    "mod.cpp",
+    "VERSION.json",
+)
 
 _PROJECT_VERSION_LINE = re.compile(r'^version = "([^"\r\n]+)"$', re.MULTILINE)
 _BRIDGE_VERSION_LINE = re.compile(
@@ -40,6 +69,8 @@ _BRIDGE_VERSION_LINE = re.compile(
 
 GitQuery = Callable[[Path], str]
 UtcClock = Callable[[], str]
+SignatureCheck = Callable[[Path, Path], str]
+ProcessRunner = Callable[..., subprocess.CompletedProcess]
 
 
 class ReleaseRefusal(ValueError):
@@ -189,30 +220,175 @@ def _version_bytes(payload: dict[str, str]) -> bytes:
     ).encode("utf-8")
 
 
+def _bisign_path_for(pbo_path: Path) -> Path:
+    return Path(f"{pbo_path}.DayZ_MCP.bisign")
+
+
+def _find_private_key(repo_root: Path, pbo_path: Path, out_dir: Path) -> Path | None:
+    suffix = ".biprivatekey"
+
+    def _walk(root: Path) -> Path | None:
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for filename in filenames:
+                if filename.casefold().endswith(suffix):
+                    return Path(dirpath) / filename
+        return None
+
+    if repo_root.is_dir():
+        found = _walk(repo_root)
+        if found is not None:
+            return found
+    pbo_dir = pbo_path.parent
+    if pbo_dir.is_dir():
+        for entry in pbo_dir.iterdir():
+            if entry.is_file() and entry.name.casefold().endswith(suffix):
+                return entry
+    if out_dir.is_dir():
+        return _walk(out_dir)
+    return None
+
+
+def _missing_or_empty(path: Path) -> bool:
+    try:
+        return not path.is_file() or path.stat().st_size == 0
+    except OSError:
+        return True
+
+
+def run_signature_check(
+    addons_dir: Path,
+    keys_dir: Path,
+    *,
+    tools_roots: list[Path] | tuple[Path, ...] | None = None,
+    run_fn: ProcessRunner = subprocess.run,
+) -> str:
+    addons_dir = Path(addons_dir).resolve()
+    keys_dir = Path(keys_dir).resolve()
+    roots = list(tools_root_candidates()) if tools_roots is None else list(tools_roots)
+    tried: list[Path] = []
+    exe_path: Path | None = None
+    for root in roots:
+        candidate = Path(root) / DSCHECK_EXE_RELATIVE
+        tried.append(candidate)
+        if candidate.is_file():
+            exe_path = candidate
+            break
+    if exe_path is None:
+        raise ReleaseRefusal(
+            "signature_check_unavailable",
+            "DSCheckSignatures.exe not found; tried: "
+            + "; ".join(str(path) for path in tried),
+            "install DayZ Tools or set DAYZ_TOOLS_PATH",
+        )
+    try:
+        completed = run_fn(
+            [str(exe_path), str(addons_dir), str(keys_dir)],
+            cwd=addons_dir.parent,
+            capture_output=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ReleaseRefusal(
+            "signature_check_unavailable",
+            f"DSCheckSignatures.exe could not be run: {exe_path}: {error}",
+            "install DayZ Tools or set DAYZ_TOOLS_PATH",
+        ) from error
+    stdout = completed.stdout or b""
+    stderr = completed.stderr or b""
+    if isinstance(stdout, str):
+        stdout = stdout.encode("utf-8", errors="replace")
+    if isinstance(stderr, str):
+        stderr = stderr.encode("utf-8", errors="replace")
+    return (stdout + stderr).decode("utf-8", errors="replace")
+
+
+def _validate_signature_output(output: str) -> None:
+    lines = output.splitlines()
+    forbidden = ("is wrong", "key not found", "signature not found")
+    ok_routes: list[str] = []
+    for line in lines:
+        if line.startswith("Signature ") and line.endswith(" is OK"):
+            ok_routes.append(line[len("Signature ") : -len(" is OK")])
+    trimmed = output.strip()[:500]
+    has_forbidden = any(
+        phrase in line.casefold() for line in lines for phrase in forbidden
+    )
+    if has_forbidden:
+        raise ReleaseRefusal(
+            "bisign_invalid",
+            f"DSCheckSignatures reported a bad signature: {trimmed}",
+            "re-sign the PBO with DSSignFile and the matching DayZ_MCP key",
+        )
+    if len(ok_routes) != 1:
+        raise ReleaseRefusal(
+            "bisign_invalid",
+            f"DSCheckSignatures output has {len(ok_routes)} OK signature lines, expected exactly one: {trimmed}",
+            "re-sign the PBO with DSSignFile and the matching DayZ_MCP key",
+        )
+    final_name = re.split(r"[\\/]", ok_routes[0])[-1]
+    if final_name.casefold() != BISIGN_ASSET_NAME.casefold():
+        raise ReleaseRefusal(
+            "bisign_invalid",
+            f"DSCheckSignatures OK line names {final_name}, expected {BISIGN_ASSET_NAME}: {trimmed}",
+            "re-sign the PBO with DSSignFile and the matching DayZ_MCP key",
+        )
+
+
 def stage_release(
     *,
     pbo_path: Path,
     out_dir: Path,
     allow_dirty: bool = False,
     repo_root: Path = REPO_ROOT,
+    release_dir: Path = RELEASE_DIR,
     git_status_fn: GitQuery = read_git_status,
     git_sha_fn: GitQuery = read_git_sha,
     built_utc_fn: UtcClock = current_built_utc,
+    signature_check_fn: SignatureCheck = run_signature_check,
 ) -> tuple[Path, Path, Path]:
     pbo_path = Path(pbo_path)
     out_dir = Path(out_dir)
     repo_root = Path(repo_root)
+    release_dir = Path(release_dir)
     if not pbo_path.is_file():
         raise ReleaseRefusal(
             "pbo_missing",
             f"PBO input is not a file: {pbo_path}",
             "pass --pbo with the built DayZ_MCP.pbo path",
         )
+    private_key = _find_private_key(repo_root, pbo_path, out_dir)
+    if private_key is not None:
+        raise ReleaseRefusal(
+            "private_key_present",
+            f"private signing key found: {private_key}",
+            "move the .biprivatekey file outside the repository, the PBO folder and --out, and keep it offline",
+        )
     if not allow_dirty and git_status_fn(repo_root).strip():
         raise ReleaseRefusal(
             "dirty_tree",
             f"git worktree is dirty: {repo_root}",
             "commit or stash the changes, or rerun with --allow-dirty",
+        )
+    bikey_path = release_dir / BIKEY_ASSET_NAME
+    if _missing_or_empty(bikey_path):
+        raise ReleaseRefusal(
+            "release_key_missing",
+            f"release public key is missing or empty: {bikey_path}",
+            "put the DayZ_MCP.bikey matching the signing key in tools/release",
+        )
+    mod_cpp_path = release_dir / MOD_CPP_ASSET_NAME
+    if _missing_or_empty(mod_cpp_path):
+        raise ReleaseRefusal(
+            "mod_cpp_missing",
+            f"release mod.cpp is missing or empty: {mod_cpp_path}",
+            "restore tools/release/mod.cpp",
+        )
+    bisign_path = _bisign_path_for(pbo_path)
+    if not bisign_path.is_file():
+        raise ReleaseRefusal(
+            "bisign_missing",
+            f"PBO signature is missing: {bisign_path}",
+            "sign the PBO with DSSignFile so the .bisign sits beside the PBO (docs/RELEASE.md step 2)",
         )
 
     version = read_project_version()
@@ -230,24 +406,27 @@ def stage_release(
             "rebuild the PBO from HEAD with tools/pack-addon.ps1 (docs/RELEASE.md step 2)",
         )
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = out_dir / f"DayZ_MCP-v{version}-addon.zip"
-    version_path = out_dir / VERSION_ASSET_NAME
-    checksums_path = out_dir / CHECKSUM_ASSET_NAME
-
-    with zipfile.ZipFile(
-        zip_path,
-        "w",
-        compression=zipfile.ZIP_DEFLATED,
-        compresslevel=9,
-    ) as archive:
-        info, data = _zip_entry(PBO_ARCHIVE_PATH, pbo_bytes)
-        archive.writestr(
-            info,
-            data,
-            compress_type=zipfile.ZIP_DEFLATED,
-            compresslevel=9,
+    bisign_bytes = bisign_path.read_bytes()
+    bikey_bytes = bikey_path.read_bytes()
+    mod_cpp_bytes = mod_cpp_path.read_bytes()
+    if not bisign_bytes.startswith(bikey_bytes):
+        raise ReleaseRefusal(
+            "bisign_wrong_key",
+            f"signature {bisign_path} does not start with the release public key {bikey_path}",
+            "re-sign the PBO with the private key matching tools/release/DayZ_MCP.bikey",
         )
+
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+        check_root = Path(temporary)
+        addons_dir = check_root / "addons"
+        keys_dir = check_root / "keys"
+        addons_dir.mkdir()
+        keys_dir.mkdir()
+        (addons_dir / PBO_ASSET_NAME).write_bytes(pbo_bytes)
+        (addons_dir / BISIGN_ASSET_NAME).write_bytes(bisign_bytes)
+        (keys_dir / BIKEY_ASSET_NAME).write_bytes(bikey_bytes)
+        signature_output = signature_check_fn(addons_dir, keys_dir)
+    _validate_signature_output(signature_output)
 
     version_bytes = _version_bytes(
         {
@@ -258,12 +437,47 @@ def stage_release(
             "built_utc": built_utc,
         }
     )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = out_dir / f"DayZ_MCP-v{version}-addon.zip"
+    version_path = out_dir / VERSION_ASSET_NAME
+    checksums_path = out_dir / CHECKSUM_ASSET_NAME
+
+    entry_bytes = {
+        PBO_ARCHIVE_PATH: pbo_bytes,
+        BISIGN_ARCHIVE_PATH: bisign_bytes,
+        BIKEY_ARCHIVE_PATH: bikey_bytes,
+        MOD_CPP_ARCHIVE_PATH: mod_cpp_bytes,
+        VERSION_ARCHIVE_PATH: version_bytes,
+    }
+    with zipfile.ZipFile(
+        zip_path,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+    ) as archive:
+        for archive_path in ZIP_ENTRY_PATHS:
+            info, data = _zip_entry(archive_path, entry_bytes[archive_path])
+            archive.writestr(
+                info,
+                data,
+                compress_type=zipfile.ZIP_DEFLATED,
+                compresslevel=9,
+            )
+
     version_path.write_bytes(version_bytes)
-    checksum_lines = (
-        f"{pbo_sha256}  {PBO_ASSET_NAME}\n"
-        f"{_sha256(zip_path.read_bytes())}  {zip_path.name}\n"
-        f"{_sha256(version_bytes)}  {VERSION_ASSET_NAME}\n"
-    )
+    content_bytes = {
+        PBO_ASSET_NAME: pbo_bytes,
+        BISIGN_ASSET_NAME: bisign_bytes,
+        BIKEY_ASSET_NAME: bikey_bytes,
+        MOD_CPP_ASSET_NAME: mod_cpp_bytes,
+        VERSION_ASSET_NAME: version_bytes,
+    }
+    checksum_lines = ""
+    for name in SHA256SUMS_ENTRY_NAMES:
+        if name == VERSION_ASSET_NAME:
+            checksum_lines += f"{_sha256(zip_path.read_bytes())}  {zip_path.name}\n"
+        checksum_lines += f"{_sha256(content_bytes[name])}  {name}\n"
     checksums_path.write_text(checksum_lines, encoding="ascii", newline="\n")
     return zip_path, version_path, checksums_path
 

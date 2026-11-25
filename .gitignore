@@ -2,7 +2,7 @@
 # committed; the server refuses to start without one, so a clone creating its
 # own is the intended path.
 tools/.dayz_mcp.key
-
+*.biprivatekey
 # Machine-local launcher registry: absolute paths and NTFS file ids. Only the
 # empty baseline (approved-launchers.baseline.json) is versioned; a clone
 # installs onto it.

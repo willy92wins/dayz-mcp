@@ -24,7 +24,7 @@ The clean-tree check is intentional. `make_release.py` refuses a dirty worktree
 with `dirty_tree` because uncommitted bytes are not represented by `git_sha`.
 Use `--allow-dirty` only for an explicitly non-published rehearsal.
 
-## 2. Build the PBO on the DayZ Tools host
+## 2. Build and sign the PBO
 
 The packer header states that the source must be reachable through `P:\` and that
 DayZ Tools are required
@@ -53,12 +53,28 @@ AddonBuilder succeeds
 ([`tools/pack-addon.ps1:620-620`](../tools/pack-addon.ps1#L620-L620)). Record that
 printed path; do not substitute a source-tree file or an older deployed PBO.
 
-## 3. Stage the release assets
+Sign that PBO with `DSSignFile.exe` from `Bin\DsUtils` in DayZ Tools. The
+private key `DayZ_MCP.biprivatekey` lives in a local folder outside the
+repository, outside OneDrive and outside the build folder, with an offline
+copy; it is never copied beside the PBO and never enters the repository.
 
 [EXACT]
 
 ```powershell
 $Pbo = "C:\path\printed\by\pack-addon\DayZ_MCP.pbo"
+$PrivateKey = "C:\path\outside\the\repo\DayZ_MCP.biprivatekey"
+& "C:\path\to\DayZ Tools\Bin\DsUtils\DSSignFile.exe" $PrivateKey $Pbo
+if ($LASTEXITCODE -ne 0) { throw "DSSignFile failed" }
+if (-not (Test-Path -LiteralPath "$Pbo.DayZ_MCP.bisign")) {
+  throw "DSSignFile did not leave $Pbo.DayZ_MCP.bisign"
+}
+```
+
+## 3. Stage the release assets
+
+[EXACT]
+
+```powershell
 .\tools\.venv-mcp\Scripts\python.exe .\tools\dev\pbo_provenance.py $Pbo . HEAD
 if ($LASTEXITCODE -ne 0) { throw "The PBO is not the build of HEAD" }
 .\tools\.venv-mcp\Scripts\python.exe .\tools\make_release.py `
@@ -74,12 +90,28 @@ the marker too and refuses a PBO built from another commit than the `git_sha` it
 records (`pbo_commit_mismatch`), one without a valid marker (`pbo_marker_missing`,
 `pbo_marker_invalid`) and bytes that are not a PBO (`pbo_unreadable`).
 
+`make_release.py` also reads the `.bisign` beside the PBO,
+`tools/release/DayZ_MCP.bikey` and `tools/release/mod.cpp`, and runs
+`DSCheckSignatures` from DayZ Tools (found through `DAYZ_TOOLS_PATH` or the
+registry). It refuses with `private_key_present` when a `.biprivatekey` file is
+found in the repository, beside the PBO or under `--out`. It refuses with
+`release_key_missing` when `tools/release/DayZ_MCP.bikey` is missing or empty.
+It refuses with `mod_cpp_missing` when `tools/release/mod.cpp` is missing or
+empty. It refuses with `bisign_missing` when the `.bisign` beside the PBO is
+missing. It refuses with `bisign_wrong_key` when the `.bisign` does not start
+with the `.bikey` bytes. It refuses with `signature_check_unavailable` when
+`DSCheckSignatures` cannot be run. It refuses with `bisign_invalid` when
+`DSCheckSignatures` does not report exactly one OK signature for the PBO.
+
 The command creates exactly these publishable assets:
 
-- `dist/DayZ_MCP-vX.Y.Z-addon.zip`, containing only
-  `@DayZ_MCP/Addons/DayZ_MCP.pbo`;
+- `dist/DayZ_MCP-vX.Y.Z-addon.zip`, containing
+  `@DayZ_MCP/Addons/DayZ_MCP.pbo`,
+  `@DayZ_MCP/Addons/DayZ_MCP.pbo.DayZ_MCP.bisign`,
+  `@DayZ_MCP/Keys/DayZ_MCP.bikey`, `@DayZ_MCP/mod.cpp` and
+  `@DayZ_MCP/VERSION.json`;
 - `dist/VERSION.json`;
-- `dist/SHA256SUMS.txt`.
+- `dist/SHA256SUMS.txt`, with six lines.
 
 `VERSION.json` records `version`, `bridge_version`, `git_sha`, `pbo_sha256`, and
 `built_utc`. The bridge value comes from
@@ -87,8 +119,8 @@ The command creates exactly these publishable assets:
 
 ## 4. Recompute and verify every checksum
 
-`SHA256SUMS.txt` includes the PBO embedded in the ZIP, the ZIP itself, and
-`VERSION.json`. This check extracts the PBO and recomputes all three hashes; it
+`SHA256SUMS.txt` includes the four files inside the ZIP, the ZIP itself, and
+`VERSION.json`. This check extracts the ZIP and recomputes all six hashes; it
 does not trust values returned by the staging code.
 
 [EXACT]
@@ -102,13 +134,25 @@ New-Item -ItemType Directory -Path $VerifyDir | Out-Null
 Expand-Archive -LiteralPath (Join-Path $Dist $ZipName) -DestinationPath $VerifyDir
 
 $ExtractedPbo = Join-Path $VerifyDir "@DayZ_MCP\Addons\DayZ_MCP.pbo"
+$ExtractedBisign = Join-Path $VerifyDir "@DayZ_MCP\Addons\DayZ_MCP.pbo.DayZ_MCP.bisign"
+$ExtractedBikey = Join-Path $VerifyDir "@DayZ_MCP\Keys\DayZ_MCP.bikey"
+$ExtractedModCpp = Join-Path $VerifyDir "@DayZ_MCP\mod.cpp"
+$ExtractedVersion = Join-Path $VerifyDir "@DayZ_MCP\VERSION.json"
 $ExtractedFiles = @(Get-ChildItem -LiteralPath $VerifyDir -Recurse -File)
-if ($ExtractedFiles.Count -ne 1 -or -not (Test-Path -LiteralPath $ExtractedPbo)) {
-  throw "ZIP layout mismatch: expected only @DayZ_MCP/Addons/DayZ_MCP.pbo"
+if ($ExtractedFiles.Count -ne 5) {
+  throw "ZIP layout mismatch: expected five extracted files"
+}
+foreach ($ExtractedFile in @($ExtractedPbo, $ExtractedBisign, $ExtractedBikey, $ExtractedModCpp, $ExtractedVersion)) {
+  if (-not (Test-Path -LiteralPath $ExtractedFile)) {
+    throw "ZIP layout mismatch: missing $ExtractedFile"
+  }
 }
 
 $Targets = [ordered]@{
   "DayZ_MCP.pbo" = $ExtractedPbo
+  "DayZ_MCP.pbo.DayZ_MCP.bisign" = $ExtractedBisign
+  "DayZ_MCP.bikey" = $ExtractedBikey
+  "mod.cpp" = $ExtractedModCpp
   $ZipName = Join-Path $Dist $ZipName
   "VERSION.json" = Join-Path $Dist "VERSION.json"
 }
@@ -122,7 +166,7 @@ foreach ($Line in Get-Content -LiteralPath (Join-Path $Dist "SHA256SUMS.txt")) {
   }
   $Expected[$Matches.name] = $Matches.sha
 }
-if ($Expected.Count -ne 3) { throw "SHA256SUMS must contain exactly three entries" }
+if ($Expected.Count -ne 6) { throw "SHA256SUMS must contain exactly six entries" }
 
 foreach ($AssetName in $Targets.Keys) {
   if (-not $Expected.ContainsKey($AssetName)) {
@@ -132,6 +176,10 @@ foreach ($AssetName in $Targets.Keys) {
   if ($Actual -ne $Expected[$AssetName]) {
     throw "SHA-256 mismatch for $AssetName"
   }
+}
+if ((Get-FileHash -LiteralPath $ExtractedVersion -Algorithm SHA256).Hash -ne
+    (Get-FileHash -LiteralPath (Join-Path $Dist "VERSION.json") -Algorithm SHA256).Hash) {
+  throw "Extracted VERSION.json does not match dist VERSION.json"
 }
 "SHA256SUMS verified"
 ```
@@ -353,6 +401,20 @@ a bridge version and classifies `<bridge_version>~<game_version>` as accepted or
 `bridge_version` in `VERSION.json` gives doctor and release diagnostics the
 release-side value needed to name a PBO/server mismatch instead of reporting an
 opaque failure. The live handshake result remains authoritative.
+
+## 8. Publish the Workshop item
+
+After step 7, extract the downloaded ZIP into a new folder, check its five
+files against `SHA256SUMS.txt` and publish that extracted folder with the
+Publisher from DayZ Tools, never the build folder. Use the Publisher because
+SteamCMD with the owner's account closes the owner's Steam client session.
+
+## Rotating the signing key
+
+If the signing key is lost or leaked, create a new key with `DSCreateKey`, put
+the new `.bikey` in `tools/release` and in the Workshop item, re-sign the PBO
+and publish again; every server must replace the `.bikey` in its `keys` folder
+with the new one.
 
 ## Development tools (`tools/dev/`)
 
