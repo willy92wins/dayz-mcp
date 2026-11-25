@@ -57,12 +57,14 @@ HITS = [
     {"type": "StaticObj_Misc_ConcreteBlock1", "distance": 2.25},
     {"type": "Land_Pond", "distance": 4.5},
 ]
+# As the bridge sends it: JsonSerializer writes an Enforce bool as the int 0 or 1
+# (bridge_errors._ai_group_spawn_detail reads `created` the same way).
 REPORT = {
     "center": CENTER,
     "player_pos": PLAYER,
     "radius": 5.0,
     "scanned": 3,
-    "truncated": False,
+    "truncated": 0,
     "nearest": HITS,
 }
 PAIR_CENTER = "search_center=4813.2998046875,8.896016120910645,2464.60009765625"
@@ -109,12 +111,14 @@ class SearchReportWireTest(unittest.TestCase):
                 self.assertEqual(error_text(command, "target_not_found", REPORT), observed(PAIRS))
 
     def test_truncated_adds_the_mark_last(self) -> None:
+        # The wire value is the int 1; a Python True from a hand-built result counts too.
         for command in ACTION_COMMANDS:
-            with self.subTest(command=command):
-                self.assertEqual(
-                    error_text(command, "target_not_found", with_field("truncated", True)),
-                    observed(PAIRS + ["nearest_truncated=1"]),
-                )
+            for value in (1, True):
+                with self.subTest(command=command, value=value):
+                    self.assertEqual(
+                        error_text(command, "target_not_found", with_field("truncated", value)),
+                        observed(PAIRS + ["nearest_truncated=1"]),
+                    )
 
     def test_nearest_keeps_the_order_it_came_in(self) -> None:
         report = with_field(
@@ -212,8 +216,8 @@ class SearchReportWireTest(unittest.TestCase):
             observed(PAIRS[:4]),
         )
 
-    def test_only_a_true_truncated_adds_the_mark(self) -> None:
-        for value in (1, "true", "1", None, 0):
+    def test_only_a_set_truncated_adds_the_mark(self) -> None:
+        for value in (0, False, 2, -1, 1.0, "true", "1", None):
             with self.subTest(value=value):
                 self.assertEqual(
                     error_text("action_use", "target_not_found", with_field("truncated", value)),
