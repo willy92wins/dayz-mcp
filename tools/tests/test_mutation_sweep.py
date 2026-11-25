@@ -677,6 +677,131 @@ class MutationSweepTest(unittest.TestCase):
         self.assertEqual((self.root / _TWINS).read_bytes(), first_mutant + b"# changed under the mutant\n")
         self.assertIn(f"{_TWINS}:1 | def twin_a(x):", out + err)
 
+    # I/O failures of one call, injected on twins.py only (PR #446 review, GA240); every other call is the real one.
+
+    def _sweep_with(self, write=None, read=None):
+        patches = []
+        if write is not None:
+            patches.append(mock.patch.object(Path, "write_bytes", write))
+        if read is not None:
+            patches.append(mock.patch.object(Path, "read_bytes", read))
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            return self._sweep("--timeout", "10", "--include", _TWINS)
+
+    def test_a_mutant_that_cannot_be_written_leaves_the_file_as_it_was(self) -> None:
+        # A1: opening twins.py to write the first mutant fails, as on a read-only file.
+        target = (self.root / _TWINS).resolve()
+        original = target.read_bytes()
+        real_write = Path.write_bytes
+        failed = []
+
+        def write(path, data):
+            if not failed and Path(path).resolve() == target and data != original:
+                failed.append(1)
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_write(path, data)
+
+        rc, out, err = self._sweep_with(write=write)
+        self.assertEqual(failed, [1])
+        self.assertNotEqual(rc, 0, f"{out}\n{err}")
+        self.assertNotIn("Traceback", out + err)
+        self.assertIn(_TWINS, out + err)
+        self.assertEqual(target.read_bytes(), original)
+
+    def test_a_mutant_write_that_fails_after_truncating_is_restored(self) -> None:
+        # A2: the first mutant write truncates twins.py, then fails.
+        target = (self.root / _TWINS).resolve()
+        original = target.read_bytes()
+        real_write = Path.write_bytes
+        failed = []
+
+        def write(path, data):
+            if not failed and Path(path).resolve() == target and data != original:
+                failed.append(1)
+                real_write(path, b"")
+                raise OSError(28, "No space left on device", str(path))
+            return real_write(path, data)
+
+        rc, out, err = self._sweep_with(write=write)
+        self.assertEqual(failed, [1])
+        self.assertNotEqual(rc, 0, f"{out}\n{err}")
+        self.assertNotIn("Traceback", out + err)
+        self.assertIn(_TWINS, out + err)
+        self.assertEqual(target.read_bytes(), original)
+
+    def test_a_read_that_fails_before_restoring_leaves_the_file_and_names_head(self) -> None:
+        # B: the read of twins.py that checks the mutant before restoring fails.
+        target = (self.root / _TWINS).resolve()
+        original = target.read_bytes()
+        real_write, real_read = Path.write_bytes, Path.read_bytes
+        state = {"mutant": None, "failed": False}
+
+        def write(path, data):
+            result = real_write(path, data)
+            if state["mutant"] is None and Path(path).resolve() == target and data != original:
+                state["mutant"] = data
+            return result
+
+        def read(path):
+            if state["mutant"] is not None and not state["failed"] and Path(path).resolve() == target:
+                state["failed"] = True
+                raise OSError(5, "Input/output error", str(path))
+            return real_read(path)
+
+        rc, out, err = self._sweep_with(write=write, read=read)
+        self.assertTrue(state["failed"])
+        self.assertEqual(rc, 3, f"{out}\n{err}")
+        self.assertNotIn("Traceback", out + err)
+        self.assertIn(_TWINS, out + err)
+        self.assertIn("HEAD", out + err)
+        self.assertEqual(target.read_bytes(), state["mutant"], "the sweep does not touch a file it could not read")
+
+    def test_a_restore_that_fails_says_no_se_restauro(self) -> None:
+        # C: writing the original back over the first mutant fails.
+        target = (self.root / _TWINS).resolve()
+        original = target.read_bytes()
+        real_write = Path.write_bytes
+        state = {"mutant": False, "failed": False}
+
+        def write(path, data):
+            if Path(path).resolve() == target:
+                if data != original:
+                    state["mutant"] = True
+                elif state["mutant"] and not state["failed"]:
+                    state["failed"] = True
+                    raise OSError(5, "Input/output error", str(path))
+            return real_write(path, data)
+
+        rc, out, err = self._sweep_with(write=write)
+        self.assertTrue(state["failed"])
+        self.assertNotEqual(rc, 0, f"{out}\n{err}")
+        self.assertNotIn("Traceback", out + err)
+        self.assertIn(f"NO SE RESTAURO {_TWINS}", out + err)
+
+    def test_a_restore_that_leaves_another_sha_says_no_se_restauro(self) -> None:
+        # C: the restore writes, but not the original bytes.
+        target = (self.root / _TWINS).resolve()
+        original = target.read_bytes()
+        real_write = Path.write_bytes
+        state = {"mutant": False, "bent": False}
+
+        def write(path, data):
+            if Path(path).resolve() == target:
+                if data != original:
+                    state["mutant"] = True
+                elif state["mutant"] and not state["bent"]:
+                    state["bent"] = True
+                    return real_write(path, original + b"# not the original\n")
+            return real_write(path, data)
+
+        rc, out, err = self._sweep_with(write=write)
+        self.assertTrue(state["bent"])
+        self.assertNotEqual(rc, 0, f"{out}\n{err}")
+        self.assertNotIn("Traceback", out + err)
+        self.assertIn(f"NO SE RESTAURO {_TWINS}", out + err)
+
     def test_ctrl_c_restores_the_file_and_exits_130(self) -> None:
         # Ctrl+C is simulated in-process, as a KeyboardInterrupt from the second mutant's run.
         sweep = _load("mutation_sweep")
