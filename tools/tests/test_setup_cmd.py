@@ -91,7 +91,27 @@ class EntryPlatformTest(unittest.TestCase):
             fake.return_value = 9
             code = entry.main(["doctor", "--json"], platform="win32")
         self.assertEqual(code, 9)
-        fake.assert_called_once_with(["--json"])
+        fake.assert_called_once_with(["--daemon-policy", "normal", "--json"])
+
+    def test_doctor_subcommand_keeps_an_explicit_daemon_policy(self) -> None:
+        from dayz_mcp import doctor
+
+        with mock.patch.object(doctor, "main") as fake:
+            fake.return_value = 9
+            code = entry.main(
+                ["doctor", "--daemon-policy", "bootstrap", "--json"], platform="win32"
+            )
+        self.assertEqual(code, 9)
+        fake.assert_called_once_with(["--daemon-policy", "bootstrap", "--json"])
+
+    def test_doctor_subcommand_keeps_a_glued_daemon_policy(self) -> None:
+        from dayz_mcp import doctor
+
+        with mock.patch.object(doctor, "main") as fake:
+            fake.return_value = 9
+            code = entry.main(["doctor", "--daemon-policy=bootstrap"], platform="win32")
+        self.assertEqual(code, 9)
+        fake.assert_called_once_with(["--daemon-policy=bootstrap"])
 
 
 @unittest.skipUnless(sys.platform == "win32", "requires Windows")
@@ -843,6 +863,44 @@ class SetupCmdTest(unittest.TestCase):
             os.environ, {"PATH": str(empty), "CODEX_HOME": str(elsewhere)}
         ):
             self.assert_rejected(args, expected)
+
+    def test_workshop_item_root_with_an_empty_id_reads_no_registry(self) -> None:
+        with mock.patch.object(setup_cmd, "WORKSHOP_ITEM_ID", ""):
+            self.assertIsNone(setup_cmd.workshop_item_root(self.exploding_registry))
+        self.assertEqual(self.registry_calls, [])
+
+    def test_workshop_item_root_is_in_the_second_library(self) -> None:
+        self.assertEqual(setup_cmd.workshop_item_root(self.fake_registry), self.item)
+
+    def test_workshop_item_root_without_steam_in_the_registry(self) -> None:
+        self.assertIsNone(setup_cmd.workshop_item_root(lambda *_args: None))
+
+    def test_workshop_item_root_skips_a_steam_without_libraryfolders(self) -> None:
+        bare = self.base / "BareSteam"
+        bare.mkdir()
+
+        def reader(hive: str, subkey: str, value: str) -> str | None:
+            key = (hive, subkey, value)
+            if key == setup_cmd.dayz_tools_paths.REGISTRY_STEAM_KEYS[0]:
+                return str(bare)
+            if key == setup_cmd.dayz_tools_paths.REGISTRY_STEAM_KEYS[1]:
+                return str(self.steam)
+            return None
+
+        self.assertEqual(setup_cmd.workshop_item_root(reader), self.item)
+
+    def test_workshop_item_root_without_the_game_in_any_library(self) -> None:
+        escaped = str(self.lib_one).replace("\\", "\\\\")
+        text = (
+            '"libraryfolders"\n{\n'
+            f'    "0"\n    {{\n        "path"    "{escaped}"\n'
+            '        "apps"\n        {\n            "228980"    "100"\n        }\n    }\n'
+            "}\n"
+        )
+        (self.steam / "steamapps" / "libraryfolders.vdf").write_text(
+            text, encoding="utf-8"
+        )
+        self.assertIsNone(setup_cmd.workshop_item_root(self.fake_registry))
 
     def test_explicit_dayz_and_item_never_read_the_registry(self) -> None:
         args = self.good_args() + [

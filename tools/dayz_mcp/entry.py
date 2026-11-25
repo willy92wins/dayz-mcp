@@ -29,7 +29,13 @@ def main(argv: Sequence[str] | None = None, *, platform: str | None = None) -> i
     if arguments and arguments[0] == "doctor":
         from dayz_mcp import doctor
 
-        return doctor.main(arguments[1:])
+        rest = arguments[1:]
+        if any(
+            argument == "--daemon-policy" or argument.startswith("--daemon-policy=")
+            for argument in rest
+        ):
+            return doctor.main(rest)
+        return doctor.main(["--daemon-policy", "normal"] + rest)
     parser = argparse.ArgumentParser(prog="dayz-mcp")
     subcommands = parser.add_subparsers(dest="command")
     subcommands.add_parser("setup")

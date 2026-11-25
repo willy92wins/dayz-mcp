@@ -34,6 +34,40 @@ def _wheel_version_path() -> Path:
     return Path(__file__).resolve().parent / "VERSION.json"
 
 
+def workshop_item_root(
+    registry: Callable[[str, str, str], str | None] | None = None,
+) -> Path | None:
+    if WORKSHOP_ITEM_ID == "":
+        return None
+    reader = dayz_tools_paths.read_registry_string if registry is None else registry
+    steam_root: Path | None = None
+    for hive, subkey, value in dayz_tools_paths.REGISTRY_STEAM_KEYS:
+        raw = reader(hive, subkey, value)
+        if not raw:
+            continue
+        candidate = Path(raw)
+        try:
+            has_folders = (candidate / "steamapps" / "libraryfolders.vdf").is_file()
+        except OSError:
+            has_folders = False
+        if has_folders:
+            steam_root = candidate
+            break
+    if steam_root is None:
+        return None
+    library_root = _read_libraryfolders(steam_root / "steamapps" / "libraryfolders.vdf")
+    if library_root is None:
+        return None
+    return (
+        library_root
+        / "steamapps"
+        / "workshop"
+        / "content"
+        / WORKSHOP_APP_ID
+        / WORKSHOP_ITEM_ID
+    )
+
+
 def _emit(payload: dict[str, object]) -> int:
     print(json.dumps(payload, sort_keys=True))
     return 0 if payload.get("ok") is True else 2
