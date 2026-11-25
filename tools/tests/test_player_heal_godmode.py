@@ -690,8 +690,8 @@ class HealGodmodeCensusTest(unittest.TestCase):
         for command in COMMANDS:
             with self.subTest(command=command):
                 self.assertNotIn(command, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b800b7c7ee0674c")
-        self.assertIn('protected const string SERVER_ARG_CONTRACT_HASH = "3b800b7c7ee0674c";', self.bridge)
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b7a1b143153de71")
+        self.assertIn('protected const string SERVER_ARG_CONTRACT_HASH = "3b7a1b143153de71";', self.bridge)
         self.assertIn('const string MCP_BRIDGE_VERSION = "13";', _source(MESSAGES_PATH))
 
 
@@ -1448,6 +1448,7 @@ class GodmodeMissionHookTest(unittest.TestCase):
             "super": recorder("super"),
             "MCPGodmode": recorder("MCPGodmode", {"DefaultOn": False}),
             "MCPLookAtControl": recorder("MCPLookAtControl"),
+            "MCPPlayersKinematics": recorder("MCPPlayersKinematics"),
             "MCPBridge": SimpleNamespace(Get=lambda: bridge, ConfigIsTestProfile=lambda: False),
         }
         hook = translate(
@@ -1510,7 +1511,12 @@ class GodmodeMissionHookTest(unittest.TestCase):
         )
         self.assertEqual(
             self._run(ON_UPDATE, 0.25),
-            [("super", "OnUpdate", 0.25), ("MCPGodmode", "Tick", 0.25), ("bridge", "OnTick", 0.25)],
+            [
+                ("super", "OnUpdate", 0.25),
+                ("MCPGodmode", "Tick", 0.25),
+                ("MCPPlayersKinematics", "Tick"),
+                ("bridge", "OnTick", 0.25),
+            ],
         )
         update = method_body(_source(MISSION_PATH), ON_UPDATE)
         self.assertLess(update.index("MCPGodmode.Tick(timeslice);"), update.index("if (bridge)"))

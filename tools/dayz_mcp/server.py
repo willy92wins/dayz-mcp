@@ -132,6 +132,7 @@ from dayz_mcp.loopback import (
     INPUT_TRIGGER_DIK_MAX,
     INPUT_TRIGGER_HOLD_MAX_S,
     INPUT_TRIGGER_PRESS_MAX_TTL_S,
+    LIVE_PROFILE_REFUSED,
     MAX_CLIENT_DUMP_RUN_IDS,
     NOTIFY_STRING_MAX_BYTES,
     SCENE_ID_MAX_CHARS,
@@ -187,6 +188,7 @@ from dayz_mcp import camera_path as camera_path_contract
 from dayz_mcp import loadout as loadout_contract
 from dayz_mcp import player_move as player_move_contract
 from dayz_mcp import player_trace as player_trace_contract
+from dayz_mcp import players_kinematics as players_kinematics_contract
 # Moved out of this module unchanged (backlog 71fc) and imported back, so
 # dayz_mcp.server.<name> is still the same object for every name it had.
 from dayz_mcp.action_cursor import execute_action_cursor
@@ -706,6 +708,9 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     # A mistyped uid key must not be dropped: kill has no first-player fallback.
     "player_kill",
     "player_set_stance",
+    # A mistyped uids key (e.g. uid=) must not be dropped and silently sample
+    # every connected player: unknown keys are refused.
+    "players_kinematics",
     "bot_start",
     "bot_stop",
     # A mistyped scene_id key must not create a batch outside its scene, where
@@ -829,7 +834,17 @@ WORLD_SPAWN_FLAGS_LINE = (
     "health with telemetry_read object_at (field health01) immediately "
     "before judging it visually; the living-infected recipe is flags=3108 "
     "(ECE_PLACE_ON_SURFACE|ECE_INITAI), which initializes the AI and does "
-    "not guarantee survival."
+    "not guarantee survival. "
+    "Spawning ContaminatedArea_Dynamic creates the object but does not "
+    "start its zone: its vanilla script starts a new area's zone only from "
+    "EEOnCECreate, which the central economy triggers and world_spawn does "
+    "not. In game with flags=0 (the default), no trigger and no gas "
+    "grenades appeared in 310 s, and a player 42.6 m from its centre got "
+    "no entry event (run 274f00ae). For an active zone, spawn "
+    "ContaminatedArea_Local: its trigger was already there at the first "
+    "check, 1.4-1.5 s after spawn (runs d08dc725 and c61637df). By its "
+    "vanilla script its zone is a cylinder of radius 10 m reaching 3 m "
+    "above and below, and the area deletes itself after 360 s."
 )
 # world_spawn lifetime_s upper bound, in seconds. Mirrors SPAWN_LIFETIME_MAX_S in
 # addon/scripts/5_Mission/MCPBridge.c: 3888000 (45 days) is the largest
@@ -1415,6 +1430,13 @@ class Runtime:
         if self.loopback is not None:
             return
         key = self.config.key if self.config.key is not None else read_key(required_keyfile(self.config))
+        profile_kwargs: dict[str, Any] = {}
+        live_profile = getattr(self.config, "live_profile", None)
+        if isinstance(live_profile, bool):
+            profile_kwargs["live_profile"] = live_profile
+        live_admin = getattr(self.config, "live_admin_enabled", None)
+        if isinstance(live_admin, bool):
+            profile_kwargs["live_admin_enabled"] = live_admin
         self.loopback = LoopbackServer(
             self.config.port,
             key,
@@ -1424,6 +1446,7 @@ class Runtime:
             exec_allowlist=self.exec_allowlist,
             exec_audit=self.audit_exec if self.config.enable_exec_enforce else None,
             status_provider=lambda: self.status(),
+            **profile_kwargs,
         )
         self.loopback.start()
 
@@ -1709,6 +1732,54 @@ class Runtime:
         if isinstance(body, dict):
             return body
         return {"status": "noop"}
+
+    async def http_capture_start(
+        self,
+        *,
+        ttl_s: int = 900,
+        responses: list[dict[str, Any]] | None = None,
+        store_text_bodies: bool = False,
+    ) -> dict[str, Any]:
+        self.touch()
+        if getattr(self.state, "live_profile", False):
+            raise ToolError(LIVE_PROFILE_REFUSED)
+        status, payload = await asyncio.to_thread(
+            self.state.http_capture.start,
+            ttl_s=ttl_s,
+            responses=[] if responses is None else responses,
+            store_text_bodies=store_text_bodies,
+        )
+        if status != 200:
+            raise ToolError(str(payload.get("error") or "bad_args"))
+        return payload
+
+    async def http_capture_read(
+        self,
+        *,
+        capture_id: str,
+        since_seq: int = 0,
+        max_entries: int = 32,
+    ) -> dict[str, Any]:
+        self.touch()
+        status, payload = await asyncio.to_thread(
+            self.state.http_capture.read,
+            capture_id=capture_id,
+            since_seq=since_seq,
+            max_entries=max_entries,
+        )
+        if status != 200:
+            raise ToolError(str(payload.get("error") or "bad_args"))
+        return payload
+
+    async def http_capture_stop(self, *, capture_id: str) -> dict[str, Any]:
+        self.touch()
+        status, payload = await asyncio.to_thread(
+            self.state.http_capture.stop,
+            capture_id=capture_id,
+        )
+        if status != 200:
+            raise ToolError(str(payload.get("error") or "bad_args"))
+        return payload
 
     async def await_enqueued(
         self, cmd: str, command_id: int, peer: str, timeout_s: float
@@ -2756,6 +2827,40 @@ class ClientRuntime:
 
     async def client_dumps_get(self, run_ids: list[str]) -> dict[str, Any]:
         return await self._control.client_dumps_get(run_ids)
+
+    async def http_capture_start(
+        self,
+        *,
+        ttl_s: int = 900,
+        responses: list[dict[str, Any]] | None = None,
+        store_text_bodies: bool = False,
+    ) -> dict[str, Any]:
+        return await self._control_with_lazy_spawn(
+            self._control.http_capture_start,
+            ttl_s=ttl_s,
+            responses=responses,
+            store_text_bodies=store_text_bodies,
+        )
+
+    async def http_capture_read(
+        self,
+        *,
+        capture_id: str,
+        since_seq: int = 0,
+        max_entries: int = 32,
+    ) -> dict[str, Any]:
+        return await self._control_with_lazy_spawn(
+            self._control.http_capture_read,
+            capture_id=capture_id,
+            since_seq=since_seq,
+            max_entries=max_entries,
+        )
+
+    async def http_capture_stop(self, *, capture_id: str) -> dict[str, Any]:
+        return await self._control_with_lazy_spawn(
+            self._control.http_capture_stop,
+            capture_id=capture_id,
+        )
 
     async def session_box_status(
         self,
@@ -8083,8 +8188,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "A server-only run or a client-only reattach "
             "closes as before. Graceful only when every launched role wrote "
             "a new termination line and the run was retired as run_reaped. "
-            "When stop_required is true, release the lease and call "
-            "dayz_test_stop."
+            "Apart from that failed server close, when the game stays "
+            "open (a role still running, so the run is not retired) the "
+            "reply carries stop_required=true and a reason such as "
+            "timeout or process_alive, with no error field; then release "
+            "the lease and call dayz_test_stop, which ends the run with "
+            "a forced kill."
         )
     )
     async def dayz_test_close(
@@ -8127,8 +8236,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "not come to the front. held_s is the time from the first to the last "
             "read that showed the window; a change between two reads is not seen. "
             "granted is what SetForegroundWindow returned. "
-            "Windows grants the call only in the cases Microsoft documents, "
-            "for example once nobody has used the PC for a while; the tool "
+            "Windows refuses the call while another application holds the "
+            "front under the foreground lock, or after recent input from a "
+            "person. A denied answer adds last_error (GetLastError after "
+            "the call), foreground_lock_timeout_ms (the foreground lock "
+            "time-out), input_idle_s (seconds since the last keyboard or "
+            "mouse input on the PC) and minimized, each null when it could "
+            "not be read. After a denial, retry once nobody has used the PC "
+            "for a while, or have the person click the DayZ window; the tool "
             "never asks twice. A minimized window is not asked for (state "
             "minimized, granted null): the tool restores, moves and closes "
             "nothing. client_process_gone means the run's client process is "
@@ -8363,6 +8478,54 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if errors:
             response["errors"] = errors
         return response
+
+    @app.tool(
+        description=(
+            "Arm a loopback HTTP capture sink on 127.0.0.1 and return base_url "
+            "for RestApi. No lease; refused in live profile."
+        )
+    )
+    async def http_capture_start(
+        ttl_s: StrictInt = 900,
+        responses: list[dict[str, Any]] | None = None,
+        store_text_bodies: StrictBool = False,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await runtime.http_capture_start(
+                ttl_s=ttl_s,
+                responses=responses,
+                store_text_bodies=store_text_bodies,
+            )
+
+    @app.tool(
+        description=(
+            "Read redacted HTTP requests captured by capture_id since "
+            "since_seq (up to 32 entries or 256 KiB of bodies). No lease."
+        )
+    )
+    async def http_capture_read(
+        capture_id: StrictStr,
+        since_seq: StrictInt = 0,
+        max_entries: StrictInt = 32,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await runtime.http_capture_read(
+                capture_id=capture_id,
+                since_seq=since_seq,
+                max_entries=max_entries,
+            )
+
+    @app.tool(
+        description=(
+            "Disarm an HTTP capture sink and close the listener if none remain "
+            "armed; entries stay readable for 600 s. No lease."
+        )
+    )
+    async def http_capture_stop(
+        capture_id: StrictStr,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await runtime.http_capture_stop(capture_id=capture_id)
 
     @app.tool(
         description=(
@@ -11540,7 +11703,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "heartbeat to decide the camera. A live process that is not polling "
         "is classified by the dayz_test_run replace-gate (pid alive + "
         "readable peer + record age past the start budget + not "
-        "_peer_is_live → client_not_polling), not by camera_get."
+        "_peer_is_live → client_not_polling), not by camera_get. "
+        "camera_get does not see DayZDiag's developer free camera, the one "
+        "dev_free_camera_set or its numpad divide key turns on: it answers "
+        "what it would answer with it off (the player camera on foot with "
+        "no bridge camera mounted, 'scripted' with a camera_set or "
+        "camera_path_play camera mounted, 'vehicle' seated); in game, on "
+        "foot with no bridge camera mounted and the free camera on "
+        "(active_after=1), camera_get still answered camera.view='player' "
+        "and viewport_moved=0 with the player camera's pose, 8.0 mm from "
+        "the one read with it off and no further than two reads with it "
+        "off differ (up to 11 mm), while a screenshot showed the free "
+        "camera's view (run 9f2f4872). There is no read-only check: "
+        "dev_free_camera_set(active=false) needs a lease, answers in "
+        "active_before whether it was on, and leaves it off; a "
+        "capture_screenshot shows it only next to one taken with it off."
     ))
     async def camera_get(cam_mode: str = "get", timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         args = {"cam_mode": cam_mode} if cam_mode else {}
@@ -12770,6 +12947,140 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
 
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Capture and read a server-side per-player kinematic "
+            "trace driven from MissionServer.OnUpdate on the server peer, with no "
+            "raycasts and no world writes. Measures raw quantities only: no "
+            "verdicts, thresholds, or filtering. "
+            "Modes: mode=start (empty trace_id) creates a new trace_id and starts "
+            "sampling (trace_exists if a trace already exists, so call mode=clear "
+            "first; clear of an active trace is trace_active, so stop first); "
+            "mode=status reads the header; mode=stop stops the trace with "
+            "stop_reason=requested; mode=read pages rows by cursor (>= 0) and "
+            f"limit ({players_kinematics_contract.LIMIT_MIN}.."
+            f"{players_kinematics_contract.LIMIT_MAX}, default 64); mode=clear "
+            "clears a stopped trace. "
+            f"sample_hz ({players_kinematics_contract.SAMPLE_HZ_MIN}.."
+            f"{players_kinematics_contract.SAMPLE_HZ_MAX}, default 10) sets the "
+            "cadence on the single server clock GetGame().GetTime() in integer "
+            "milliseconds (tick_ms, start_tick_ms, now_tick_ms; GetTickTime is "
+            "not used). max_samples "
+            f"({players_kinematics_contract.MAX_SAMPLES_MIN}.."
+            f"{players_kinematics_contract.MAX_SAMPLES_MAX}, default 4096) sizes "
+            "the preallocated row buffer; when full, the trace stops with "
+            "overflow=true and stop_reason=overflow without overwriting (the last "
+            "pass may be partial). uids is an optional list of up to "
+            f"{players_kinematics_contract.UIDS_MAX} unique non-blank plain "
+            "identity strings (PlayerIdentity.GetPlainId()), each at most "
+            f"{players_kinematics_contract.UID_MAX_CHARS} characters; omitted "
+            "or empty samples all connected living PlayerBase with an identity. "
+            "Dead bodies "
+            "are never sampled, so a respawn appears as a subject_absent gap "
+            "rather than an in-cadence position jump. "
+            "Published reply: players_kinematics holds the header without raw wire "
+            "rows, and mode=read also publishes evidence in the "
+            "dayz-mcp-evidence-v1 envelope (truncated is next_cursor < count; eof "
+            "is !active and next_cursor == count; non-read modes omit evidence). "
+            "Row fields and engine reads: pos (Object.GetPosition, m), "
+            "expected_dt_s (interval_ms * 0.001, s), observed_dt_s (delta tick_ms "
+            "in s; omitted with first_sample), vel (pos delta / observed_dt_s, "
+            "m/s; omitted with first_sample and clock_not_monotonic; a finite "
+            "difference over one sample interval, and the server-side position "
+            "of a client-driven player advances in discrete steps, so a single "
+            "row is coarse: in game a steady 1.53 m/s walk sampled at 10 Hz "
+            "read about 1.0, 1.5 or 2.0 m/s row by row, while the displacement "
+            "over 10 consecutive rows agreed with vel_engine within 6 %), "
+            "vel_engine "
+            "(Human.PhysicsGetVelocity, m/s; on foot only, unavailable in a "
+            "vehicle), yaw_deg (HumanInputController.GetHeadingAngle converted to "
+            "compass degrees, 0 north = +Z, 90 east = +X; this is the server's "
+            "heading for the player, not the client camera, and has not yet been "
+            "measured against a human player's mouse movement or free look), "
+            "pitch_deg (HumanCommandWeapons.GetBaseAimingAngleUD, deg; unverified "
+            "against human mouse input on the server, masked as unavailable by "
+            "default unless include_unverified=true), stance_idx "
+            "(HumanMovementState.m_iStanceIdx), command "
+            "(HumanMovementState.m_CommandTypeId as a closed token), falling "
+            "(Human.PhysicsIsFalling(false), raw physics controller reading on "
+            "foot only and unavailable in a vehicle; this is not grounded, as a "
+            "body floating after a server teleport still reads falling=false), "
+            "jump (PlayerBase.IsJumpInProgress; unverified against human keyboard "
+            "input on the server, masked as unavailable by default unless "
+            "include_unverified=true), parachute (always unavailable, "
+            "parachute_available=false, because vanilla DayZ 1.30 has no "
+            "parachute), in_vehicle (whether a Transport was found via "
+            "GetCommand_Vehicle().GetTransport() or Transport.Cast(GetParent()); "
+            "true from the first row of a get-in, while pos is still travelling "
+            "to the seat: in game, 4.9, 3.0 and 1.5 m from the vehicle on the "
+            "first three rows of a forced get-in from 6 m), "
+            "vehicle_type (Transport.GetType() or ClassName(), or '-' on foot), "
+            "and vehicle_class (one of five classes: none, ground for Car or "
+            "Motorbike, water for Boat, aircraft for Helicopter, or unknown). "
+            "Gap kinds in strict precedence order: first_sample (no prior sample "
+            "for this uid in this trace), clock_not_monotonic (tick_ms <= previous "
+            "tick_ms), subject_absent (now_pass - previous_pass > 1, uid missed at "
+            "least one executed pass), pass_late (tick_ms - previous tick_ms > "
+            "late_after_ms), or empty string otherwise (in-cadence position jumps "
+            "are not gaps). "
+            "Budget: each pass is timed with TickCount (10 000 ticks = 1 ms; "
+            f"pass_cost_budget_ticks={players_kinematics_contract.PASS_BUDGET_TICKS}, "
+            "0.5 ms); header counters report passes, budget_skips, "
+            "pass_cost_last_ticks, pass_cost_max_ticks and pass_cost_budget_ticks. "
+            "If a pass exceeds the budget, the next due pass is skipped and "
+            "counted in budget_skips; a later row carries pass_late only when "
+            "GapKind's rule holds (more than late_after_ms since that uid's "
+            "previous sample, after the earlier gap rules). "
+            "There is no disk dump: the trace is aborted and lost on lease close "
+            "or mission shutdown, so stop and read all pages before releasing the "
+            "lease. Stop reasons: '', requested, overflow. "
+            "Errors: bad_mode, bad_trace_id, bad_cursor, bad_limit, bad_sample_hz, "
+            "bad_max_samples, bad_uids (refused before the bridge), bad_args, "
+            "trace_exists, trace_not_found, trace_active, live_profile_refused, "
+            "bad_bridge_kinematics_result, bad_bridge_kinematics_boolean, "
+            "bad_evidence_row, bad_evidence_result."
+        )
+    )
+    async def players_kinematics(
+        mode: StrictStr,
+        trace_id: StrictStr = "",
+        cursor: StrictInt = 0,
+        limit: StrictInt = 64,
+        sample_hz: StrictInt = 10,
+        max_samples: StrictInt = 4096,
+        uids: list[StrictStr] | None = None,
+        include_unverified: StrictBool = False,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        try:
+            args = players_kinematics_contract.normalize_request(
+                mode,
+                trace_id,
+                cursor,
+                limit,
+                sample_hz,
+                max_samples,
+                uids,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        if not isinstance(include_unverified, bool):
+            raise ToolError(_bad_args("include_unverified", include_unverified, "be a bool"))
+        async with runtime.tool_lock:
+            raw_result = await runtime.call_bridge(
+                "players_kinematics",
+                args,
+                "server",
+                _timeout(timeout_s),
+            )
+        try:
+            return players_kinematics_contract.normalize_bridge_result(
+                raw_result,
+                include_unverified=include_unverified,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+
     @app.tool(description=(
         "Walk the client widget tree from an optional named root, or the active "
         "scripted menu when path is empty. Each node reports name, type, user_id, "
@@ -13165,7 +13476,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "player turned it on with the key. The "
         "answer is dev_free_camera {active_before, active_after}, read on the "
         "client right after the toggle or, when that read does not show the "
-        "requested state yet, on the next client tick. Errors: an active that "
+        "requested state yet, on the next client tick. camera_get does not see "
+        "this camera: it answers what it would answer with it off (on foot "
+        "with no camera_set or camera_path_play camera mounted, "
+        "camera.view='player' and viewport_moved=0; with one mounted, "
+        "'scripted'; seated, 'vehicle'), so there is no read-only check: only "
+        "active_before here (active=false leaves it off) or a "
+        "capture_screenshot next to one taken with it off tells whether it is "
+        "on. Errors: an active that "
         "is not a bool is refused with bad_args before anything is sent, and "
         "the daemon refuses it with bad_args too; client_not_in_game (no local "
         "player); dev_free_camera_unavailable (no PluginDeveloper or no free "

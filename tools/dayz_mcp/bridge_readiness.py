@@ -290,6 +290,15 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "object_resolve": ("pos", "radius", "type"),
     "object_set_health": ("health01", "object_id", "pos", "slot", "type", "zone"),
     "player_kill": ("uid",),
+    "players_kinematics": (
+        "cursor",
+        "limit",
+        "max_samples",
+        "mode",
+        "sample_hz",
+        "trace_id",
+        "uids",
+    ),
     "players_visibility": ("pos", "radius"),
     "scene_clear": ("scene_id",),
     "scene_entities": ("scene_id",),
@@ -469,6 +478,7 @@ SERVER_CAPABILITY_BITS: tuple[str, ...] = (
     "world_time_set",
     "world_weather_set",
     "player_set_stance",
+    "players_kinematics",
 )
 CLIENT_CAPABILITY_BITS: tuple[str, ...] = (
     "action_cursor",
@@ -644,6 +654,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "player_kill": "player_kill",
         "player_set_stance": "player_set_stance",
         "player_teleport": "player_teleport",
+        "players_kinematics": "players_kinematics",
         "players_visibility": "players_visibility",
         "query_all_players": "query_all_players",
         "query_get_in_condition": "query_get_in_condition",

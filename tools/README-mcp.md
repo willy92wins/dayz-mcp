@@ -379,9 +379,11 @@ A same-account process that copies `supervisor-identity.json` and rewrites its p
 
 Read-only tools do not require a lease. Never use another session's token or terminate a process to advance the FIFO queue.
 
-Requires a lease (these mutate the game): `world_spawn`, `world_spawn_batch`, `scene_clear`, `object_delete`, `object_resolve`, `object_set_health`, `player_teleport`, `player_heal`, `player_godmode`, `player_respawn`, `player_kill`, `player_set_stance`, `inventory_give`, `inventory_attach`, `inventory_move`, `hands_take`, `hands_attach`, `loadout_apply`, `notify_players`, `vehicle_enter`, `vehicle_control`, `vehicle_release`, `vehicle_prepare_fixture`, `vehicle_get_in_client`, `vehicle_trace`, `anim_timeline`, `player_trace`, `weapon_aim`, `weapon_fire`, `weapon_raise`, `weapon_sights`, `infected_drive`, `survivor_drive`, `ai_group_spawn`, `ai_group_order`, `bot_start`, `bot_stop`, `camera_set`, `camera_set_focus`, `camera_path_play`, `camera_path_release`, `dev_free_camera_set`, `hud_set`, `key_press`, `input_trigger`, `player_look_at`, `player_view_set`, `player_move`, `actor_emote`, `world_time_set`, `world_weather_set`, `engine_set`, `object_anim` (write), `vehicle_door`, `restore_gameplay`, `action_hold`, `action_use`, `ui_set_text`, `ui_click`, `ui_focus`, `ui_pause`, `ui_menu_set`, `ui_map_set`, `ui_reload_layout`, `ui_dialog`, `dayz_test_run`, `dayz_test_stop`. The last two acquire and release the lease internally. The partition is the code's own: bridge commands not in `READ_ONLY_COMMANDS` (`session_coordination.py`) are mutating.
+Requires a lease (these mutate the game): `world_spawn`, `world_spawn_batch`, `scene_clear`, `object_delete`, `object_resolve`, `object_set_health`, `player_teleport`, `player_heal`, `player_godmode`, `player_respawn`, `player_kill`, `player_set_stance`, `inventory_give`, `inventory_attach`, `inventory_move`, `hands_take`, `hands_attach`, `loadout_apply`, `notify_players`, `vehicle_enter`, `vehicle_control`, `vehicle_release`, `vehicle_prepare_fixture`, `vehicle_get_in_client`, `vehicle_trace`, `anim_timeline`, `player_trace`, `players_kinematics`, `weapon_aim`, `weapon_fire`, `weapon_raise`, `weapon_sights`, `infected_drive`, `survivor_drive`, `ai_group_spawn`, `ai_group_order`, `bot_start`, `bot_stop`, `camera_set`, `camera_set_focus`, `camera_path_play`, `camera_path_release`, `dev_free_camera_set`, `hud_set`, `key_press`, `input_trigger`, `player_look_at`, `player_view_set`, `player_move`, `actor_emote`, `world_time_set`, `world_weather_set`, `engine_set`, `object_anim` (write), `vehicle_door`, `restore_gameplay`, `action_hold`, `action_use`, `ui_set_text`, `ui_click`, `ui_focus`, `ui_pause`, `ui_menu_set`, `ui_map_set`, `ui_reload_layout`, `ui_dialog`, `dayz_test_run`, `dayz_test_stop`. The last two acquire and release the lease internally. The partition is the code's own: bridge commands not in `READ_ONLY_COMMANDS` (`session_coordination.py`) are mutating.
 
 No lease (read-only): `action_cursor`, `player_find`, `query_all_players`, `query_player_state`, `weapon_state`, `entities_query`, `scene_entities`, `ai_group_state`, `surface_query`, `scene_raycast`, `object_inspect`, `object_doors`, `input_describe`, `world_time_get`, `loadout_get`, `server_perf`, `nav_path_query`, `players_visibility`, `telemetry_read`, `vehicle_telemetry`, `camera_get`, `gameplay_state`, `logs_since`, `chat_read`, `ui_tree`, `query_get_in_condition`, `bridge_status`, `session_status`, `capture_screenshot`, `pipeline_*`.
+
+No lease (host-side loopback HTTP capture sink, listed in the initial catalog; `http_capture_start` is refused in the live profile): `http_capture_start`, `http_capture_read`, `http_capture_stop`. They arm an ephemeral `127.0.0.1` sink listener (open only while at least one capture is armed) with a per-capture 128-bit URL token under `/sink/<token>/`, keep only `Content-Type` and `Content-Length`, redact secret keys in JSON bodies, form bodies (`store_text_bodies=true`) and query strings, and retain entries in memory for 600 s after stop.
 
 `gameplay_state()` reads `gameplay.controls_suppressed` (bridge flag),
 `engine_controls_disabled` (`MissionGameplay.IsControlDisabled()`), `hud_shown`
@@ -560,10 +562,36 @@ dispatches no game command. Empty polls leave work counters unchanged, though
 previously queued dispatch or a pending job's result can still add work.
 
 Requires a rebuilt PBO for the new counters; bridge version and argument
-contracts are unchanged. The idle/load/idle experiment is still pending; unit
-tests with a fake clock do not establish the engine clock's resolution or that
-`busy_ms` will increase for a particular workload. The four-state process-CPU
-baseline remains separately unmeasured (`empty_load_baseline_record()`).
+contracts are unchanged. Measured in game on 2026-11-20 (DayZDiag 1.30.164289,
+main `43215db`, runs `133714d1` and `b1c542af`, no other session sending
+commands):
+
+- At rest, 120 s with no calls but `session_heartbeat` left `cmds`,
+  `cmd_bytes` and `busy_ms` unchanged on both peers while `polls` rose by 133
+  or 134: before a load in run `133714d1`, and after one in run `b1c542af`.
+- Under load, in each run, 100 server calls
+  (`telemetry_read(mode="object_at")`) and then 100 client calls (`camera_get`)
+  raised each peer's `cmds` by exactly 100, `cmd_bytes` by 297000 on the server
+  and 225642 on the client, and `busy_ms` by 25 or 26 on the server and 14 or
+  15 on the client (about 0.25 and 0.15 ms per call); `last_cmds_per_poll`
+  read 1.
+- `last_poll_interval_s` read about 0.9 s at rest and 0.299 s under load on
+  both peers.
+- A reading taken right after a peer's last call was one command behind: that
+  command reached status on the next poll.
+
+Whether `busy_ms` matches the real dispatch time was not measured. The
+four-state process-CPU baseline remains separately unmeasured
+(`empty_load_baseline_record()`).
+
+### Read a reply: `ok` and `error`
+
+Every reply from a tool that goes through the game bridge (the game verbs, such as `surface_query`, `scene_raycast` and `world_spawn`) is a bridge result with `ok` and `error`.
+`ok` arrives as 0 or 1, and `error` stays empty when nothing failed, so an `error` key that is present but empty is not a failure.
+In one measured run, 264 of 264 `surface_query` replies and 1489 of 1489 `scene_raycast` replies came with an empty `error`, `ok` 1 and valid data.
+A failure shows as `ok` 0 with a named error, or as an error of the tool call itself (`Error executing tool ...`).
+Where a tool has its own result field, that field decides: `wait_for` returns `ok` true on a timeout, so callers gate on `satisfied`, not `ok`.
+The lifecycle and session tools that the daemon answers itself (`dayz_test_run`, `dayz_test_close`, `session_*`, `bridge_status`) have their own shapes; `dayz_test_close` has no `ok` at all.
 
 ### Wait for a player
 

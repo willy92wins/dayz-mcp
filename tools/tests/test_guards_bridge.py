@@ -163,13 +163,19 @@ class BridgeGuardsTest(unittest.TestCase):
         self.assertIn('Log("shutdown first entry");', shutdown)
         self.assertLess(shutdown.index('m_Shutdown = true;'), shutdown.index('Log("shutdown first entry");'))
         self.assertLess(shutdown.index('if (m_Shutdown)'), shutdown.index('m_Shutdown = true;'))
-        for effect in ('m_Dialog.FinishDisconnected();', 'PostUiDialogJob(m_DialogJob);', 'MCPCarDrive.Clear();', 'RestoreGameplay();', 'm_Ctx.reset();', 'm_CallbackRefs.Clear();'):
+        for effect in ('m_Dialog.FinishDisconnected();', 'PostUiDialogJob(m_DialogJob);', 'MCPCarDrive.Clear();', 'RestoreGameplay();', 'm_RestSink.Disconnect();', 'm_Ctx = null;', 'm_CallbackRefs.Clear();'):
             self.assertLess(shutdown.index('m_Shutdown = true;'), shutdown.index(effect))
         self.assertLess(shutdown.index('PostUiDialogJob(m_DialogJob);'), shutdown.index('m_Configured = false;'))
         post = _body(source, 'protected void PostResult(MCPResult result)')
         self.assertNotIn('m_Shutdown', post, 'must not veto the first terminal result')
+        # No reset() in teardown at all, postedTerminal or not: a GET or a
+        # POST can still be in flight on the shared context.
+        self.assertNotIn('.reset();', shutdown)
+        self.assertNotIn('.reset();', source)
         context = _body(shutdown, 'if (m_Ctx)')
-        self.assertIn('m_Ctx.reset();', _body(context, 'if (!postedTerminal)'))
+        self.assertIn('m_Ctx = null;', context)
+        self.assertNotIn('postedTerminal', context)
+        self.assertNotIn('.reset();', context)
 
     def test_g6_client_admission_counts_inflight_and_jobs_not_just_the_queue(self) -> None:
         source = _source('MCPClientBridge.c')

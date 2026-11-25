@@ -212,6 +212,7 @@ class AlwaysRefusedTest(unittest.TestCase):
             ("player_view_set", {}, "client"),
             ("action_cursor", {}, "client"),
             ("action_cursor_ids", {}, "server"),
+            ("players_kinematics", {}, "server"),
             ("players_visibility", {}, "server"),
             ("input_describe", {}, "client"),
             ("vehicle_enter", {}, "server"),
