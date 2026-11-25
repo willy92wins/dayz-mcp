@@ -404,10 +404,13 @@ opaque failure. The live handshake result remains authoritative.
 
 ## 8. Publish the Workshop item
 
-After step 7, extract the downloaded ZIP into a new folder, check its five
-files against `SHA256SUMS.txt` and publish that extracted folder with the
-Publisher from DayZ Tools, never the build folder. Use the Publisher because
-SteamCMD with the owner's account closes the owner's Steam client session.
+Publish the `@DayZ_MCP` folder that step 7 extracted and verified when it
+repeated the step 4 check with `$Dist` set to `$DownloadDir`: in that
+PowerShell session, `$VerifyDir\@DayZ_MCP`, with its five files. Point the
+Publisher from DayZ Tools at that `@DayZ_MCP` folder itself; pointed at its
+`Addons` folder, the Publisher fails without uploading anything. Never publish
+the build folder. Use the Publisher because SteamCMD with the owner's account
+closes the owner's Steam client session.
 
 ## Rotating the signing key
 
