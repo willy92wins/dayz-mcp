@@ -570,15 +570,21 @@ def main(argv: list[str] | None = None) -> int:
                     if wrote_mutant:
                         try:
                             current_sha = _sha256(orig.full_path.read_bytes())
-                        except OSError:
-                            current_sha = "<error-io>"
-                        if current_sha != mutant_sha:
+                        except OSError as exc:
                             should_restore = False
                             restore_err = (
                                 f"{cand.path}:{cand.line} | {cand.text}: "
-                                f"el fichero cambio mientras el mutante estaba escrito; no se toca "
-                                f"({mutant_sha[:12]} -> {current_sha[:12]})"
+                                f"no se pudo leer el fichero antes de restaurarlo ({exc}); "
+                                f"no se toca: el original esta en HEAD"
                             )
+                        else:
+                            if current_sha != mutant_sha:
+                                should_restore = False
+                                restore_err = (
+                                    f"{cand.path}:{cand.line} | {cand.text}: "
+                                    f"el fichero cambio mientras el mutante estaba escrito; no se toca "
+                                    f"({mutant_sha[:12]} -> {current_sha[:12]})"
+                                )
                     if should_restore:
                         try:
                             orig.full_path.write_bytes(orig.raw)
