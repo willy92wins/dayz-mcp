@@ -21,6 +21,7 @@ import tomllib
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from tests.pbo_helpers import build_pbo, marker_bytes
@@ -54,6 +55,17 @@ PROJECT_VERSION = tomllib.loads(PROJECT_FILE.read_text(encoding="utf-8"))[
     "project"
 ]["version"]
 BRIDGE_VERSION = EXPECTED_BRIDGE_VERSION
+WHEEL_BYTES = b"synthetic wheel bytes for release tests\n"
+WHEEL_NAME = f"dayz_mcp_tools-{PROJECT_VERSION}-py3-none-any.whl"
+LOCK_TEXT = (
+    "# synthetic lock\n"
+    "alpha==1.0 \\\n"
+    f"    --hash=sha256:{'a' * 64} \\\n"
+    f"    --hash=sha256:{'b' * 64}\n"
+    "    # via beta\n"
+    "beta==2.0 \\\n"
+    f"    --hash=sha256:{'c' * 64}\n"
+)
 
 
 class MakeReleaseTest(unittest.TestCase):
@@ -78,6 +90,11 @@ class MakeReleaseTest(unittest.TestCase):
         self.bikey.write_bytes(BIKEY_BYTES)
         self.mod_cpp = self.release_dir / "mod.cpp"
         self.mod_cpp.write_bytes(MOD_CPP_BYTES)
+        self.lock_path = self.release_dir / "requirements.lock.txt"
+        self.lock_path.write_text(LOCK_TEXT, encoding="utf-8", newline="\n")
+        self.wheel_calls: list[dict[str, object]] = []
+        self.wheel_error: RuntimeError | None = None
+        self.wheel_name_override: str | None = None
         build_dir = self.root / "build"
         build_dir.mkdir()
         self.pbo = build_dir / "DayZ_MCP.pbo"
@@ -87,6 +104,8 @@ class MakeReleaseTest(unittest.TestCase):
         self.out = self.root / "dist"
         self.zip_path = self.out / f"DayZ_MCP-v{PROJECT_VERSION}-addon.zip"
         self.version_path = self.out / "VERSION.json"
+        self.wheel_path = self.out / WHEEL_NAME
+        self.requirements_path = self.out / "dayz-mcp-requirements.txt"
         self.sums_path = self.out / "SHA256SUMS.txt"
         self.signature_calls: list[tuple[Path, Path, dict[str, bytes]]] = []
 
@@ -105,7 +124,25 @@ class MakeReleaseTest(unittest.TestCase):
         self.signature_calls.append((addons, keys, snapshot))
         return f"Signature {addons / 'DayZ_MCP.pbo.DayZ_MCP.bisign'} is OK\n"
 
-    def stage(self, **overrides: object) -> None:
+    def _fake_build_wheel(self, stage: Path, out_dir: Path) -> Path:
+        stage = Path(stage)
+        out_dir = Path(out_dir)
+        self.wheel_calls.append(
+            {
+                "stage": stage,
+                "out_dir": out_dir,
+                "version_bytes": (stage / "dayz_mcp" / "VERSION.json").read_bytes(),
+                "pyproject_bytes": (stage / "pyproject.toml").read_bytes(),
+            }
+        )
+        if self.wheel_error is not None:
+            raise self.wheel_error
+        out_dir.mkdir(parents=True, exist_ok=True)
+        wheel = out_dir / (self.wheel_name_override or WHEEL_NAME)
+        wheel.write_bytes(WHEEL_BYTES)
+        return wheel
+
+    def stage(self, **overrides: object) -> tuple[Path, ...]:
         release = self.require_release()
         options = {
             "pbo_path": self.pbo,
@@ -119,11 +156,19 @@ class MakeReleaseTest(unittest.TestCase):
             "signature_check_fn": self._fake_signature_check,
         }
         options.update(overrides)
-        release.stage_release(**options)
+        with mock.patch.object(
+            release.build_wheel, "build_wheel", self._fake_build_wheel
+        ):
+            return release.stage_release(**options)
 
     def assert_no_assets(self) -> None:
         self.assertFalse(self.zip_path.exists(), "a refused release wrote the zip")
         self.assertFalse(self.version_path.exists(), "a refused release wrote VERSION.json")
+        self.assertFalse(self.wheel_path.exists(), "a refused release wrote the wheel")
+        self.assertFalse(
+            self.requirements_path.exists(),
+            "a refused release wrote dayz-mcp-requirements.txt",
+        )
         self.assertFalse(self.sums_path.exists(), "a refused release wrote SHA256SUMS.txt")
 
     def assert_refusal(self, code: str, **overrides: object) -> str:
@@ -135,7 +180,17 @@ class MakeReleaseTest(unittest.TestCase):
         return str(raised.exception)
 
     def test_good_case_zip_sums_version_and_signature_inputs(self) -> None:
-        self.stage()
+        returned = self.stage()
+        self.assertEqual(
+            returned,
+            (
+                self.zip_path,
+                self.version_path,
+                self.wheel_path,
+                self.requirements_path,
+                self.sums_path,
+            ),
+        )
 
         expected_entries = [
             ("@DayZ_MCP/Addons/DayZ_MCP.pbo", PBO_BYTES),
@@ -157,7 +212,7 @@ class MakeReleaseTest(unittest.TestCase):
                 self.assertEqual((item.external_attr >> 16) & 0o777, 0o644)
 
         lines = self.sums_path.read_text(encoding="ascii").splitlines()
-        self.assertEqual(len(lines), 6)
+        self.assertEqual(len(lines), 8)
         checksums = {}
         ordered_names = []
         for line in lines:
@@ -174,6 +229,8 @@ class MakeReleaseTest(unittest.TestCase):
                 "mod.cpp",
                 self.zip_path.name,
                 "VERSION.json",
+                WHEEL_NAME,
+                "dayz-mcp-requirements.txt",
             ],
         )
         expected = {
@@ -183,6 +240,10 @@ class MakeReleaseTest(unittest.TestCase):
             "mod.cpp": hashlib.sha256(MOD_CPP_BYTES).hexdigest(),
             self.zip_path.name: hashlib.sha256(self.zip_path.read_bytes()).hexdigest(),
             "VERSION.json": hashlib.sha256(self.version_path.read_bytes()).hexdigest(),
+            WHEEL_NAME: hashlib.sha256(self.wheel_path.read_bytes()).hexdigest(),
+            "dayz-mcp-requirements.txt": hashlib.sha256(
+                self.requirements_path.read_bytes()
+            ).hexdigest(),
         }
         self.assertEqual(checksums, expected)
 
@@ -232,6 +293,10 @@ class MakeReleaseTest(unittest.TestCase):
             "mod.cpp": hashlib.sha256(MOD_CPP_BYTES).hexdigest(),
             self.zip_path.name: hashlib.sha256(self.zip_path.read_bytes()).hexdigest(),
             "VERSION.json": hashlib.sha256(self.version_path.read_bytes()).hexdigest(),
+            WHEEL_NAME: hashlib.sha256(self.wheel_path.read_bytes()).hexdigest(),
+            "dayz-mcp-requirements.txt": hashlib.sha256(
+                self.requirements_path.read_bytes()
+            ).hexdigest(),
         }
         self.assertEqual(checksums, expected)
 
@@ -251,20 +316,220 @@ class MakeReleaseTest(unittest.TestCase):
 
     def test_repeated_staging_overwrites_assets_byte_identically(self) -> None:
         self.stage()
-        first = {
-            path.name: path.read_bytes()
-            for path in (self.zip_path, self.version_path, self.sums_path)
-        }
-        for path in (self.zip_path, self.version_path, self.sums_path):
+        assets = (
+            self.zip_path,
+            self.version_path,
+            self.sums_path,
+            self.wheel_path,
+            self.requirements_path,
+        )
+        first = {path.name: path.read_bytes() for path in assets}
+        for path in assets:
             path.write_bytes(b"stale release output")
 
         self.stage()
 
-        second = {
-            path.name: path.read_bytes()
-            for path in (self.zip_path, self.version_path, self.sums_path)
-        }
+        second = {path.name: path.read_bytes() for path in assets}
         self.assertEqual(second, first)
+
+    def _wheel_line(self) -> str:
+        return (
+            "dayz-mcp-tools @ "
+            "https://github.com/willy92wins/dayz-mcp/releases/download/"
+            f"v{PROJECT_VERSION}/{WHEEL_NAME} "
+            f"--hash=sha256:{hashlib.sha256(WHEEL_BYTES).hexdigest()}"
+        )
+
+    def test_wheel_and_requirements_assets(self) -> None:
+        self.stage()
+
+        self.assertEqual(self.wheel_path.name, WHEEL_NAME)
+        self.assertEqual(self.wheel_path.read_bytes(), WHEEL_BYTES)
+        expected_requirements = LOCK_TEXT + self._wheel_line() + "\n"
+        self.assertEqual(
+            self.requirements_path.read_bytes(),
+            expected_requirements.encode("utf-8"),
+        )
+
+        checksums = {}
+        ordered_names = []
+        for line in self.sums_path.read_text(encoding="ascii").splitlines():
+            digest, separator, name = line.partition("  ")
+            self.assertEqual(separator, "  ")
+            checksums[name] = digest
+            ordered_names.append(name)
+        self.assertEqual(
+            ordered_names,
+            [
+                "DayZ_MCP.pbo",
+                "DayZ_MCP.pbo.DayZ_MCP.bisign",
+                "DayZ_MCP.bikey",
+                "mod.cpp",
+                self.zip_path.name,
+                "VERSION.json",
+                WHEEL_NAME,
+                "dayz-mcp-requirements.txt",
+            ],
+        )
+        expected = {
+            "DayZ_MCP.pbo": hashlib.sha256(PBO_BYTES).hexdigest(),
+            "DayZ_MCP.pbo.DayZ_MCP.bisign": hashlib.sha256(BISIGN_BYTES).hexdigest(),
+            "DayZ_MCP.bikey": hashlib.sha256(BIKEY_BYTES).hexdigest(),
+            "mod.cpp": hashlib.sha256(MOD_CPP_BYTES).hexdigest(),
+            self.zip_path.name: hashlib.sha256(self.zip_path.read_bytes()).hexdigest(),
+            "VERSION.json": hashlib.sha256(self.version_path.read_bytes()).hexdigest(),
+            WHEEL_NAME: hashlib.sha256(WHEEL_BYTES).hexdigest(),
+            "dayz-mcp-requirements.txt": hashlib.sha256(
+                expected_requirements.encode("utf-8")
+            ).hexdigest(),
+        }
+        self.assertEqual(checksums, expected)
+
+        self.assertEqual(len(self.wheel_calls), 1)
+        call = self.wheel_calls[0]
+        self.assertEqual(call["version_bytes"], self.version_path.read_bytes())
+        self.assertEqual(
+            call["pyproject_bytes"], (TOOLS_DIR / "pyproject.toml").read_bytes()
+        )
+        stage_path = call["stage"]
+        fake_out_dir = call["out_dir"]
+        self.assertIsInstance(stage_path, Path)
+        self.assertIsInstance(fake_out_dir, Path)
+        self.assertFalse(stage_path.is_relative_to(self.out))
+        self.assertFalse(stage_path.is_relative_to(self.repo_root))
+        self.assertFalse(fake_out_dir.is_relative_to(self.out))
+        self.assertFalse(fake_out_dir.is_relative_to(self.repo_root))
+
+    def test_requirements_normalize_crlf_lock_without_final_newline(self) -> None:
+        crlf_lock = LOCK_TEXT.replace("\n", "\r\n").rstrip("\r\n")
+        self.lock_path.write_bytes(crlf_lock.encode("utf-8"))
+
+        self.stage()
+
+        requirements = self.requirements_path.read_bytes().decode("utf-8")
+        self.assertNotIn("\r", requirements)
+        expected = LOCK_TEXT.rstrip("\n") + "\n" + self._wheel_line() + "\n"
+        self.assertEqual(requirements, expected)
+        self.assertEqual(requirements.splitlines()[-1], self._wheel_line())
+
+    def test_requirements_preserve_non_ascii_lock_comment_in_utf8(self) -> None:
+        lock_text = LOCK_TEXT.replace(
+            "# synthetic lock\n", "# synthetic lock\n# via pydantic (año)\n", 1
+        )
+        self.lock_path.write_bytes(lock_text.encode("utf-8"))
+
+        self.stage()
+
+        requirements_bytes = self.requirements_path.read_bytes()
+        self.assertIn("# via pydantic (año)\n".encode("utf-8"), requirements_bytes)
+        self.assertEqual(
+            requirements_bytes,
+            (lock_text + self._wheel_line() + "\n").encode("utf-8"),
+        )
+
+    def test_requirements_lock_missing_and_empty(self) -> None:
+        self.lock_path.unlink()
+        message = self.assert_refusal("requirements_lock_missing")
+        self.assertIn(
+            "; remedy: restore tools/release/requirements.lock.txt "
+            "(docs/RELEASE.md, Updating the dependency lock)",
+            message,
+        )
+        self.assertEqual(self.wheel_calls, [])
+
+        self.lock_path.write_bytes(b"")
+        self.assert_refusal("requirements_lock_missing")
+        self.assertEqual(self.wheel_calls, [])
+
+    def test_wheel_build_failure(self) -> None:
+        self.wheel_error = RuntimeError("wheel_build_failed: boom")
+        message = self.assert_refusal("wheel_build_failed")
+        self.assertIn("boom", message)
+        self.assertIn(
+            "; remedy: check that pip in this Python can build tools/ "
+            "(pip downloads setuptools==84.0.0 for the build), then rerun",
+            message,
+        )
+
+    def test_wheel_name_unexpected(self) -> None:
+        self.wheel_name_override = "dayz_mcp_tools-0.0-py3-none-any.whl"
+        message = self.assert_refusal("wheel_name_unexpected")
+        self.assertIn(
+            "; remedy: build the wheel from tools/pyproject.toml at this commit",
+            message,
+        )
+
+    def test_bisign_missing_does_not_build_wheel(self) -> None:
+        self.bisign.unlink()
+        self.assert_refusal("bisign_missing")
+        self.assertEqual(self.wheel_calls, [])
+
+    def test_main_prints_five_assets_in_order(self) -> None:
+        release = self.require_release()
+        assets = (
+            self.root / "one.zip",
+            self.root / "VERSION.json",
+            self.root / "wheel.whl",
+            self.root / "dayz-mcp-requirements.txt",
+            self.root / "SHA256SUMS.txt",
+        )
+
+        def fake_stage_release(**_kwargs: object) -> tuple[Path, ...]:
+            return assets
+
+        stdout = io.StringIO()
+        with mock.patch.object(release, "stage_release", fake_stage_release):
+            with contextlib.redirect_stdout(stdout):
+                code = release.main(
+                    ["--pbo", str(self.pbo), "--out", str(self.out)]
+                )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            stdout.getvalue().splitlines(), [str(asset) for asset in assets]
+        )
+
+    def test_build_release_wheel_uses_staged_tree_and_wheelhouse(self) -> None:
+        release = self.require_release()
+        work_dir = self.root / "wheel-work"
+        work_dir.mkdir()
+        sentinel = work_dir / "sentinel.whl"
+        calls: list[tuple[Path, Path]] = []
+
+        def fake_build_wheel(stage: Path, out_dir: Path) -> Path:
+            calls.append((Path(stage), Path(out_dir)))
+            return sentinel
+
+        version_bytes = b'{"version": "synthetic"}\n'
+        with mock.patch.object(release.build_wheel, "build_wheel", fake_build_wheel):
+            result = release.build_release_wheel(version_bytes, work_dir)
+
+        self.assertEqual(result, sentinel)
+        self.assertEqual(
+            calls, [(work_dir / "stage", work_dir / "wheelhouse")]
+        )
+        self.assertEqual(
+            (work_dir / "stage" / "dayz_mcp" / "VERSION.json").read_bytes(),
+            version_bytes,
+        )
+        playbooks_root = REPO_ROOT / "playbooks"
+        expected_playbooks = {}
+        for source in sorted(playbooks_root.rglob("*")):
+            if not source.is_file():
+                continue
+            relative = source.relative_to(playbooks_root)
+            if "__pycache__" in relative.parts or source.suffix == ".pyc":
+                continue
+            expected_playbooks[relative] = source.read_bytes()
+        self.assertTrue(expected_playbooks)
+        staged_playbooks = calls[0][0] / "dayz_mcp" / "playbooks"
+        self.assertEqual(
+            {
+                path.relative_to(staged_playbooks): path.read_bytes()
+                for path in sorted(staged_playbooks.rglob("*"))
+                if path.is_file()
+            },
+            expected_playbooks,
+        )
 
     def test_private_key_present_nested_under_repo_root(self) -> None:
         nested = self.repo_root / "deep" / "deeper"
@@ -465,7 +730,7 @@ class MakeReleaseTest(unittest.TestCase):
         )
         self.assertEqual(
             only_count("if ($Expected.Count -ne"),
-            len(release.SHA256SUMS_ENTRY_NAMES) + 1,
+            len(release.SHA256SUMS_ENTRY_NAMES) + 3,
         )
 
     def test_dirty_tree_refusal_names_field_and_remedy(self) -> None:
