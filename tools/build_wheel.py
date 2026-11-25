@@ -28,6 +28,8 @@ def stage_wheel_tree(
     for source in sorted((tools / "dayz_mcp").glob("*.py")):
         shutil.copyfile(source, package_stage / source.name)
     shutil.copyfile(tools / "mcp_capture.py", target / "mcp_capture.py")
+    shutil.copyfile(tools / "install_mcp.py", target / "install_mcp.py")
+    shutil.copyfile(tools / "p0s_gate.py", target / "p0s_gate.py")
     shutil.copyfile(tools / "mcp-grab.ps1", target / "mcp-grab.ps1")
 
     playbooks_stage = package_stage / "playbooks"
