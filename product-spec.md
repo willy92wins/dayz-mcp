@@ -80,6 +80,8 @@ implementar. El usuario adjudica; todo cambio baja al *Changelog de alcance*.
 ### E — MCP completo & seguridad endurecida (fase 4)
 
 > **Intent**: el end-goal **usable e instalable**, con la seguridad llevada a producción-local.
+>
+> **Intent de E7 y E8** (2026-11-25): que quien tenga DayZ y un agente monte el puente sin clonar ni compilar, con la misma seguridad: solo loopback, clave por instalación y lista blanca.
 
 | # | Criterio | Cómo se verifica | Estado |
 |---|----------|------------------|--------|
@@ -89,6 +91,8 @@ implementar. El usuario adjudica; todo cambio baja al *Changelog de alcance*.
 | E4 | Concurrencia | lock de instancia (bind exclusivo del puerto loopback) + mutex global de tool-calls (el SDK MCP no serializa): dos tool-calls no corrompen estado/cámara | ✓ **in-game 2026-06-10 (gate 4A)** — lock exclusivo verificado con 2ª instancia real (`allow_reuse_address` left False on Windows) + 2 `camera_set` paralelas serializadas sin corrupción |
 | E5 | Superficie autocontenida, interpretable y auditable | El Knowledge Pack se prepara desde MCP usando solo el pack instalado y rutas selladas, valida un índice no vacío antes de reemplazar y conserva el anterior ante fallo. El esquema efectivo se obtiene post-registro/aliases/perfiles, materializa validadores públicos y produce un fingerprint canónico; una sesión con registro obsoleto indica `reopen_mcp_client` sin reiniciar el daemon. Instrucciones y descripciones distinguen classname Enforce de texto visible, transporte `ok` de efecto observado y explican el contrato C4; las resoluciones de inbox conservan JSONL legacy y añaden edad derivada más referencia durable acotada. Mutantes independientes de tool/parámetro/modo cambian el veredicto; snapshots, contadores o expected derivados del mismo input no acreditan PASS. | ❓ |
 | E6 | Integridad de artefactos auxiliares usados por el harness | Un gate de versión compara fuentes independientes del mod y un build se valida en staging antes de publicar: un destino preexistente, un marcador fatal aun con exit 0 o una divergencia source→artefacto fallan. El publish es recuperable; un rebuild determinista puede conservar SHA sólo si el artefacto candidato nació y se validó en staging. Fixtures coherente/drift y success/fatal/stale/publish-failed prueban el consumidor real, no el output contra sí mismo. | retirada (D-95): los artefactos del harness no son producto |
+| E7 | PBO firmado en el Workshop | Cada release publica en el item DayZ-MCP el PBO firmado, su `.bisign`, `Keys\DayZ_MCP.bikey`, `mod.cpp` y `VERSION.json`, y el PBO del item y el del zip tienen el sha256 de `VERSION.json`. Con `verifySignatures = 2`, el servidor admite al cliente suscrito si tiene nuestra `.bikey` en `keys`, y sin ella lo echa con kick 120. `make_release.py` rechaza un PBO sin firma o firmado con otra clave, y la clave privada no está en git ni en la release. | ❓ fase 1 de `plans/2026-11-11-distribucion.md` |
+| E8 | Mitad Python instalable por un agente | En un perfil de Windows sin Python ni `uv`, con Steam, DayZ, el item suscrito, y Claude Code y Codex, un agente sigue `llms-install.md` con seis órdenes como mucho: `dayz-mcp setup --json` sale con 0 y, con el juego arrancado, `bridge_status.ready` es `true`. `doctor --json` nombra un PBO de otra release con la orden que lo arregla. Desde el clon todo sigue como hoy. | ❓ fase 2 de `plans/2026-11-11-distribucion.md` |
 
 ### F — Broker / multi-sesión (refactor 2026-06-23)
 
@@ -185,6 +189,7 @@ Aceptación detallada: `plans/2026-07-14-agent-session-coordination-design.md` �
   **salvaguarda de seguridad** del breakglass (gating allowlist-exacto + audit JSONL + OFF-default);
   el efecto del script en el server headless es best-effort, no contractual. No es nuestro trabajo
   hacer funcionar una API Developer-only en contexto headless.
+- **Distribución por el Workshop y para agentes (E7 y E8, 2026-11-25)**: repartir el lanzador nativo de `dayz_test_run`, que sigue saliendo del clon; el modo instalado en Linux y macOS; PyPI, MSI y `.mcpb`; y suscribirse al item o arrancar el juego sin la persona.
 
 ## Referencia de paridad (anatomía del "MCP que controla un juego")
 
@@ -206,6 +211,8 @@ Aceptación detallada: `plans/2026-07-14-agent-session-coordination-design.md` �
   re-verificadas por Claude (`dayz-harness-apis.md` + spot-checks de esta sesión).
 
 ## Changelog de alcance
+
+- **2026-11-25 (E7 y E8 — distribución por el Workshop y para agentes; grill de plan, confirmado con usuario):** El gate del grill de `plans/2026-11-11-distribucion.md` vio que sus fases 1 y 2 no trazaban a ningún criterio: E3 cubre la instalación desde el clon con `install-mcp.ps1` y está cumplido desde el 2026-06-10. Se añaden **E7** (el PBO firmado en el item del Workshop, con su `.bisign`, la `.bikey`, `mod.cpp` y `VERSION.json`, y `make_release.py` rechaza un PBO sin firma o firmado con otra clave) y **E8** (la mitad Python, que un agente instala desde la release siguiendo `llms-install.md` en seis órdenes como mucho, sin Python ni `uv` de antemano), con su `Intent` y lo que queda fuera de alcance. Cláusula de desafío: E8 pide hoy Claude Code y Codex a la vez, y eso choca con su `Intent`; aceptar un solo cliente MCP va en la fase 3 del plan, con su propio grill de producto, porque toca H1 y H10. No reescribe E3, H1 ni H10.
 
 - **2026-11-12 (0dac — reloj de trabajo del lease y vigilante encendido por omisión):** En `session_coordination.py` (`LEASE_WORK_IDLE_S = 1800.0`), con un run `RUNNING` suyo enlazado al puente (`daemon.py` `idle_hold_probe`), sin entrada humana ni dudosa en los últimos 1800 s (`human_input_at`, `uncertain_input_at`) y con la señal de entrada buena, sin huecos, durante esos 1800 s (`input_signal_good_since`), `session_heartbeat` deja de alargar `expires_at` tras 1800 s sin una mutación ni una lectura con su lease (`authorize` mueve `last_work_at`), audita `decision="work_idle"` y devuelve `renewal_refused: "work_idle"` con `work_idle_s`; `wait_for(file_matches)` renueva por latido y tampoco cuenta, y el lease caduca por su vía habitual. En `idle_warden.py`, `read_idle_warden_enabled` pasa a encender el vigilante cuando `%LOCALAPPDATA%\DayZ_MCP\idle-warden.json` falta o vale `{"enabled": true}`, y lo deja apagado con `{"enabled": false}`, error de lectura, JSON inválido o cualquier otra forma (H15 punto 3, invariante 5). No reescribe las notas del 2026-09-29.
 
