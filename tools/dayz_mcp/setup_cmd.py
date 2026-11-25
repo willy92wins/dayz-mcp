@@ -188,7 +188,7 @@ def _first_file_on_path(name: str) -> Path | None:
 
 
 def find_native_cli(role: str) -> Path | None:
-    """First native x64 ``ROLE.exe`` on the PATH or behind its ``ROLE.cmd`` shim."""
+    """First native x64 ``ROLE.exe`` on the PATH or behind its ``ROLE.cmd`` shim; for codex, also under ``node_modules\\@openai\\codex`` beside that shim, where npm leaves it."""
     expected = f"{role}.exe"
     candidates: list[Path] = []
     found_exe = _first_file_on_path(expected)
@@ -208,6 +208,12 @@ def find_native_cli(role: str) -> Path | None:
         )
         for match in pattern.finditer(shim_text):
             candidates.append(Path(match.group(0)))
+        if role == "codex":
+            npm_root = shim.parent / "node_modules" / "@openai" / "codex"
+            try:
+                candidates.extend(sorted(npm_root.rglob(expected)))
+            except OSError:
+                pass
     for candidate in candidates:
         if candidate.name.casefold() != expected.casefold():
             continue
