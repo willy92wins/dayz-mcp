@@ -114,6 +114,7 @@ DIAGNOSTIC_CHECKS = frozenset(
         "launchers",
         "native_bundle",
         "knowledge_pack",
+        "halves",
         "summary",
     }
 )
@@ -130,8 +131,8 @@ ProcessIdentitySource = Callable[[int], dict[str, object]]
 
 @dataclass(frozen=True)
 class DoctorSources:
-    claude_config: CommandSource
-    codex_config: CommandSource
+    claude_config: CommandSource | None
+    codex_config: CommandSource | None
     listener_pid: ListenerSource
     process_argv: ProcessArgvSource
     daemon_status: DaemonStatusSource
@@ -146,6 +147,9 @@ class DoctorSources:
     # disk. None (the default for injected sources) skips the check entirely, so a
     # synthetic diagnosis never opens the host's real registry.
     native_launcher_id: str | None = None
+    installed: bool = False
+    item_root: Path | None = None
+    wheel_version_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -274,10 +278,11 @@ def _read_daemon_status(
     return payload
 
 
-def default_sources(policy: AccreditedDaemonPolicy) -> DoctorSources:
+def default_sources(
+    policy: AccreditedDaemonPolicy, *, item: str | Path | None = None
+) -> DoctorSources:
     if type(policy) is not AccreditedDaemonPolicy:
         raise ValueError("invalid_daemon_policy")
-    codex = shutil.which("codex.cmd") or "codex.cmd"
     guard = NativeProcessGuard()
     from dayz_mcp.instance_context import (
         current_instance_token,
@@ -294,11 +299,74 @@ def default_sources(policy: AccreditedDaemonPolicy) -> DoctorSources:
             raise ValueError("daemon_policy_drift")
         return _read_daemon_status(policy)
 
-    return DoctorSources(
-        claude_config=lambda: _run_command(["claude", "mcp", "get", selected_name]),
-        codex_config=lambda: _run_command(
+    claude_config: CommandSource | None
+    codex_config: CommandSource | None
+    item_root: Path | None = None
+    wheel_version_path: Path | None = None
+    if installed:
+        import install_mcp
+
+        from dayz_mcp import setup_cmd
+
+        wheel_version_path = setup_cmd._wheel_version_path()
+        item_root = Path(item) if item is not None else setup_cmd.workshop_item_root()
+        manifest_payload: object = None
+        try:
+            manifest_payload = json.loads(
+                install_mcp.installer_cli_manifest_path().read_text(encoding="utf-8")
+            )
+        except (
+            install_mcp.InstallerContractError,
+            OSError,
+            UnicodeError,
+            ValueError,
+            KeyError,
+            TypeError,
+        ):
+            manifest_payload = None
+
+        def pinned_path(role: str, expected_name: str) -> str | None:
+            try:
+                entries = manifest_payload["entries"]  # type: ignore[index]
+                value = entries[role]["path"]  # type: ignore[index]
+            except (KeyError, TypeError):
+                return None
+            if not isinstance(value, str) or not os.path.isabs(value):
+                return None
+            candidate = Path(value)
+            if candidate.name.casefold() != expected_name:
+                return None
+            try:
+                if not candidate.is_file():
+                    return None
+            except OSError:
+                return None
+            return value
+
+        claude_path = pinned_path("CLAUDE", "claude.exe")
+        codex_path = pinned_path("CODEX", "codex.exe")
+        if claude_path is None:
+            claude_config = None
+        else:
+            claude_config = lambda claude_path=claude_path: _run_command(
+                [claude_path, "mcp", "get", selected_name]
+            )
+        if codex_path is None:
+            codex_config = None
+        else:
+            codex_config = lambda codex_path=codex_path: _run_command(
+                [codex_path, "mcp", "get", selected_name, "--json"]
+            )
+    else:
+        codex = shutil.which("codex.cmd") or "codex.cmd"
+        claude_config = lambda: _run_command(["claude", "mcp", "get", selected_name])
+        codex_config = lambda: _run_command(
             [codex, "mcp", "get", selected_name, "--json"]
-        ),
+        )
+
+    return DoctorSources(
+        claude_config=claude_config,
+        codex_config=codex_config,
         listener_pid=_listener_pid_resilient,
         process_argv=orphan_guard.command_argv_of,
         daemon_status=daemon_status,
@@ -310,6 +378,9 @@ def default_sources(policy: AccreditedDaemonPolicy) -> DoctorSources:
         knowledge_pack_dir=knowledge_pack_dir,
         knowledge_pack_manifest_path=default_manifest_path(knowledge_pack_dir),
         native_launcher_id=None if installed else "dayz-test-v1",
+        installed=installed,
+        item_root=item_root,
+        wheel_version_path=wheel_version_path,
     )
 
 
@@ -1182,6 +1253,241 @@ def _check_launchers(
                 )
 
 
+def _summarize(findings: list[dict[str, object]]) -> dict[str, object]:
+    findings.sort(
+        key=lambda item: (
+            str(item.get("code", "")),
+            str(item.get("path", "")),
+            int(item.get("pid", 0)),
+            str(item.get("platform", "")),
+        )
+    )
+    fail = sum(item.get("severity") == "FAIL" for item in findings)
+    warn = sum(item.get("severity") == "WARN" for item in findings)
+    return {
+        "ok": fail == 0,
+        "findings": findings,
+        "summary": {"fail": fail, "warn": warn},
+    }
+
+
+def _check_halves(
+    item_root: Path | None,
+    wheel_version_path: Path | None,
+    game_reason: str | None,
+    findings: list[dict[str, object]],
+) -> None:
+    from dayz_mcp import setup_cmd
+
+    item_remedy = "subscribe to the DayZ-MCP item in the Steam Workshop, let Steam download it, then run dayz-mcp setup --json again; or pass --item PATH"
+    wheel_remedy = "reinstall the dayz-mcp wheel of this release, then run dayz-mcp setup --json again"
+    item_version_remedy = "let Steam download the DayZ-MCP Workshop item of this release, then run dayz-mcp setup --json again"
+    pbo_path: Path | None = None
+    if item_root is None:
+        problem = _finding("WORKSHOP_ITEM_MISSING", remedy=item_remedy)
+        if setup_cmd.WORKSHOP_ITEM_ID != "":
+            problem["url"] = (
+                "https://steamcommunity.com/sharedfiles/filedetails/?id="
+                + setup_cmd.WORKSHOP_ITEM_ID
+            )
+        findings.append(problem)
+    else:
+        pbo_path = item_root / "Addons" / "DayZ_MCP.pbo"
+        try:
+            pbo_is_file = pbo_path.is_file()
+        except OSError:
+            pbo_is_file = False
+        if not pbo_is_file:
+            problem = _finding(
+                "WORKSHOP_ITEM_MISSING", path=str(item_root), remedy=item_remedy
+            )
+            if setup_cmd.WORKSHOP_ITEM_ID != "":
+                problem["url"] = (
+                    "https://steamcommunity.com/sharedfiles/filedetails/?id="
+                    + setup_cmd.WORKSHOP_ITEM_ID
+                )
+            findings.append(problem)
+
+    wheel_version: dict[str, object] | None = None
+    if wheel_version_path is None:
+        findings.append(
+            _finding("VERSION_JSON_MISSING", which="wheel", remedy=wheel_remedy)
+        )
+    else:
+        try:
+            wheel_exists = wheel_version_path.is_file()
+        except OSError:
+            wheel_exists = False
+        if not wheel_exists:
+            findings.append(
+                _finding(
+                    "VERSION_JSON_MISSING",
+                    which="wheel",
+                    path=str(wheel_version_path),
+                    remedy=wheel_remedy,
+                )
+            )
+        else:
+            wheel_version = setup_cmd._read_version_json(wheel_version_path)
+            if wheel_version is None:
+                findings.append(
+                    _finding(
+                        "VERSION_JSON_INVALID",
+                        which="wheel",
+                        path=str(wheel_version_path),
+                        remedy=wheel_remedy,
+                    )
+                )
+
+    item_version: dict[str, object] | None = None
+    if item_root is not None:
+        item_version_path = item_root / "VERSION.json"
+        try:
+            item_exists = item_version_path.is_file()
+        except OSError:
+            item_exists = False
+        if not item_exists:
+            findings.append(
+                _finding(
+                    "VERSION_JSON_MISSING",
+                    which="item",
+                    path=str(item_version_path),
+                    remedy=item_version_remedy,
+                )
+            )
+        else:
+            item_version = setup_cmd._read_version_json(item_version_path)
+            if item_version is None:
+                findings.append(
+                    _finding(
+                        "VERSION_JSON_INVALID",
+                        which="item",
+                        path=str(item_version_path),
+                        remedy=item_version_remedy,
+                    )
+                )
+
+    mismatch: dict[str, object] | None = None
+    if wheel_version is not None and item_version is not None and item_root is not None:
+        assert pbo_path is not None
+        try:
+            pbo_sha256 = hashlib.sha256(pbo_path.read_bytes()).hexdigest()
+        except OSError:
+            try:
+                pbo_is_file = pbo_path.is_file()
+            except OSError:
+                pbo_is_file = False
+            if pbo_is_file:
+                findings.append(
+                    _finding(
+                        "WORKSHOP_ITEM_UNREADABLE",
+                        path=str(pbo_path),
+                        remedy="close whatever holds DayZ_MCP.pbo open (Steam may still be updating the item), then run dayz-mcp setup --json again",
+                    )
+                )
+        else:
+            if pbo_sha256 != wheel_version.get("pbo_sha256"):
+                item_text = str(item_version.get("version"))
+                wheel_text = str(wheel_version.get("version"))
+                direction = setup_cmd._compare_versions(item_text, wheel_text)
+                if direction == "item_ahead":
+                    remedy = (
+                        f"close the game, install the dayz-mcp wheel of release {item_text} and run dayz-mcp setup --json, "
+                        "then restart the MCP client and start the game"
+                    )
+                elif direction == "item_behind":
+                    remedy = "close the game, let Steam update the DayZ-MCP Workshop item, then restart the MCP client and start the game"
+                else:
+                    remedy = "close the game, install the dayz-mcp wheel and the Workshop item of the same release and run dayz-mcp setup --json, then restart the MCP client and start the game"
+                mismatch = _finding(
+                    "HALVES_MISMATCH",
+                    direction=direction,
+                    item_version=item_text,
+                    wheel_version=wheel_text,
+                    remedy=remedy,
+                )
+                findings.append(mismatch)
+
+    if game_reason is not None:
+        if mismatch is not None:
+            mismatch["game_reason"] = game_reason
+        else:
+            findings.append(
+                _finding(
+                    "HALVES_MISMATCH",
+                    direction="game_differs",
+                    game_reason=game_reason,
+                    remedy="close the game and start it again with the -mod= and -profiles= arguments that dayz-mcp setup --json prints",
+                )
+            )
+
+
+def _read_registration_command(platform: str, server_name: str) -> str | None:
+    import tomllib
+
+    try:
+        if platform == "claude":
+            payload = json.loads(
+                (Path.home() / ".claude.json").read_text(encoding="utf-8")
+            )
+            servers = payload.get("mcpServers") if isinstance(payload, dict) else None
+        else:
+            with (Path.home() / ".codex" / "config.toml").open("rb") as handle:
+                payload = tomllib.load(handle)
+            servers = payload.get("mcp_servers") if isinstance(payload, dict) else None
+    except (OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError):
+        return None
+    if not isinstance(servers, dict):
+        return None
+    entry = servers.get(server_name)
+    if not isinstance(entry, dict):
+        return None
+    command = entry.get("command")
+    return command if isinstance(command, str) else None
+
+
+def _points_elsewhere(command: str) -> bool:
+    try:
+        resolved_command = os.path.normcase(
+            os.path.normpath(str(Path(command).resolve()))
+        )
+        resolved_executable = os.path.normcase(
+            os.path.normpath(str(Path(sys.executable).resolve()))
+        )
+    except OSError:
+        return True
+    return resolved_command != resolved_executable
+
+
+def _registration_elsewhere_payload(
+    *, item: str | Path | None
+) -> dict[str, object] | None:
+    from dayz_mcp import setup_cmd
+    from dayz_mcp.instance_context import current_instance_token, registration_name
+
+    server_name = registration_name(current_instance_token())
+    findings: list[dict[str, object]] = []
+    for platform in ("claude", "codex"):
+        command = _read_registration_command(platform, server_name)
+        if command is None:
+            continue
+        if _points_elsewhere(command):
+            findings.append(
+                _finding(
+                    "REGISTRATION_POINTS_ELSEWHERE",
+                    platform=platform,
+                    command=command,
+                    remedy="dayz-mcp setup --json",
+                )
+            )
+    if not findings:
+        return None
+    wheel_version_path = setup_cmd._wheel_version_path()
+    item_root = Path(item) if item is not None else setup_cmd.workshop_item_root()
+    _check_halves(item_root, wheel_version_path, None, findings)
+    return _summarize(findings)
+
+
 def _diagnose(
     sources: DoctorSources,
     *,
@@ -1198,6 +1504,15 @@ def _diagnose(
         ("claude", sources.claude_config),
         ("codex", sources.codex_config),
     ):
+        if source is None and sources.installed:
+            findings.append(
+                _finding(
+                    "CLI_NOT_PINNED",
+                    platform=platform,
+                    remedy="dayz-mcp setup --json",
+                )
+            )
+            continue
         try:
             registration = _parse_registration(
                 platform, source(), sources.expected_command
@@ -1258,13 +1573,22 @@ def _diagnose(
             )
             continue
         if pid is None:
-            findings.append(
-                _finding(
-                    "DAEMON_STATUS_UNREADABLE",
-                    scope="listener",
-                    port=registration.port,
+            if sources.installed:
+                findings.append(
+                    _finding(
+                        "DAEMON_NOT_RUNNING",
+                        severity="INFO",
+                        port=registration.port,
+                    )
                 )
-            )
+            else:
+                findings.append(
+                    _finding(
+                        "DAEMON_STATUS_UNREADABLE",
+                        scope="listener",
+                        port=registration.port,
+                    )
+                )
         else:
             listeners[registration.port] = (int(pid), registration)
 
@@ -1272,6 +1596,12 @@ def _diagnose(
     if len(listener_pids) > 1:
         findings.append(_finding("MULTIPLE_LISTENERS", pids=listener_pids))
     step[0] = "daemon_status"
+    game_reason: str | None = None
+    bridge_readiness = None
+    if sources.installed:
+        from dayz_mcp import bridge_readiness as _bridge_readiness
+
+        bridge_readiness = _bridge_readiness
     for port, (pid, registration) in sorted(listeners.items()):
         try:
             argv = sources.process_argv(pid)
@@ -1320,6 +1650,10 @@ def _diagnose(
         if not isinstance(status, dict):
             findings.append(_finding("DAEMON_STATUS_UNREADABLE", port=port, pid=pid))
             continue
+        if bridge_readiness is not None:
+            reason = bridge_readiness.compute_bridge_ready(status)["reason"]
+            if reason in ("version_mismatch", "arg_contract_mismatch"):
+                game_reason = reason
         status_findings = len(findings)
         _check_coordination(status, findings, port)
         _check_credential_recovery(status, findings, port)
@@ -1363,23 +1697,14 @@ def _diagnose(
     _check_native_bundle_closure(sources, findings)
     step[0] = "knowledge_pack"
     _check_knowledge_pack(sources, registrations, findings)
+    if sources.installed:
+        step[0] = "halves"
+        _check_halves(
+            sources.item_root, sources.wheel_version_path, game_reason, findings
+        )
 
     step[0] = "summary"
-    findings.sort(
-        key=lambda item: (
-            str(item.get("code", "")),
-            str(item.get("path", "")),
-            int(item.get("pid", 0)),
-            str(item.get("platform", "")),
-        )
-    )
-    fail = sum(item.get("severity") == "FAIL" for item in findings)
-    warn = sum(item.get("severity") == "WARN" for item in findings)
-    return {
-        "ok": fail == 0,
-        "findings": findings,
-        "summary": {"fail": fail, "warn": warn},
-    }
+    return _summarize(findings)
 
 
 def _diagnostic_failure(check: str, error: BaseException) -> dict[str, object]:
@@ -1410,6 +1735,7 @@ def execute(
     *,
     require_clean: bool = False,
     policy: AccreditedDaemonPolicy | None = None,
+    item: str | Path | None = None,
 ) -> tuple[dict[str, object], int]:
     step = ["daemon_policy"]
     try:
@@ -1417,7 +1743,7 @@ def execute(
             if type(policy) is not AccreditedDaemonPolicy:
                 raise ValueError("missing_daemon_policy")
             step[0] = "sources"
-            sources = default_sources(policy)
+            sources = default_sources(policy, item=item)
         payload = _diagnose(sources, require_clean=require_clean, step=step)
     except Exception as error:
         return _diagnostic_failure(step[0], error), 2
@@ -1475,6 +1801,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--instance", default="")
     parser.add_argument("--game-path", default="")
+    parser.add_argument("--item", default=None)
     raw = list(sys.argv[1:] if argv is None else argv)
     args = None
     selection_error: InstanceSelectionError | None = None
@@ -1501,12 +1828,28 @@ def main(argv: list[str] | None = None) -> int:
     try:
         policy = daemon_policy.load_daemon_policy(args.daemon_policy)
     except Exception as error:
-        payload, exit_code = _diagnostic_failure("daemon_policy", error), 2
+        elsewhere_payload: dict[str, object] | None = None
+        if isinstance(error, host_config.HostConfigError) and (
+            installed_venv_root(__file__) is not None
+        ):
+            try:
+                elsewhere_payload = _registration_elsewhere_payload(item=args.item)
+            except Exception:
+                elsewhere_payload = None
+        if elsewhere_payload is not None:
+            payload, exit_code = elsewhere_payload, 1
+        else:
+            payload, exit_code = _diagnostic_failure("daemon_policy", error), 2
     else:
         # execute() turns every exception into its own diagnostic_failure.
-        payload, exit_code = execute(
-            require_clean=args.require_clean, policy=policy
-        )
+        if args.item is None:
+            payload, exit_code = execute(
+                require_clean=args.require_clean, policy=policy
+            )
+        else:
+            payload, exit_code = execute(
+                require_clean=args.require_clean, policy=policy, item=args.item
+            )
     print(render_json(payload) if args.json else render_human(payload))
     return exit_code
 
