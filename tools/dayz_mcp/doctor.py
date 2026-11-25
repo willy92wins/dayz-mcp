@@ -25,6 +25,7 @@ from dayz_mcp.knowledge_pack import (
     resolve_pack_dir,
     target_game_build,
 )
+from dayz_mcp.install_layout import installed_venv_root
 from dayz_mcp.native_process_guard import NativeProcessGuard
 from dayz_mcp.process_lifecycle import (
     PREPRUNE_BACKUP_SLOTS,
@@ -285,6 +286,7 @@ def default_sources(policy: AccreditedDaemonPolicy) -> DoctorSources:
 
     selected_name = registration_name(current_instance_token())
     knowledge_pack_dir = resolve_pack_dir()
+    installed = installed_venv_root(__file__) is not None
 
     def daemon_status(port: int, keyfile: str) -> dict[str, object]:
         policy.revalidate()
@@ -303,11 +305,11 @@ def default_sources(policy: AccreditedDaemonPolicy) -> DoctorSources:
         process_snapshot=orphan_guard.snapshot_processes_by_name,
         process_identity=guard.snapshot,
         runtime_paths=RuntimePaths.for_token(current_instance_token()),
-        scan_roots=(Path(__file__).resolve().parents[3],),
+        scan_roots=() if installed else (Path(__file__).resolve().parents[3],),
         expected_command=sys.executable,
         knowledge_pack_dir=knowledge_pack_dir,
         knowledge_pack_manifest_path=default_manifest_path(knowledge_pack_dir),
-        native_launcher_id="dayz-test-v1",
+        native_launcher_id=None if installed else "dayz-test-v1",
     )
 
 

@@ -18,3 +18,9 @@ dependencies = [
 [tool.setuptools]
 packages = ["dayz_mcp"]
 py-modules = ["mcp_capture"]
+
+[tool.setuptools.package-data]
+dayz_mcp = ["playbooks/*.toml", "playbooks/*.py", "playbooks/*.md", "playbooks/fixtures/*/*.json", "VERSION.json"]
+
+[tool.setuptools.data-files]
+"Lib/site-packages" = ["mcp-grab.ps1"]

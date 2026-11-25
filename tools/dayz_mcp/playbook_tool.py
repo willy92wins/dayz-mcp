@@ -23,9 +23,19 @@ from typing import Any
 
 from mcp.server.fastmcp.exceptions import ToolError
 
+from dayz_mcp.install_layout import installed_venv_root
+
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
-PLAYBOOKS_DIR = Path(__file__).resolve().parents[2] / "playbooks"
+
+
+def _playbooks_dir(module_file: str | Path) -> Path:
+    if installed_venv_root(module_file) is not None:
+        return Path(module_file).resolve().parent / "playbooks"
+    return Path(module_file).resolve().parents[2] / "playbooks"
+
+
+PLAYBOOKS_DIR = _playbooks_dir(__file__)
 DRAFT_NOTE = "DRAFT playbook: verdict is advisory"
 CERTIFIED_REASON = "no_frozen_registry"
 MAX_PLAYBOOK_STEPS = 32
