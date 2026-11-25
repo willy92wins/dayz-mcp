@@ -1450,6 +1450,24 @@ class MCPHologram
 	float max_m;
 };
 
+// b951: one object the client's world-target search returned.
+class MCPSearchHit
+{
+	string type;
+	float distance;
+};
+
+// b951: what action_use's client search saw when it found no target.
+class MCPActionSearch
+{
+	ref array<float> center;
+	ref array<float> player_pos;
+	float radius;
+	int scanned;
+	bool truncated;
+	ref array<ref MCPSearchHit> nearest;
+};
+
 class MCPChatLine
 {
 	int seq;
@@ -1646,6 +1664,9 @@ class MCPResult
 	// action_use / action_hold (204e): the hologram of a deploy refused with
 	// hologram_colliding. Unassigned otherwise.
 	ref MCPHologram hologram;
+	// action_use / action_hold (b951): what the client's world-target search
+	// saw on target_not_found. Unassigned otherwise.
+	ref MCPActionSearch target_search;
 	// action_use_door / action_use_component. Same default-0 rule as
 	// MCPArgs.door_index: 0 is a valid door and a valid component, so
 	// the command name, not these fields, is what turns the mode on.

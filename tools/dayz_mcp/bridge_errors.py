@@ -699,6 +699,10 @@ _HOLOGRAM_CHECKS = (
     "is_base_viable",
     "height_placement_check",
 )
+# action_use's and action_hold's world-target search (b951): hit type pattern
+# and nearest-list cap accepted from result.target_search.
+_ACTION_SEARCH_TYPE_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
+_ACTION_SEARCH_NEAREST_MAX = 8
 
 
 def _is_finite_number(value: object) -> bool:
@@ -726,6 +730,49 @@ def _hologram_colliding_detail(result: dict[str, Any]) -> str:
         value = report.get(key)
         if _is_finite_number(value) and float(value) >= 0.0:
             pairs.append(f"hologram_{key}={float(value)!r}")
+    if not pairs:
+        return ""
+    return "observed=" + " ".join(pairs)
+
+
+def _target_not_found_detail(result: dict[str, Any]) -> str:
+    report = result.get("target_search")
+    if not isinstance(report, dict):
+        return ""
+    pairs: list[str] = []
+    for key, label in (("center", "search_center"), ("player_pos", "player_pos")):
+        pos = report.get(key)
+        if isinstance(pos, list) and len(pos) == 3 and all(_is_finite_number(v) for v in pos):
+            pairs.append(f"{label}=" + ",".join(repr(float(v)) for v in pos))
+    radius = report.get("radius")
+    if _is_finite_number(radius) and float(radius) >= 0.0:
+        pairs.append(f"search_radius={float(radius)!r}")
+    scanned = report.get("scanned")
+    if isinstance(scanned, int) and not isinstance(scanned, bool) and scanned >= 0:
+        pairs.append(f"scanned={scanned}")
+    nearest_overflow = False
+    nearest = report.get("nearest")
+    if isinstance(nearest, list):
+        items: list[str] = []
+        for entry in nearest:
+            if not isinstance(entry, dict):
+                continue
+            hit_type = entry.get("type")
+            distance = entry.get("distance")
+            if (
+                isinstance(hit_type, str)
+                and _ACTION_SEARCH_TYPE_RE.fullmatch(hit_type) is not None
+                and _is_finite_number(distance)
+                and float(distance) >= 0.0
+            ):
+                if len(items) < _ACTION_SEARCH_NEAREST_MAX:
+                    items.append(f"{hit_type}@{float(distance)!r}")
+                else:
+                    nearest_overflow = True
+        if items:
+            pairs.append("nearest=" + ",".join(items))
+    if report.get("truncated") is True or nearest_overflow:
+        pairs.append("nearest_truncated=1")
     if not pairs:
         return ""
     return "observed=" + " ".join(pairs)
@@ -911,7 +958,9 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
 
     action_use and action_hold are the tenth: a deploy's hologram_colliding
     carries observed= with hologram_checks, hologram_pos, hologram_min_m and
-    hologram_max_m (204e).
+    hologram_max_m (204e), and a world target's target_not_found carries
+    observed= with search_center, player_pos, search_radius, scanned, nearest
+    and nearest_truncated (b951).
 
     world_spawn's vehicle_eject_failed carries the retained object_id so an
     MCP caller can retry cleanup after its unsupported-lifetime rollback.
@@ -993,6 +1042,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _ai_emote_detail(result)
     if cmd in _HOLOGRAM_COMMANDS and str(result.get("error") or "") == "hologram_colliding":
         return _hologram_colliding_detail(result)
+    if cmd in _HOLOGRAM_COMMANDS and str(result.get("error") or "") == "target_not_found":
+        return _target_not_found_detail(result)
     if cmd not in _UI_ECHO_VERBS:
         return ""
     parts: list[str] = []
@@ -1041,7 +1092,8 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # ai_emote, whose ok=false bridge answers carry observed=emote_pending= (plus
     # emote_state= when rejected or timed_out),
     # action_use and action_hold, whose deploy's hologram_colliding carries
-    # observed= with the hologram the client read,
+    # observed= with the hologram the client read and whose target_not_found
+    # carries observed= with what the client's search saw (b951),
     # ai_group_spawn, whose refusals carry field, allowed, args_read and
     # created from the ai_group report (living/limit on ai_limit_reached),
     # ai_group_order, whose bad_args carries only field and allowed,
