@@ -4,6 +4,10 @@ The PBO must carry the build marker tools/pack-addon.ps1 writes (mcp_build.json)
 and the commit it names must be the git_sha that VERSION.json records; anything
 else is refused (fb-20260819-024951-e307). tools/dev/pbo_provenance.py owns the
 PBO layout and the marker contract.
+
+pip builds the wheel on every pass and it does not come out byte for byte the
+same, so the wheel line in the requirements changes from one pass to another.
+With the same inputs, the other files come out the same.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+import build_wheel
 from dayz_mcp.dayz_tools_paths import tools_root_candidates
 
 
@@ -37,6 +42,10 @@ BIKEY_ASSET_NAME = "DayZ_MCP.bikey"
 MOD_CPP_ASSET_NAME = "mod.cpp"
 VERSION_ASSET_NAME = "VERSION.json"
 CHECKSUM_ASSET_NAME = "SHA256SUMS.txt"
+REQUIREMENTS_LOCK_NAME = "requirements.lock.txt"
+REQUIREMENTS_ASSET_NAME = "dayz-mcp-requirements.txt"
+WHEEL_PROJECT = "dayz-mcp-tools"
+RELEASE_DOWNLOAD_URL = "https://github.com/willy92wins/dayz-mcp/releases/download"
 RELEASE_DIR = TOOLS_DIR / "release"
 DSCHECK_EXE_RELATIVE = Path("Bin") / "DsUtils" / "DSCheckSignatures.exe"
 
@@ -220,6 +229,13 @@ def _version_bytes(payload: dict[str, str]) -> bytes:
     ).encode("utf-8")
 
 
+def build_release_wheel(version_bytes: bytes, work_dir: Path) -> Path:
+    stage = build_wheel.stage_wheel_tree(
+        TOOLS_DIR, REPO_ROOT / "playbooks", work_dir / "stage", version_bytes
+    )
+    return build_wheel.build_wheel(stage, work_dir / "wheelhouse")
+
+
 def _bisign_path_for(pbo_path: Path) -> Path:
     return Path(f"{pbo_path}.DayZ_MCP.bisign")
 
@@ -345,7 +361,7 @@ def stage_release(
     git_sha_fn: GitQuery = read_git_sha,
     built_utc_fn: UtcClock = current_built_utc,
     signature_check_fn: SignatureCheck = run_signature_check,
-) -> tuple[Path, Path, Path]:
+) -> tuple[Path, Path, Path, Path, Path]:
     pbo_path = Path(pbo_path)
     out_dir = Path(out_dir)
     repo_root = Path(repo_root)
@@ -438,9 +454,51 @@ def stage_release(
         }
     )
 
+    lock_path = release_dir / REQUIREMENTS_LOCK_NAME
+    if _missing_or_empty(lock_path):
+        raise ReleaseRefusal(
+            "requirements_lock_missing",
+            f"requirements lock is missing or empty: {lock_path}",
+            "restore tools/release/requirements.lock.txt (docs/RELEASE.md, Updating the dependency lock)",
+        )
+    lock_text = lock_path.read_text(encoding="utf-8")
+
+    try:
+        with tempfile.TemporaryDirectory() as wheel_temporary:
+            wheel_path_in_temp = build_release_wheel(
+                version_bytes, Path(wheel_temporary)
+            )
+            wheel_name = wheel_path_in_temp.name
+            wheel_bytes = wheel_path_in_temp.read_bytes()
+    except RuntimeError as error:
+        raise ReleaseRefusal(
+            "wheel_build_failed",
+            str(error),
+            "check that pip in this Python can build tools/ (pip downloads setuptools==84.0.0 for the build), then rerun",
+        ) from error
+
+    expected_wheel_name = f"dayz_mcp_tools-{version}-py3-none-any.whl"
+    if wheel_name != expected_wheel_name:
+        raise ReleaseRefusal(
+            "wheel_name_unexpected",
+            f"wheel is named {wheel_name}, expected {expected_wheel_name}",
+            "build the wheel from tools/pyproject.toml at this commit",
+        )
+
+    requirements_text = lock_text.replace("\r\n", "\n").replace("\r", "\n")
+    if not requirements_text.endswith("\n"):
+        requirements_text += "\n"
+    requirements_text += (
+        f"{WHEEL_PROJECT} @ {RELEASE_DOWNLOAD_URL}/v{version}/{wheel_name}"
+        f" --hash=sha256:{_sha256(wheel_bytes)}\n"
+    )
+    requirements_bytes = requirements_text.encode("utf-8")
+
     out_dir.mkdir(parents=True, exist_ok=True)
     zip_path = out_dir / f"DayZ_MCP-v{version}-addon.zip"
     version_path = out_dir / VERSION_ASSET_NAME
+    wheel_path = out_dir / wheel_name
+    requirements_path = out_dir / REQUIREMENTS_ASSET_NAME
     checksums_path = out_dir / CHECKSUM_ASSET_NAME
 
     entry_bytes = {
@@ -466,6 +524,8 @@ def stage_release(
             )
 
     version_path.write_bytes(version_bytes)
+    wheel_path.write_bytes(wheel_bytes)
+    requirements_path.write_bytes(requirements_bytes)
     content_bytes = {
         PBO_ASSET_NAME: pbo_bytes,
         BISIGN_ASSET_NAME: bisign_bytes,
@@ -478,8 +538,10 @@ def stage_release(
         if name == VERSION_ASSET_NAME:
             checksum_lines += f"{_sha256(zip_path.read_bytes())}  {zip_path.name}\n"
         checksum_lines += f"{_sha256(content_bytes[name])}  {name}\n"
+    checksum_lines += f"{_sha256(wheel_bytes)}  {wheel_name}\n"
+    checksum_lines += f"{_sha256(requirements_bytes)}  {REQUIREMENTS_ASSET_NAME}\n"
     checksums_path.write_text(checksum_lines, encoding="ascii", newline="\n")
-    return zip_path, version_path, checksums_path
+    return zip_path, version_path, wheel_path, requirements_path, checksums_path
 
 
 def _parser() -> argparse.ArgumentParser:

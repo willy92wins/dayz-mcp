@@ -2,7 +2,7 @@
 
 This runbook publishes a thin GitHub Release containing a PBO built on a Windows
 host with DayZ Tools. `make_release.py` does not run AddonBuilder; it accepts an
-already-built PBO and stages three verifiable release assets.
+already-built PBO and stages five verifiable release assets.
 
 ## 1. Bump and commit the release version
 
@@ -102,6 +102,14 @@ missing. It refuses with `bisign_wrong_key` when the `.bisign` does not start
 with the `.bikey` bytes. It refuses with `signature_check_unavailable` when
 `DSCheckSignatures` cannot be run. It refuses with `bisign_invalid` when
 `DSCheckSignatures` does not report exactly one OK signature for the PBO.
+It refuses with `requirements_lock_missing` when
+`tools/release/requirements.lock.txt` is missing or empty. It refuses with
+`wheel_build_failed` when pip cannot build the wheel. It refuses with
+`wheel_name_unexpected` when the built wheel is not named
+`dayz_mcp_tools-X.Y.Z-py3-none-any.whl`.
+
+`make_release.py` also builds the wheel with the pip of the venv, and for that
+it needs network, because pip downloads `setuptools==84.0.0`.
 
 The command creates exactly these publishable assets:
 
@@ -111,7 +119,12 @@ The command creates exactly these publishable assets:
   `@DayZ_MCP/Keys/DayZ_MCP.bikey`, `@DayZ_MCP/mod.cpp` and
   `@DayZ_MCP/VERSION.json`;
 - `dist/VERSION.json`;
-- `dist/SHA256SUMS.txt`, with six lines.
+- `dist/dayz_mcp_tools-X.Y.Z-py3-none-any.whl`, with the release
+  `VERSION.json` inside it;
+- `dist/dayz-mcp-requirements.txt`, which is the lock in
+  `tools/release/requirements.lock.txt` plus one line that pins the wheel by
+  its release URL and its sha256;
+- `dist/SHA256SUMS.txt`, with eight lines.
 
 `VERSION.json` records `version`, `bridge_version`, `git_sha`, `pbo_sha256`, and
 `built_utc`. The bridge value comes from
@@ -119,15 +132,17 @@ The command creates exactly these publishable assets:
 
 ## 4. Recompute and verify every checksum
 
-`SHA256SUMS.txt` includes the four files inside the ZIP, the ZIP itself, and
-`VERSION.json`. This check extracts the ZIP and recomputes all six hashes; it
-does not trust values returned by the staging code.
+`SHA256SUMS.txt` includes the four files inside the ZIP, the ZIP itself,
+`VERSION.json`, the wheel and `dayz-mcp-requirements.txt`. This check extracts
+the ZIP and recomputes all eight hashes; it does not trust values returned by
+the staging code.
 
 [EXACT]
 
 ```powershell
 $Dist = (Resolve-Path .\dist).Path
 $ZipName = "DayZ_MCP-v$Version-addon.zip"
+$WheelName = "dayz_mcp_tools-$Version-py3-none-any.whl"
 $VerifyDir = Join-Path ([System.IO.Path]::GetTempPath()) `
   ("dayz-mcp-release-verify-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $VerifyDir | Out-Null
@@ -155,6 +170,8 @@ $Targets = [ordered]@{
   "mod.cpp" = $ExtractedModCpp
   $ZipName = Join-Path $Dist $ZipName
   "VERSION.json" = Join-Path $Dist "VERSION.json"
+  $WheelName = Join-Path $Dist $WheelName
+  "dayz-mcp-requirements.txt" = Join-Path $Dist "dayz-mcp-requirements.txt"
 }
 $Expected = @{}
 foreach ($Line in Get-Content -LiteralPath (Join-Path $Dist "SHA256SUMS.txt")) {
@@ -166,7 +183,7 @@ foreach ($Line in Get-Content -LiteralPath (Join-Path $Dist "SHA256SUMS.txt")) {
   }
   $Expected[$Matches.name] = $Matches.sha
 }
-if ($Expected.Count -ne 6) { throw "SHA256SUMS must contain exactly six entries" }
+if ($Expected.Count -ne 8) { throw "SHA256SUMS must contain exactly eight entries" }
 
 foreach ($AssetName in $Targets.Keys) {
   if (-not $Expected.ContainsKey($AssetName)) {
@@ -180,6 +197,40 @@ foreach ($AssetName in $Targets.Keys) {
 if ((Get-FileHash -LiteralPath $ExtractedVersion -Algorithm SHA256).Hash -ne
     (Get-FileHash -LiteralPath (Join-Path $Dist "VERSION.json") -Algorithm SHA256).Hash) {
   throw "Extracted VERSION.json does not match dist VERSION.json"
+}
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$WheelArchive = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $Dist $WheelName))
+try {
+  $WheelVersionEntry = $WheelArchive.GetEntry("dayz_mcp/VERSION.json")
+  if (-not $WheelVersionEntry) {
+    throw "Wheel is missing dayz_mcp/VERSION.json"
+  }
+  $WheelVersionStream = $WheelVersionEntry.Open()
+  try {
+    $WheelVersionMemory = New-Object System.IO.MemoryStream
+    $WheelVersionStream.CopyTo($WheelVersionMemory)
+    $WheelVersionBytes = $WheelVersionMemory.ToArray()
+  } finally {
+    $WheelVersionStream.Dispose()
+  }
+} finally {
+  $WheelArchive.Dispose()
+}
+$DistVersionBytes = [System.IO.File]::ReadAllBytes((Join-Path $Dist "VERSION.json"))
+if (-not [System.Linq.Enumerable]::SequenceEqual([byte[]]$WheelVersionBytes, [byte[]]$DistVersionBytes)) {
+  throw "Wheel dayz_mcp/VERSION.json does not match dist VERSION.json"
+}
+$RequirementsLines = @(Get-Content -LiteralPath (Join-Path $Dist "dayz-mcp-requirements.txt"))
+if ($RequirementsLines.Count -eq 0) {
+  throw "dayz-mcp-requirements.txt is empty"
+}
+$WheelLineStarts = @($RequirementsLines | Where-Object { $_.StartsWith("dayz-mcp-tools") })
+if ($WheelLineStarts.Count -ne 1) {
+  throw "dayz-mcp-requirements.txt must have exactly one line starting with dayz-mcp-tools"
+}
+$ExpectedWheelLine = "dayz-mcp-tools @ https://github.com/willy92wins/dayz-mcp/releases/download/v$Version/$WheelName --hash=sha256:$($Expected[$WheelName])"
+if ($RequirementsLines[-1] -ne $ExpectedWheelLine) {
+  throw "Last line of dayz-mcp-requirements.txt is not the wheel line for $WheelName"
 }
 "SHA256SUMS verified"
 ```
@@ -325,7 +376,7 @@ evidence before the tag:
 ## 6. Tag and create the GitHub Release
 
 Create the tag at the clean commit recorded in `VERSION.json`, push that tag, and
-require GitHub CLI to find the remote tag before publishing. Upload only the three
+require GitHub CLI to find the remote tag before publishing. Upload only the five
 asset names above.
 
 [EXACT]
@@ -339,6 +390,8 @@ git push origin "v$Version"
 gh release create "v$Version" `
   ".\dist\DayZ_MCP-v$Version-addon.zip" `
   ".\dist\VERSION.json" `
+  ".\dist\dayz_mcp_tools-$Version-py3-none-any.whl" `
+  ".\dist\dayz-mcp-requirements.txt" `
   ".\dist\SHA256SUMS.txt" `
   --verify-tag `
   --title "DayZ-MCP v$Version" `
@@ -359,7 +412,9 @@ $PublishedNames = @($Release.assets | ForEach-Object { $_.name } | Sort-Object)
 $RequiredNames = @(
   "DayZ_MCP-v$Version-addon.zip",
   "SHA256SUMS.txt",
-  "VERSION.json"
+  "VERSION.json",
+  "dayz_mcp_tools-$Version-py3-none-any.whl",
+  "dayz-mcp-requirements.txt"
 ) | Sort-Object
 if (Compare-Object $PublishedNames $RequiredNames) {
   throw "Published release asset set mismatch"
@@ -376,6 +431,31 @@ gh release download "v$Version" --dir $DownloadDir
 $DownloadedManifest = Get-Content -Raw (Join-Path $DownloadDir "VERSION.json") | ConvertFrom-Json
 if ((git rev-list -n 1 "v$Version") -ne $DownloadedManifest.git_sha) {
   throw "Published manifest does not identify the tagged commit"
+}
+```
+
+Install the published release in a new venv, in a new temporary folder, from
+the downloaded files only:
+
+[EXACT]
+
+```powershell
+uv python install 3.14 --no-bin --no-registry
+if ($LASTEXITCODE -ne 0) { throw "uv python install 3.14 failed" }
+$ManagedPython = uv python find --managed-python 3.14
+if ($LASTEXITCODE -ne 0) { throw "uv python find --managed-python 3.14 failed" }
+$ManagedPython = ([string]$ManagedPython).Trim()
+$InstallDir = Join-Path ([System.IO.Path]::GetTempPath()) `
+  ("dayz-mcp-release-install-" + [guid]::NewGuid().ToString("N"))
+& $ManagedPython -m venv --without-pip $InstallDir
+if ($LASTEXITCODE -ne 0) { throw "Creating the release install venv failed" }
+$InstallPython = Join-Path $InstallDir "Scripts\python.exe"
+uv pip install --python $InstallPython --link-mode=copy --require-hashes -r (Join-Path $DownloadDir "dayz-mcp-requirements.txt")
+if ($LASTEXITCODE -ne 0) { throw "Installing the published release failed" }
+$InstalledVersionBytes = [System.IO.File]::ReadAllBytes((Join-Path $InstallDir "Lib\site-packages\dayz_mcp\VERSION.json"))
+$DownloadedVersionBytes = [System.IO.File]::ReadAllBytes((Join-Path $DownloadDir "VERSION.json"))
+if (-not [System.Linq.Enumerable]::SequenceEqual([byte[]]$InstalledVersionBytes, [byte[]]$DownloadedVersionBytes)) {
+  throw "Installed dayz_mcp/VERSION.json does not match the downloaded VERSION.json"
 }
 ```
 
@@ -411,6 +491,21 @@ Publisher from DayZ Tools at that `@DayZ_MCP` folder itself; pointed at its
 `Addons` folder, the Publisher fails without uploading anything. Never publish
 the build folder. Use the Publisher because SteamCMD with the owner's account
 closes the owner's Steam client session.
+
+## Updating the dependency lock
+
+Rebuild the lock when `tools/requirements-mcp.txt` changes, or to raise the
+dependencies. From the repository root:
+
+[EXACT]
+
+```powershell
+uv pip compile tools/requirements-mcp.txt --generate-hashes --python-platform x86_64-pc-windows-msvc --python-version 3.14 -o tools/release/requirements.lock.txt
+```
+
+The lock is for the Python 3.14 that the install recipe installs.
+`tools/tests/test_packaging_declarations.py` checks that the lock pins the
+same versions as `tools/requirements-mcp.txt`.
 
 ## Rotating the signing key
 
