@@ -384,6 +384,43 @@ class SetupCmdTest(unittest.TestCase):
         self.assertEqual(manifest.entries["CLAUDE"].path, self.claude_exe.resolve())
         self.assertEqual(manifest.entries["CODEX"].path, self.codex_exe.resolve())
 
+    def test_good_case_finds_codex_behind_the_npm_shim(self) -> None:
+        npm_dir = self.base / "npm"
+        npm_dir.mkdir()
+        shim = npm_dir / "codex.cmd"
+        shim.write_text(
+            "@echo off\n"
+            'node "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\n',
+            encoding="utf-8",
+        )
+        codex_exe = (
+            npm_dir
+            / "node_modules"
+            / "@openai"
+            / "codex"
+            / "node_modules"
+            / "@openai"
+            / "codex-win32-x64"
+            / "vendor"
+            / "x86_64-pc-windows-msvc"
+            / "bin"
+            / "codex.exe"
+        )
+        codex_exe.parent.mkdir(parents=True)
+        write_fake_x64_pe(codex_exe)
+        args = ["--json", "--claude-exe", str(self.claude_exe)]
+        with mock.patch.dict(os.environ, {"PATH": str(npm_dir)}):
+            code, payload, text = self.run_setup(args)
+        expected = self.expected_success()
+        self.assertEqual(code, 0)
+        self.assertEqual(payload, expected)
+        self.assertEqual(text, json.dumps(expected, sort_keys=True) + "\n")
+        manifest = install_mcp.load_installer_cli_manifest(
+            install_mcp.installer_cli_manifest_path()
+        )
+        self.assertEqual(manifest.entries["CLAUDE"].path, self.claude_exe.resolve())
+        self.assertEqual(manifest.entries["CODEX"].path, codex_exe.resolve())
+
     def test_good_case_writes_the_literal_config_bytes(self) -> None:
         code, _payload, _text = self.run_setup(self.good_args())
         self.assertEqual(code, 0)
@@ -950,6 +987,130 @@ class FindNativeCliTest(unittest.TestCase):
         path_value = os.pathsep.join(str(path_dir) for path_dir in path_dirs)
         with mock.patch.dict(os.environ, {"PATH": path_value}):
             return setup_cmd.find_native_cli(role)
+
+    def _npm_dirs(self, name: str = "npm") -> tuple[Path, Path]:
+        npm_dir = self.base / name
+        npm_dir.mkdir(parents=True)
+        shim = npm_dir / "codex.cmd"
+        shim.write_text(
+            "@echo off\n"
+            'node "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\n',
+            encoding="utf-8",
+        )
+        return npm_dir, npm_dir / "node_modules" / "@openai" / "codex"
+
+    def _write_exe(self, exe: Path) -> Path:
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        write_fake_x64_pe(exe)
+        return exe
+
+    def test_npm_codex_in_the_current_location(self) -> None:
+        npm_dir, pkg = self._npm_dirs()
+        exe = self._write_exe(
+            pkg
+            / "node_modules"
+            / "@openai"
+            / "codex-win32-x64"
+            / "vendor"
+            / "x86_64-pc-windows-msvc"
+            / "bin"
+            / "codex.exe"
+        )
+        found = self._find([npm_dir])
+        self.assertEqual(found, exe.resolve())
+
+    def test_npm_codex_in_the_older_location(self) -> None:
+        npm_dir, pkg = self._npm_dirs()
+        exe = self._write_exe(
+            pkg / "vendor" / "x86_64-pc-windows-msvc" / "codex" / "codex.exe"
+        )
+        found = self._find([npm_dir])
+        self.assertEqual(found, exe.resolve())
+
+    def test_npm_codex_sorted_first_wins(self) -> None:
+        npm_dir, pkg = self._npm_dirs()
+        first = self._write_exe(pkg / "a" / "codex.exe")
+        self._write_exe(pkg / "b" / "codex.exe")
+        found = self._find([npm_dir])
+        self.assertEqual(found, first.resolve())
+
+    def test_npm_codex_non_pe_is_skipped_for_the_next_one(self) -> None:
+        npm_dir, pkg = self._npm_dirs()
+        bad = pkg / "a" / "codex.exe"
+        bad.parent.mkdir(parents=True)
+        bad.write_text("not a pe", encoding="utf-8")
+        good = self._write_exe(pkg / "b" / "codex.exe")
+        found = self._find([npm_dir])
+        self.assertEqual(found, good.resolve())
+
+    def test_npm_codex_with_only_a_non_pe_is_none(self) -> None:
+        npm_dir, pkg = self._npm_dirs()
+        bad = pkg / "a" / "codex.exe"
+        bad.parent.mkdir(parents=True)
+        bad.write_text("not a pe", encoding="utf-8")
+        found = self._find([npm_dir])
+        self.assertIsNone(found)
+
+    def test_npm_codex_pkg_without_any_exe_is_none(self) -> None:
+        npm_dir, pkg = self._npm_dirs()
+        pkg.mkdir(parents=True)
+        found = self._find([npm_dir])
+        self.assertIsNone(found)
+
+    def test_npm_without_node_modules_is_none(self) -> None:
+        npm_dir, _pkg = self._npm_dirs()
+        found = self._find([npm_dir])
+        self.assertIsNone(found)
+
+    def test_npm_tree_that_cannot_be_read_is_ignored(self) -> None:
+        npm_dir, _pkg = self._npm_dirs()
+        with mock.patch.object(Path, "rglob", side_effect=OSError("unreadable")):
+            found = self._find([npm_dir])
+        self.assertIsNone(found)
+
+    def test_npm_tree_without_a_cmd_shim_is_not_searched(self) -> None:
+        npm_dir = self.base / "npm"
+        pkg = npm_dir / "node_modules" / "@openai" / "codex"
+        self._write_exe(pkg / "a" / "codex.exe")
+        found = self._find([npm_dir])
+        self.assertIsNone(found)
+
+    def test_exe_beside_the_shim_wins_over_npm(self) -> None:
+        npm_dir, pkg = self._npm_dirs()
+        beside = self._write_exe(npm_dir / "codex.exe")
+        self._write_exe(pkg / "a" / "codex.exe")
+        found = self._find([npm_dir])
+        self.assertEqual(found, beside.resolve())
+
+    def test_exe_named_in_the_shim_wins_over_npm(self) -> None:
+        npm_dir, pkg = self._npm_dirs()
+        other = self.base / "other"
+        named = self._write_exe(other / "codex.exe")
+        self._write_exe(pkg / "a" / "codex.exe")
+        shim = npm_dir / "codex.cmd"
+        shim.write_text(
+            'node "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\n'
+            f'"{named}" %*\n',
+            encoding="utf-8",
+        )
+        found = self._find([npm_dir])
+        self.assertEqual(found, named.resolve())
+
+    def test_exe_on_the_path_wins_over_npm(self) -> None:
+        npm_dir, pkg = self._npm_dirs()
+        first_dir = self.base / "first"
+        first = self._write_exe(first_dir / "codex.exe")
+        self._write_exe(pkg / "a" / "codex.exe")
+        found = self._find([first_dir, npm_dir])
+        self.assertEqual(found, first.resolve())
+
+    def test_claude_does_not_search_the_npm_tree(self) -> None:
+        npm_dir, pkg = self._npm_dirs()
+        shim = npm_dir / "claude.cmd"
+        shim.write_text("@echo off\n", encoding="utf-8")
+        self._write_exe(pkg / "a" / "claude.exe")
+        found = self._find([npm_dir], role="claude")
+        self.assertIsNone(found)
 
     def test_exe_beside_the_cmd_shim(self) -> None:
         shim_dir = self.base / "shim"
