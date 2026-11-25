@@ -96,6 +96,23 @@ _BASE_FILES = {
         "        with open(target, 'a', encoding='utf-8', newline='') as fh:\n"
         "            fh.write('# touched\\n')\n"
     ),
+    # Changes twins.py only while a mutant is on disk, never during the base run (PR #446 review, F1).
+    "tools/tests/test_mutant_writer.py": (
+        "import os\n"
+        "import unittest\n"
+        "from pathlib import Path\n"
+        "\n"
+        "\n"
+        "class MutantWriterTest(unittest.TestCase):\n"
+        "    def test_changes_the_mutant(self):\n"
+        "        original = os.environ.get('TOY_MUTANT_WRITER')\n"
+        "        if not original:\n"
+        "            self.skipTest('writer off')\n"
+        "        target = Path(__file__).resolve().parents[1] / 'toy' / 'twins.py'\n"
+        "        if target.read_bytes() != Path(original).read_bytes():\n"
+        "            with open(target, 'ab') as fh:\n"
+        "                fh.write(b'# changed under the mutant\\n')\n"
+    ),
     "tools/tests/test_toy.py": (
         "import unittest\n"
         "\n"
@@ -510,14 +527,15 @@ class MutationSweepTest(unittest.TestCase):
         self.assertEqual(set(by_key), expected_keys)
         survived = {key for key, ms in by_key.items() if all(m["status"] == "survived" for m in ms)}
         self.assertEqual(survived, _SURVIVORS)
-        for rel, text in _SURVIVORS:
-            line = _line_numbers(rel, text)[0]
-            self.assertIn(f"{rel}:{line} | {text}", out.splitlines())
+        # stdout lists the survivors and nothing else: a killed or timed-out mutant listed
+        # there fails (PR #446 review, F9).
+        rows = {line for line in out.splitlines() if " | " in line}
+        self.assertEqual(
+            rows, {f"{rel}:{_line_numbers(rel, text)[0]} | {text}" for rel, text in _SURVIVORS}
+        )
         for rel, text in ((_SCALE, "result = value * factor"), (_SCALE, "return result"),
                           (_LOOP, "steps += 1"), (_BRIDGE, "value += 2;")):
             self.assertEqual({m["status"] for m in by_key[(rel, text)]}, {"killed"})
-            line = _line_numbers(rel, text)[0]
-            self.assertNotIn(f"{rel}:{line} | {text}", out.splitlines())
         self.assertEqual({m["status"] for m in by_key[(_LOOP, "n -= 1")]}, {"timeout"})
         counts = report["counts"]
         self.assertEqual(counts["mutants"], len(report["mutants"]))
@@ -643,6 +661,22 @@ class MutationSweepTest(unittest.TestCase):
         self.assertTrue((self.root / _TWINS).read_bytes().endswith(b"# touched\n"),
                         "the sweep must not overwrite a change it did not make")
 
+    def test_a_change_made_while_a_mutant_is_on_disk_exits_3_and_is_kept(self) -> None:
+        # PR #446 review, F1: the toy writer runs first in every mutant run and appends to
+        # twins.py while the first mutant (line 1 deleted) is on disk. The sweep must find the
+        # file is no longer the mutant it wrote, leave it as the writer left it, exit 3 and name
+        # the file and the deleted line.
+        original = (self.root / _TWINS).read_bytes()
+        copy = self.scratch / "twins-original.py"
+        copy.write_bytes(original)
+        with mock.patch.dict(os.environ, {"TOY_MUTANT_WRITER": str(copy)}):
+            rc, out, err = self._sweep("--timeout", "10", "--include", _TWINS,
+                                       modules=("tests.test_mutant_writer", "tests.test_toy"))
+        self.assertEqual(rc, 3, f"{out}\n{err}")
+        first_mutant = original.decode("utf-8").replace("def twin_a(x):", "", 1).encode("utf-8")
+        self.assertEqual((self.root / _TWINS).read_bytes(), first_mutant + b"# changed under the mutant\n")
+        self.assertIn(f"{_TWINS}:1 | def twin_a(x):", out + err)
+
     def test_ctrl_c_restores_the_file_and_exits_130(self) -> None:
         # Ctrl+C is simulated in-process, as a KeyboardInterrupt from the second mutant's run.
         sweep = _load("mutation_sweep")
@@ -693,6 +727,54 @@ class MutationSweepTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         line = _line_numbers(_SCALE, "factor = -factor")[0]
         self.assertIn(f"{_SCALE}:{line} | factor = -factor", proc.stdout.splitlines())
+
+
+def _occurrences(text: str, old: str) -> int:
+    """Matches of `old` in `text`, overlapping ones included."""
+    return sum(1 for i in range(len(text)) if text.startswith(old, i))
+
+
+class MutantWindowTest(unittest.TestCase):
+    """PR #446 review, F4: a widened window must match exactly once counting overlapping
+    matches, so the line the sweep deletes is always the line it reports."""
+
+    def setUp(self) -> None:
+        self.sweep = _load("mutation_sweep")
+
+    def test_a_window_that_matches_twice_with_overlap_is_not_unique(self) -> None:
+        for sep in ("\n", "\r\n"):
+            text = ("echo x" + sep) * 4
+            starts, lines = self.sweep._index_lines(text)
+            for line in (1, 2, 3, 4):
+                with self.subTest(sep=repr(sep), line=line):
+                    self.assertIsNone(self.sweep._build_mutant(text, starts, lines, line, 1))
+            # Widened to the whole file the window is unique, as today's rule allows.
+            candidate = self.sweep._build_mutant(text, starts, lines, 3, 3)
+            self.assertIsNotNone(candidate)
+            self.assertEqual(text.replace(candidate[1], candidate[2], 1).split(sep),
+                             ["echo x", "echo x", "", "echo x", ""])
+
+    def test_the_mutated_line_is_always_the_reported_one(self) -> None:
+        texts = (
+            "echo x\n" * 4,
+            "echo x\r\n" * 4,
+            "a\nb\na\nb\na\n",
+            "x\nx\ny\nx\nx\n",
+            "x = 1\r\nx = 1\r\ny = 2\r\nx = 1\r\n",
+            "aa\naa\naa\n",
+        )
+        for text in texts:
+            starts, lines = self.sweep._index_lines(text)
+            for line in range(1, len(lines)):
+                for context in range(4):
+                    candidate = self.sweep._build_mutant(text, starts, lines, line, context)
+                    if candidate is None:
+                        continue
+                    _k, old, new = candidate
+                    with self.subTest(text=text, line=line, context=context):
+                        self.assertEqual(_occurrences(text, old), 1)
+                        expected = text[: starts[line]] + text[starts[line] + len(lines[line]):]
+                        self.assertEqual(text.replace(old, new, 1), expected)
 
 
 if __name__ == "__main__":
