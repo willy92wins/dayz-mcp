@@ -434,8 +434,10 @@ if ((git rev-list -n 1 "v$Version") -ne $DownloadedManifest.git_sha) {
 }
 ```
 
-Install the published release in a new venv, in a new temporary folder, from
-the downloaded files only:
+Install the published release into a new venv in a new temporary folder, with
+the downloaded `dayz-mcp-requirements.txt`. uv takes the wheel from its release
+URL and the dependencies from PyPI, and refuses any file whose hash is not in
+the requirements:
 
 [EXACT]
 
