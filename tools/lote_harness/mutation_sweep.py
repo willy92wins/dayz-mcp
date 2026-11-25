@@ -241,6 +241,19 @@ def _code_lines_for_file(rel_path: str, text: str, contents: list[str]) -> set[i
     return set(range(1, len(contents)))
 
 
+def _count_overlapping(text: str, old: str) -> int:
+    if not old:
+        return 0
+    count, pos = 0, 0
+    while count < 2:
+        idx = text.find(old, pos)
+        if idx < 0:
+            break
+        count += 1
+        pos = idx + 1
+    return count
+
+
 def _build_mutant(text: str, starts: list[int], contents: list[str], line_no: int, max_context: int) -> tuple[int, str, str] | None:
     line_count = len(contents) - 1
     for k in range(max_context + 1):
@@ -251,7 +264,7 @@ def _build_mutant(text: str, starts: list[int], contents: list[str], line_no: in
             end_hi = starts[hi] + len(contents[hi])
             old = text[starts[lo] : end_hi]
             new = text[starts[lo] : starts[line_no]] + text[starts[line_no] + len(contents[line_no]) : end_hi]
-        if text.count(old) == 1:
+        if _count_overlapping(text, old) == 1:
             return k, old, new
     return None
 
@@ -538,22 +551,42 @@ def main(argv: list[str] | None = None) -> int:
                 orig = orig_by_path[cand.path]
                 if (verr := _verify_sha(orig, "antes de mutar")) is not None:
                     return _err(verr, 3)
-                mutated = orig.text.replace(cand.old, cand.new, 1).encode("utf-8")
+                pos = orig.text.find(cand.old)
+                if pos < 0:
+                    return _err(f"no se encontro el patron del mutante en {orig.rel_path}", 3)
+                mutated = (orig.text[:pos] + cand.new + orig.text[pos + len(cand.old) :]).encode("utf-8")
+                mutant_sha = _sha256(mutated)
+                wrote_mutant = False
                 io_err: OSError | None = None
                 try:
                     orig.full_path.write_bytes(mutated)
+                    wrote_mutant = True
                     status, elapsed, red_module = _run_mutant(python, cwd, args.modules, run_env, mutant_timeouts)
                 except OSError as exc:
                     io_err, status, elapsed, red_module = exc, "", 0.0, None
                 finally:
                     # No return here: returning in finally swallows KeyboardInterrupt/exceptions.
-                    try:
-                        orig.full_path.write_bytes(orig.raw)
-                        restored_sha = _sha256(orig.full_path.read_bytes())
-                    except OSError:
-                        restored_sha = "<error-io>"
-                    if restored_sha != orig.sha256:
-                        restore_err = f"NO SE RESTAURO {orig.rel_path}: {orig.sha256[:12]} -> {restored_sha[:12]}"
+                    should_restore = True
+                    if wrote_mutant:
+                        try:
+                            current_sha = _sha256(orig.full_path.read_bytes())
+                        except OSError:
+                            current_sha = "<error-io>"
+                        if current_sha != mutant_sha:
+                            should_restore = False
+                            restore_err = (
+                                f"{cand.path}:{cand.line} | {cand.text}: "
+                                f"el fichero cambio mientras el mutante estaba escrito; no se toca "
+                                f"({mutant_sha[:12]} -> {current_sha[:12]})"
+                            )
+                    if should_restore:
+                        try:
+                            orig.full_path.write_bytes(orig.raw)
+                            restored_sha = _sha256(orig.full_path.read_bytes())
+                        except OSError:
+                            restored_sha = "<error-io>"
+                        if restored_sha != orig.sha256:
+                            restore_err = f"NO SE RESTAURO {orig.rel_path}: {orig.sha256[:12]} -> {restored_sha[:12]}"
                 if restore_err is not None:
                     return _err(restore_err, 3)
                 if io_err is not None:
