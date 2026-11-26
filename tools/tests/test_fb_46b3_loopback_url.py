@@ -339,7 +339,7 @@ class ProducerFormTest(unittest.TestCase):
         for port in (1, 8765, 65535):
             with self.subTest(port=port):
                 options = installer.parse_args(["--port", str(port)])
-                self._assert_accepted(eval(template, {"__builtins__": {}}, {"options": options}))
+                self._assert_accepted(eval(template, {"__builtins__": {}}, {"options": options, "port": options.port}))
         for port in (0, 65536):
             with self.subTest(port=port), redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):

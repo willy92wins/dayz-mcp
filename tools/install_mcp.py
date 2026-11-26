@@ -1099,6 +1099,18 @@ def _load_or_create_key(
     return value
 
 
+def config_payload(port: int, key: str) -> str:
+    return json.dumps(
+        {
+            "url": f"http://127.0.0.1:{port}/",
+            "key": key,
+            "pollHz": 5,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
 def _write_config(path: Path, payload: str) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1149,15 +1161,7 @@ def install_runtime(
     key = _load_or_create_key(options.keyfile, token_factory)
     # Real install: no "profile" on purpose (B1). Only the test harness
     # writes profile=test; without it the bridge leaves godmode off.
-    config_payload = json.dumps(
-        {
-            "url": f"http://127.0.0.1:{options.port}/",
-            "key": key,
-            "pollHz": 5,
-        },
-        ensure_ascii=True,
-        separators=(",", ":"),
-    )
+    payload_text = config_payload(options.port, key)
     config_paths = [
         tools_root / "_mcp_config" / "server_profiles" / "dayz_mcp.json",
         tools_root / "_mcp_config" / "client_profiles" / "dayz_mcp.json",
@@ -1175,7 +1179,7 @@ def install_runtime(
         if optional_root is not None:
             config_paths.append(optional_root / "dayz_mcp.json")
     for config_path in config_paths:
-        _write_config(config_path, config_payload)
+        _write_config(config_path, payload_text)
 
     return {
         "status": "installed",
@@ -1747,43 +1751,12 @@ def run_runs_backup_gate(
     return payload
 
 
-def run_installer(
+def register_clients(
     options: InstallerOptions,
+    venv_python: Path,
     *,
-    base_python: Path,
     runner: CommandRunner = subprocess.run,
-    token_factory: Callable[[], str] = lambda: secrets.token_urlsafe(32),
-) -> dict[str, object]:
-    from dayz_mcp.server_cli import (
-        InstanceSelectionError,
-        bind_instance_context,
-        reject_conflicting_environment,
-    )
-
-    try:
-        bind_instance_context(
-            options.instance_token, options.game_path, replace=True
-        )
-        reject_conflicting_environment(options.instance_token, options.port)
-    except InstanceSelectionError as error:
-        raise InstallerContractError(error.code) from error
-    runtime = install_runtime(
-        options,
-        base_python=base_python,
-        runner=runner,
-        token_factory=token_factory,
-    )
-    venv_value = runtime.get("venv_python")
-    if not isinstance(venv_value, str) or not venv_value:
-        raise InstallerExecutionError("runtime_install_result_invalid")
-    venv_python = Path(venv_value)
-    if not options.register:
-        return {
-            "status": "installed",
-            "registered": False,
-            "venv_python": str(venv_python),
-        }
-
+) -> None:
     # install-mcp.ps1 passes the client executables it already resolved.
     # Pin them in this same process so --register still has one transactional
     # registration (lock, journal, recovery) and does not trust a .cmd shim.
@@ -1832,6 +1805,46 @@ def run_installer(
     if selected_name != "dayz-mcp":
         transaction_kwargs["server_name"] = selected_name
     register_transaction(provider, desired, **transaction_kwargs)
+
+
+def run_installer(
+    options: InstallerOptions,
+    *,
+    base_python: Path,
+    runner: CommandRunner = subprocess.run,
+    token_factory: Callable[[], str] = lambda: secrets.token_urlsafe(32),
+) -> dict[str, object]:
+    from dayz_mcp.server_cli import (
+        InstanceSelectionError,
+        bind_instance_context,
+        reject_conflicting_environment,
+    )
+
+    try:
+        bind_instance_context(
+            options.instance_token, options.game_path, replace=True
+        )
+        reject_conflicting_environment(options.instance_token, options.port)
+    except InstanceSelectionError as error:
+        raise InstallerContractError(error.code) from error
+    runtime = install_runtime(
+        options,
+        base_python=base_python,
+        runner=runner,
+        token_factory=token_factory,
+    )
+    venv_value = runtime.get("venv_python")
+    if not isinstance(venv_value, str) or not venv_value:
+        raise InstallerExecutionError("runtime_install_result_invalid")
+    venv_python = Path(venv_value)
+    if not options.register:
+        return {
+            "status": "installed",
+            "registered": False,
+            "venv_python": str(venv_python),
+        }
+
+    register_clients(options, venv_python, runner=runner)
     return {
         "status": "installed_and_registered",
         "registered": True,

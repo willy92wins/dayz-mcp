@@ -28,11 +28,13 @@ from tests.lease_helpers import MID, FakeClock, _coord, _identity
 from tests.mcp_helpers import _content_json
 
 # R1 F2: the bridge refuses only an empty type or one ConfigIsExisting does
-# not find under CfgVehicles, so the description names that case and no other.
+# not find under CfgVehicles, CfgWeapons or CfgMagazines (3b83,
+# IsKnownInventoryClassname), so the description names that case and no other.
 WORLD_SPAWN_TYPE_SENTENCE = (
-    'type is a CfgVehicles classname, for example type="CivilianSedan"; a '
-    'value that is not a loaded CfgVehicles classname, such as "vehicle", '
-    "returns unknown_type naming the type received."
+    "type is a classname of CfgVehicles, CfgWeapons or CfgMagazines, for "
+    'example type="CivilianSedan" or type="Mag_AK74_30Rnd"; a value that is '
+    'none of them, such as "vehicle", returns unknown_type naming the type '
+    "received."
 )
 
 
@@ -129,9 +131,10 @@ class UnknownSpawnTypeTextTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             message,
-            "unknown_type: type 'vehicle' is not a CfgVehicles classname; type takes "
-            "a classname such as CivilianSedan (a mod's classnames exist only while "
-            "that mod is loaded)",
+            "unknown_type: type 'vehicle' is not a classname of CfgVehicles, "
+            "CfgWeapons or CfgMagazines; type takes a classname such as "
+            "CivilianSedan or Mag_AK74_30Rnd (a mod's classnames exist only "
+            "while that mod is loaded)",
         )
         call.assert_awaited_once()
         self.assertEqual(call.await_args.args[0], "world_spawn")
