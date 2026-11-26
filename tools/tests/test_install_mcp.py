@@ -497,7 +497,7 @@ class InstallerRuntimeTest(unittest.TestCase):
             source_vendor / "SHA256SUMS.json",
             vendor / "SHA256SUMS.json",
         )
-        self.options = parse_args([], tools_root=self.tools_root)
+        self.options = parse_args(["--port", "18765"], tools_root=self.tools_root)
         self.calls: list[tuple[list[str], dict[str, object]]] = []
 
     def runner(self, argv: list[str], **kwargs: object) -> object:
@@ -560,7 +560,7 @@ class InstallerRuntimeTest(unittest.TestCase):
         for config in configs:
             payload = json.loads(config.read_text(encoding="ascii"))
             self.assertEqual(payload["key"], "fixture-secret-token")
-            self.assertEqual(payload["url"], "http://127.0.0.1:8765/")
+            self.assertEqual(payload["url"], "http://127.0.0.1:18765/")
             self.assertEqual(payload["pollHz"], 5)
 
     def test_existing_venv_and_key_are_reused_without_secret_in_summary(self) -> None:

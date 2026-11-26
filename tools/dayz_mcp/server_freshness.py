@@ -25,7 +25,7 @@ from dayz_mcp.lease_result_ttl import is_internal_probe
 REMEDIATION = "reopen_mcp_client"
 MARKER = "server_code_freshness"
 _TOOLS_ROOT = Path(__file__).resolve().parents[1]
-_PLAYBOOKS_ROOT = _TOOLS_ROOT.parent / "playbooks"
+_PLAYBOOKS_ROOT = playbook_tool.PLAYBOOKS_DIR
 
 
 def loaded_source_files() -> dict[str, Path | None]:

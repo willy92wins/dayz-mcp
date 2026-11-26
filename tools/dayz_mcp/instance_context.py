@@ -70,8 +70,10 @@ def _resolved_package_dir(
     An explicit script is the target even when it has no contract marker.
     ``python -m`` resolves ``dayz_mcp`` from the process cwd first, then a
     venv ``Scripts`` layout, only when the interpreter flags establish that
-    lookup. ``-I`` and ``-P`` leave cwd off ``sys.path``, and any flag this
-    process did not recognize does too: the package is then not established.
+    lookup. An installed venv's ``Lib/site-packages`` layout is a later
+    candidate after the checkout layout. ``-I`` and ``-P`` leave cwd off
+    ``sys.path``, and any flag this process did not recognize does too: the
+    package is then not established.
     A ``PYTHONSAFEPATH`` value set in the other process is the same cwd
     exclusion and cannot be read portably from here, so a writer that depends
     on it without passing ``-P`` can still be matched to the cwd package.
@@ -104,6 +106,17 @@ def _resolved_package_dir(
                 candidate = None
             if candidate is not None and candidate not in candidates:
                 candidates.append(candidate)
+            try:
+                installed_candidate = (
+                    exe.parents[1] / "Lib" / "site-packages" / "dayz_mcp"
+                )
+            except IndexError:
+                installed_candidate = None
+            if (
+                installed_candidate is not None
+                and installed_candidate not in candidates
+            ):
+                candidates.append(installed_candidate)
     for candidate in candidates:
         if (candidate / "__main__.py").is_file() or (candidate / "__init__.py").is_file():
             return candidate

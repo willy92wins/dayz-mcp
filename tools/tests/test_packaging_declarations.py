@@ -14,6 +14,7 @@ with no change in this repo.
 
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -28,6 +29,10 @@ PYPROJECT = TOOLS_DIR / "pyproject.toml"
 REQUIREMENTS = TOOLS_DIR / "requirements-mcp.txt"
 INSTALLER = TOOLS_DIR / "install-mcp.ps1"
 WORKFLOW = TOOLS_DIR.parent / ".github" / "workflows" / "tests.yml"
+RELEASE_LOCK = TOOLS_DIR / "release" / "requirements.lock.txt"
+DEPENDENCY_LOCK = TOOLS_DIR / "dependency-lock.json"
+_LOCK_PACKAGE = re.compile(r"^([A-Za-z0-9._-]+)==([^\s\\]+) \\$")
+_LOCK_HASH = re.compile(r"^    --hash=sha256:([0-9a-f]{64})( \\)?$")
 _EXACT_PIN = r"^[A-Za-z0-9._-]+==[0-9][0-9A-Za-z.+!-]*(\s*;\s*.+)?$"
 _EXACT_PIP = r"^pip==[0-9][0-9A-Za-z.+!-]*$"
 _PIP_REQUIREMENT = re.compile(r'(?m)^\$PipRequirement\s*=\s*"([^"\n]*)"[ \t]*$')
@@ -42,6 +47,45 @@ def _pinned_requirements() -> list[str]:
         if line:
             specs.append(line)
     return specs
+
+
+def _normalized_name(name: str) -> str:
+    return name.lower().replace("_", "-").replace(".", "-")
+
+
+def _release_lock_packages() -> list[dict[str, object]]:
+    packages: list[dict[str, object]] = []
+    current: dict[str, object] | None = None
+    lines = RELEASE_LOCK.read_text(encoding="utf-8").splitlines()
+    for lineno, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        if line.lstrip().startswith("#"):
+            continue
+        package = _LOCK_PACKAGE.match(line)
+        if package is not None:
+            current = {
+                "name": package.group(1),
+                "version": package.group(2),
+                "hashes": [],
+                "line": lineno,
+            }
+            packages.append(current)
+            continue
+        hash_match = _LOCK_HASH.match(line)
+        if hash_match is not None:
+            if current is None:
+                raise AssertionError(
+                    f"line {lineno}: hash outside a package: {line!r}"
+                )
+            hashes = current["hashes"]
+            assert isinstance(hashes, list)
+            hashes.append(hash_match.group(1))
+            continue
+        raise AssertionError(
+            f"line {lineno}: unrecognized requirements lock line: {line!r}"
+        )
+    return packages
 
 
 def _code_lines(text: str) -> list[str]:
@@ -205,6 +249,59 @@ class Pywin32ProvisioningTest(unittest.TestCase):
         source = (TOOLS_DIR / "dayz_mcp" / "wmi_host.py").read_text(encoding="utf-8")
         self.assertIn("import pythoncom", source)
         self.assertIn("import win32com.client", source)
+
+
+class NormalizedNameTest(unittest.TestCase):
+    def test_normalized_name_replaces_underscores_and_dots(self) -> None:
+        self.assertEqual(_normalized_name("Typing_Extensions"), "typing-extensions")
+        self.assertEqual(_normalized_name("zope.interface"), "zope-interface")
+
+
+class ReleaseRequirementsLockTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.packages = _release_lock_packages()
+        self.by_name = {
+            _normalized_name(str(package["name"])): package
+            for package in self.packages
+        }
+
+    def test_each_package_is_an_exact_pin_with_hashes(self) -> None:
+        self.assertTrue(self.packages)
+        for package in self.packages:
+            name = str(package["name"])
+            version = str(package["version"])
+            self.assertNotIn("@", name)
+            self.assertNotIn("@", version)
+            self.assertNotIn("://", name)
+            self.assertNotIn("://", version)
+            hashes = package["hashes"]
+            self.assertIsInstance(hashes, list)
+            self.assertGreaterEqual(
+                len(hashes), 1, f"{name}=={version} has no hash"
+            )
+            for digest in hashes:
+                self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_requirements_mcp_packages_match_lock_versions(self) -> None:
+        for spec in _pinned_requirements():
+            match = re.match(r"^([^=;]+)==([^;]+)", spec.strip())
+            self.assertIsNotNone(match, spec)
+            assert match is not None
+            name = _normalized_name(match.group(1).strip())
+            version = match.group(2).strip()
+            self.assertIn(name, self.by_name, spec)
+            self.assertEqual(
+                str(self.by_name[name]["version"]), version, spec
+            )
+
+    def test_psutil_hashes_include_the_vendored_wheel(self) -> None:
+        payload = json.loads(DEPENDENCY_LOCK.read_text(encoding="utf-8"))
+        vendored = payload["artifacts"]["psutil_wheel"]["sha256"].lower()
+        self.assertIn("psutil", self.by_name)
+        self.assertIn(vendored, self.by_name["psutil"]["hashes"])
+
+    def test_lock_has_no_dayz_mcp_tools_package(self) -> None:
+        self.assertNotIn("dayz-mcp-tools", self.by_name)
 
 
 if __name__ == "__main__":

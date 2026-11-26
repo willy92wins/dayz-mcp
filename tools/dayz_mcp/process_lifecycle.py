@@ -8486,7 +8486,7 @@ class ProcessLifecycle:
                             "granted": None,
                             "held_s": 0.0,
                         }
-                    granted = window_foreground.set_foreground(
+                    granted, last_error = window_foreground.set_foreground_with_last_error(
                         hwnd, player.pid, windows=windows, fns=fns
                     )
                     if granted is None:
@@ -8494,12 +8494,42 @@ class ProcessLifecycle:
                 finally:
                     self._finish_committed(authority, command_id)
             state, held_s = window_foreground.watch(hwnd, float(hold_s), fns=fns)
-            return {
+            answer: dict[str, object] = {
                 "run_id": run_id,
                 "state": state,
                 "granted": granted,
                 "held_s": held_s,
             }
+            if state == "denied":
+                answer["last_error"] = last_error
+                api = fns
+                if api is None:
+                    try:
+                        api = window_foreground.real_win32()
+                    except Exception:
+                        api = None
+                for key, read in (
+                    (
+                        "foreground_lock_timeout_ms",
+                        api.foreground_lock_timeout_ms if api is not None else None,
+                    ),
+                    ("input_idle_s", api.input_idle_s if api is not None else None),
+                ):
+                    if read is None:
+                        answer[key] = None
+                    else:
+                        try:
+                            answer[key] = read()
+                        except Exception:
+                            answer[key] = None
+                if api is None:
+                    answer["minimized"] = None
+                else:
+                    try:
+                        answer["minimized"] = bool(api.is_iconic(hwnd))
+                    except Exception:
+                        answer["minimized"] = None
+            return answer
         except Exception:
             # Same collection as close_run: abort before commit; after commit
             # the inner finally already finished the command.
