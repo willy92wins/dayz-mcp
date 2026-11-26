@@ -215,6 +215,11 @@ class MCPArgs
 	string classname;
 	string dest;
 	string slot;
+	// inventory_give magazine fill (3b83). ammo_set true asks for
+	// ServerSetAmmoCount on the created magazine; false, which is what an
+	// absent key arrives as, leaves it as created (see the class comment).
+	int ammo;
+	bool ammo_set;
 	// F3.6 object_inspect — memory-point / bounding_center names
 	ref array<string> want;
 	// anim_timeline: animation source names read from the item in hands.
@@ -1834,6 +1839,12 @@ class MCPJob
 	// loadout_clear: the uid its reply carries (MCPResult.uid).
 	string loadout_uid;
 	Object move_target;
+	// inventory_move: where the item was at dispatch (InventoryLocation type,
+	// parent and slot), so the confirmation can tell a move from an item
+	// that stayed.
+	int move_origin_type;
+	Object move_origin_parent;
+	int move_origin_slot;
 	float move_quantity;
 	// server_perf: phase 1 once the first tick has set sample_start_s
 	// (GetTickTime); sample_s_target is window_s. perf_frames counts the ticks

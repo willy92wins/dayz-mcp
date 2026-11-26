@@ -39,10 +39,11 @@ def _bad_args(field: str, value: object, requirement: str) -> str:
 
 
 # fb-20260823-131632-4f1c: the bridge answers a bare unknown_type when type is
-# empty or ConfigIsExisting("CfgVehicles " + type) is false (MCPBridge.c
-# ValidateSpawnArgs), so type="vehicle" never said what type is. The tool knows
-# the type it sent and names it. type is caller input of any length, so the
-# echo is cut at _SPAWN_TYPE_ECHO_MAX characters.
+# empty or is not a classname of CfgVehicles, CfgWeapons or CfgMagazines
+# (MCPBridge.c ValidateSpawnArgs, IsKnownInventoryClassname), so
+# type="vehicle" never said what type is. The tool knows the type it sent
+# and names it. type is caller input of any length, so the echo is cut at
+# _SPAWN_TYPE_ECHO_MAX characters.
 _SPAWN_TYPE_ECHO_MAX = 64
 
 
@@ -51,9 +52,7 @@ def _unknown_spawn_type(type_name: str) -> str:
     if len(type_name) > _SPAWN_TYPE_ECHO_MAX:
         shown += f" (first {_SPAWN_TYPE_ECHO_MAX} of {len(type_name)} characters)"
     return (
-        f"unknown_type: type {shown} is not a CfgVehicles classname; type takes "
-        "a classname such as CivilianSedan (a mod's classnames exist only while "
-        "that mod is loaded)"
+        f"unknown_type: type {shown} is not a classname of CfgVehicles, CfgWeapons or CfgMagazines; type takes a classname such as CivilianSedan or Mag_AK74_30Rnd (a mod's classnames exist only while that mod is loaded)"
     )
 
 
@@ -151,7 +150,7 @@ def _spawn_batch_item_args(index: int, item: object) -> dict[str, Any]:
     item_type = item.get("type")
     if not isinstance(item_type, str) or item_type == "":
         raise ToolError(
-            _bad_args(f"{field}.type", item_type, "be a CfgVehicles classname")
+            _bad_args(f"{field}.type", item_type, "be a classname of CfgVehicles, CfgWeapons or CfgMagazines")
         )
     pos = item.get("pos")
     if (
