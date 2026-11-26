@@ -1651,6 +1651,7 @@ class MCPLootLosConeRow
 	int net_low;
 	int net_high;
 	string item_type;
+	string item_kind;
 	ref array<float> item_pos;
 	ref array<float> observer_head;
 	bool observer_head_bone;

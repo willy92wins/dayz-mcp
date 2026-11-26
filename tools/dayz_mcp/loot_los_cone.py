@@ -27,16 +27,18 @@ OBSERVERS_MAX = 4
 UID_MAX_CHARS = 64
 RAYS_PER_OBSERVER_MAX = 4
 # Wire payload budget for POST /result against loopback.MAX_BODY_BYTES (1 MiB):
-# one worst-case MCPLootLosConeRow JSON (~1170 B: 64-char uid, item_type,
-# hit_type and hit_class, longest gap_kind "ray_budget_exceeded", 24-char
-# numeric tokens, all 25 wire keys) * OBSERVERS_MAX (4) * ROWS_PER_OBSERVER_MAX
-# (16) = 64 rows (~75 KB), plus 16384 B for the rest of the POST /result body
-# (the full MCPResult and MCPLootLosConeRead header with 4 worst-case observer
-# summaries of ~210 B each) ~= 91 KB, well below half of
-# loopback.MAX_BODY_BYTES (524288 B).
+# one worst-case MCPLootLosConeRow JSON (1221 B as measured by T14: 64-char
+# uid, item_type, hit_type and hit_class, longest gap_kind
+# "ray_budget_exceeded", longest item_kind (8 chars), 24-char numeric tokens,
+# all 26 wire keys) * OBSERVERS_MAX (4) * ROWS_PER_OBSERVER_MAX (16) = 64 rows
+# (~78 KB), plus 16384 B for the rest of the POST /result body (the full
+# MCPResult and MCPLootLosConeRead header with 4 worst-case observer summaries
+# of ~210 B each) ~= 95 KB, well below half of loopback.MAX_BODY_BYTES
+# (524288 B).
 ROWS_PER_OBSERVER_MAX = 16
 
 GAP_KINDS = frozenset({"ray_budget_exceeded"})
+ITEM_KINDS = frozenset({"weapon", "ammo", "magazine", "clothing", "other"})
 # Server reads not yet verified against human input: masked as unavailable by
 # default until include_unverified=True is passed.
 UNVERIFIED_FIELDS = ("pitch_deg",)
@@ -47,6 +49,7 @@ KIND = evidence.EvidenceKind(
         "net_low": evidence.EvidenceField("int"),
         "net_high": evidence.EvidenceField("int"),
         "item_type": evidence.EvidenceField("token"),
+        "item_kind": evidence.EvidenceField("token"),
         "item_pos": evidence.EvidenceField("vec3", "m"),
         "observer_head": evidence.EvidenceField("vec3", "m"),
         "observer_head_bone": evidence.EvidenceField("flag"),
@@ -247,6 +250,9 @@ def _prepare_rows(
         tick_ms = row.get("tick_ms")
         if not _is_int(tick_ms) or tick_ms != header_tick_ms:
             raise _refused("bad_bridge_loot_cone_result", f"{where}.tick_ms")
+        item_kind = row.get("item_kind")
+        if not isinstance(item_kind, str) or item_kind not in ITEM_KINDS:
+            raise _refused("bad_bridge_loot_cone_result", f"{where}.item_kind")
 
         row_counts[uid] += 1
         if row.get("gap_kind") == "":

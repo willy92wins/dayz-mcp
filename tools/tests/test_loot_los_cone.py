@@ -1,16 +1,18 @@
 """Contract, translated-Enforce, and tool tests for loot_los_cone.
 
-Covers T1-T16 and kills mutants M1-M11:
+Covers T1-T19 and kills mutants M1-M11 and N1-N7:
 - Request validation, daemon ingress, lease, and live-profile refusal (T1-T2; kills M10, M11)
 - Server capability census, bitmask, arg-contract hash (T3-T4; kills M5)
-- EvidenceKind contract, published envelope, masking, passthrough, header and
-  cross-row invariants (T5-T9; kills M4, M6, M7)
-- Translated real Enforce bodies for LootConeCandidate and DispatchLootLosCone
-  plus source-level text and no-write checks (T10-T11; kills M1, M2, M3, M8, M9)
+- EvidenceKind contract, published envelope, masking, passthrough, header,
+  cross-row invariants, and item_kind closed set (T5-T9, T19; kills M4, M6, M7, N5, N6, N7)
+- Translated real Enforce bodies for LootConeCandidate, LootConeItemKind, and
+  DispatchLootLosCone plus source-level text and no-write checks (T10-T11, T17-T18;
+  kills M1, M2, M3, M8, M9, N1, N2, N3, N4, N7)
 - Message/prune, tool, size-budget, mirror, and compile-hazard checks (T12-T16).
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 import copy
 import json
 import math
@@ -146,6 +148,7 @@ EXPECTED_ROW_MEMBERS: list[tuple[str, str]] = [
     ("int", "net_low"),
     ("int", "net_high"),
     ("string", "item_type"),
+    ("string", "item_kind"),
     ("ref array<float>", "item_pos"),
     ("ref array<float>", "observer_head"),
     ("bool", "observer_head_bone"),
@@ -201,6 +204,7 @@ SIG_IN_CONE = (
 SIG_NEAREST = "protected int LosConeNearest(array<float> distances, array<bool> taken)"
 SIG_GAP_KIND = "protected string LosConeGapKind(int position, int raysMax)"
 SIG_CANDIDATE = "protected InventoryItem LootConeCandidate(Object found)"
+SIG_ITEM_KIND = "protected string LootConeItemKind(InventoryItem item)"
 SIG_DISPATCH = (
     "protected bool DispatchLootLosCone(MCPCommand command, MCPResult result)"
 )
@@ -208,6 +212,7 @@ SIG_DISPATCH_CHAIN = "protected void Dispatch(MCPCommand command)"
 
 NEW_BRIDGE_METHODS = (
     SIG_CANDIDATE,
+    SIG_ITEM_KIND,
     SIG_DISPATCH,
 )
 
@@ -408,6 +413,7 @@ def _wire_row(**overrides: object) -> dict[str, object]:
         "net_low": 1001,
         "net_high": 2,
         "item_type": "BakedBeansCan",
+        "item_kind": "other",
         "item_pos": [103.535, 5.0, 203.535],
         "observer_head": [100.0, 6.7, 200.0],
         "observer_head_bone": 1,
@@ -808,7 +814,7 @@ class CensusAndContractHashTest(unittest.TestCase):
 
 
 class NormalizationAndEvidenceTest(unittest.TestCase):
-    """T5-T9: KIND, published envelope, masking, passthrough, header & invariants."""
+    """T5-T9, T19: KIND, published envelope, masking, passthrough, header & invariants."""
 
     def test_t5_evidence_kind_contract(self) -> None:
         kind = loot_los_cone.KIND
@@ -818,6 +824,7 @@ class NormalizationAndEvidenceTest(unittest.TestCase):
             ("net_low", evidence.EvidenceField("int")),
             ("net_high", evidence.EvidenceField("int")),
             ("item_type", evidence.EvidenceField("token")),
+            ("item_kind", evidence.EvidenceField("token")),
             ("item_pos", evidence.EvidenceField("vec3", "m")),
             ("observer_head", evidence.EvidenceField("vec3", "m")),
             ("observer_head_bone", evidence.EvidenceField("flag")),
@@ -848,6 +855,7 @@ class NormalizationAndEvidenceTest(unittest.TestCase):
             net_low=101,
             net_high=1,
             item_type="BakedBeansCan",
+            item_kind="other",
             item_pos=[10.0, 0.0, 23.0],
             observer_head=[10.0, 1.7, 20.0],
             observer_head_bone=1,
@@ -875,6 +883,7 @@ class NormalizationAndEvidenceTest(unittest.TestCase):
             net_low=102,
             net_high=1,
             item_type="SodaCan_Cola",
+            item_kind="other",
             item_pos=[10.2, 0.0, 25.0],
             observer_head=[10.0, 1.7, 20.0],
             observer_head_bone=1,
@@ -902,6 +911,7 @@ class NormalizationAndEvidenceTest(unittest.TestCase):
             net_low=103,
             net_high=1,
             item_type="Barrel_Red",
+            item_kind="other",
             item_pos=[10.4, 0.0, 26.5],
             observer_head=[10.0, 1.7, 20.0],
             observer_head_bone=1,
@@ -1014,6 +1024,7 @@ class NormalizationAndEvidenceTest(unittest.TestCase):
                     "net_low": 101,
                     "net_high": 1,
                     "item_type": "BakedBeansCan",
+                    "item_kind": "other",
                     "item_pos": [10.0, 0.0, 23.0],
                     "observer_head": [10.0, 1.7, 20.0],
                     "observer_head_bone": True,
@@ -1040,6 +1051,7 @@ class NormalizationAndEvidenceTest(unittest.TestCase):
                     "net_low": 102,
                     "net_high": 1,
                     "item_type": "SodaCan_Cola",
+                    "item_kind": "other",
                     "item_pos": [10.2, 0.0, 25.0],
                     "observer_head": [10.0, 1.7, 20.0],
                     "observer_head_bone": True,
@@ -1061,6 +1073,7 @@ class NormalizationAndEvidenceTest(unittest.TestCase):
                     "net_low": 103,
                     "net_high": 1,
                     "item_type": "Barrel_Red",
+                    "item_kind": "other",
                     "item_pos": [10.4, 0.0, 26.5],
                     "observer_head": [10.0, 1.7, 20.0],
                     "observer_head_bone": True,
@@ -1660,6 +1673,120 @@ class NormalizationAndEvidenceTest(unittest.TestCase):
                     str(raised.exception), f"bad_bridge_loot_cone_result: {where}"
                 )
 
+    def test_t19_item_kind_closed_set_validation_and_publication(self) -> None:
+        # Every value in the closed set is published verbatim on a ray row.
+        for kind in ("weapon", "ammo", "magazine", "clothing", "other"):
+            with self.subTest(ray_item_kind=kind):
+                wire = {
+                    "ok": 1,
+                    FIELD: _wire_read(rows=[_wire_row(item_kind=kind)]),
+                }
+                snapshot = copy.deepcopy(wire)
+                published = loot_los_cone.normalize_bridge_result(wire)
+                self.assertEqual(
+                    published["evidence"]["rows"][0]["item_kind"],
+                    kind,
+                )
+                self.assertEqual(wire, snapshot)
+
+        # ammo and other are published verbatim on a ray_budget_exceeded row.
+        for kind in ("ammo", "other"):
+            with self.subTest(gap_item_kind=kind):
+                gap_row = _wire_row(
+                    gap_kind="ray_budget_exceeded",
+                    item_kind=kind,
+                    ray_hit=0,
+                    hit_pos=[],
+                    hit_pos_available=0,
+                    hit_distance_m=0.0,
+                    hit_distance_m_available=0,
+                    clearance_m=0.0,
+                    clearance_m_available=0,
+                    hit_type="",
+                    hit_type_available=0,
+                    hit_class="",
+                    hit_class_available=0,
+                )
+                wire = {
+                    "ok": 1,
+                    FIELD: _wire_read(
+                        observers=[
+                            _wire_observer(
+                                scanned=5,
+                                in_radius=2,
+                                in_cone=1,
+                                rays=0,
+                                rows=1,
+                            )
+                        ],
+                        rows=[gap_row],
+                    ),
+                }
+                snapshot = copy.deepcopy(wire)
+                published = loot_los_cone.normalize_bridge_result(wire)
+                out_row = published["evidence"]["rows"][0]
+                self.assertEqual(out_row["gap_kind"], "ray_budget_exceeded")
+                self.assertEqual(out_row["item_kind"], kind)
+                self.assertNotIn("ray_hit", out_row)
+                self.assertEqual(wire, snapshot)
+
+        # Kills N5, N6, N7: missing, wrong-type, unhashable, and out-of-set values
+        # must fail with the exact message and without mutating the input.
+        missing_key_row = {
+            k: v for k, v in _wire_row().items() if k != "item_kind"
+        }
+        bad_rows: tuple[tuple[str, dict[str, object]], ...] = (
+            ("missing", missing_key_row),
+            ("empty", _wire_row(item_kind="")),
+            ("capitalized", _wire_row(item_kind="Weapon")),
+            ("unknown_token", _wire_row(item_kind="rifle")),
+            ("trailing_space", _wire_row(item_kind="weapon ")),
+            ("int", _wire_row(item_kind=1)),
+            ("bool", _wire_row(item_kind=True)),
+            ("none", _wire_row(item_kind=None)),
+            ("list", _wire_row(item_kind=[])),
+            ("dict", _wire_row(item_kind={})),
+        )
+        for label, bad_row in bad_rows:
+            with self.subTest(bad_item_kind=label):
+                wire = {"ok": 1, FIELD: _wire_read(rows=[bad_row])}
+                snapshot = copy.deepcopy(wire)
+                with self.assertRaises(ValueError) as raised:
+                    loot_los_cone.normalize_bridge_result(wire)
+                self.assertEqual(
+                    str(raised.exception),
+                    "bad_bridge_loot_cone_result: loot_los_cone.rows[0].item_kind",
+                )
+                self.assertEqual(wire, snapshot)
+
+        # Valid first row and invalid second row reports rows[1] without mutating input.
+        wire_second_bad = {
+            "ok": 1,
+            FIELD: _wire_read(
+                observers=[
+                    _wire_observer(
+                        scanned=5,
+                        in_radius=2,
+                        in_cone=2,
+                        rays=2,
+                        rows=2,
+                    )
+                ],
+                rows=[
+                    _wire_row(item_kind="weapon"),
+                    _wire_row(item_kind="rifle"),
+                ],
+            ),
+        }
+        snapshot_second_bad = copy.deepcopy(wire_second_bad)
+        with self.assertRaises(ValueError) as raised:
+            loot_los_cone.normalize_bridge_result(wire_second_bad)
+        self.assertEqual(
+            str(raised.exception),
+            "bad_bridge_loot_cone_result: loot_los_cone.rows[1].item_kind",
+        )
+        self.assertEqual(wire_second_bad, snapshot_second_bad)
+
 
 class _FakeIdentity:
     def __init__(self, plain_id: str) -> None:
@@ -1732,6 +1859,8 @@ class _FakeNonItem:
 
 
 class _FakeItem:
+    _VALID_CATEGORIES = frozenset({"weapon", "ammo", "magazine", "clothing"})
+
     def __init__(
         self,
         item_type: str,
@@ -1742,6 +1871,7 @@ class _FakeItem:
         net_id_log: list[object] | None = None,
         net_low: int = 0,
         net_high: int = 0,
+        categories: Iterable[str] = (),
     ) -> None:
         self._item_type = _LootConeString.of(item_type)
         self._class_name = _LootConeString.of(class_name)
@@ -1750,6 +1880,10 @@ class _FakeItem:
         self._net_id_log = net_id_log
         self._net_low = net_low
         self._net_high = net_high
+        self._categories = frozenset(categories)
+        if not self._categories.issubset(self._VALID_CATEGORIES):
+            unknown = sorted(self._categories - self._VALID_CATEGORIES)
+            raise ValueError(f"unknown fake item categories: {unknown}")
 
     def GetHierarchyParent(self) -> object:
         return self._parent
@@ -1767,6 +1901,18 @@ class _FakeItem:
 
     def ClassName(self) -> _LootConeString:
         return self._class_name
+
+    def IsWeapon(self) -> bool:
+        return "weapon" in self._categories
+
+    def IsAmmoPile(self) -> bool:
+        return "ammo" in self._categories
+
+    def IsMagazine(self) -> bool:
+        return "magazine" in self._categories
+
+    def IsClothing(self) -> bool:
+        return "clothing" in self._categories
 
 
 class LootConeCandidateTest(unittest.TestCase):
@@ -1796,6 +1942,46 @@ class LootConeCandidateTest(unittest.TestCase):
         # Kills M2: non-InventoryItem must be rejected.
         self.assertIsNone(fn(non_item))
         self.assertIsNone(fn(None))
+
+
+class LootConeItemKindTest(unittest.TestCase):
+    """T17: translated real LootConeItemKind body and ITEM_KINDS mirror (kills N1, N2, N7)."""
+
+    def test_t17_loot_cone_item_kind_real_body_and_mirror(self) -> None:
+        bridge = _source(SERVER_BRIDGE_PATH)
+        ns: dict[str, object] = {}
+        fn = translate(
+            bridge,
+            SIG_ITEM_KIND,
+            ns,
+            class_types=("InventoryItem",),
+        )
+        cases = (
+            ("weapon", ("weapon",), "weapon"),
+            ("ammo", ("ammo",), "ammo"),
+            ("magazine", ("magazine",), "magazine"),
+            ("clothing", ("clothing",), "clothing"),
+            ("other", (), "other"),
+            # Kills N1: Ammunition_Base answers true to both IsAmmoPile and IsMagazine;
+            # IsAmmoPile must be checked before IsMagazine.
+            ("ammo_and_magazine", ("ammo", "magazine"), "ammo"),
+            # Precedence: IsWeapon must win over IsClothing.
+            ("weapon_and_clothing", ("weapon", "clothing"), "weapon"),
+        )
+        for label, categories, expected in cases:
+            with self.subTest(case=label):
+                item = _FakeItem(
+                    f"Item_{label}",
+                    (0.0, 0.0, 0.0),
+                    categories=categories,
+                )
+                self.assertEqual(fn(item).text, expected)
+
+        # Mirror check (like GAP_KINDS in T15): kills N2 and N7.
+        kind_returns = set(
+            re.findall(r'return "([^"]*)";', method_body(bridge, SIG_ITEM_KIND))
+        )
+        self.assertEqual(kind_returns, loot_los_cone.ITEM_KINDS)
 
 
 class DispatchLootLosConeTest(unittest.TestCase):
@@ -1926,6 +2112,7 @@ class DispatchLootLosConeTest(unittest.TestCase):
         translate(self.bridge, SIG_NEAREST, ns, class_types=("array",))
         translate(self.bridge, SIG_GAP_KIND, ns)
         translate(self.bridge, SIG_CANDIDATE, ns, class_types=("Object", "InventoryItem"))
+        translate(self.bridge, SIG_ITEM_KIND, ns, class_types=("InventoryItem",))
         # enforce_subset_helpers.translate only supports out_functions on bare
         # non-void assignment calls, not void method calls like
         # candItem.GetNetworkID(candNetLow, candNetHigh);. Bind that one
@@ -2444,14 +2631,114 @@ class DispatchLootLosConeTest(unittest.TestCase):
                 self.assertAlmostEqual(row_c.yaw_off_deg, right_offset_deg, places=4)
                 self.assertEqual(len(meta_c["ray_calls"]), 1)  # type: ignore[arg-type]
 
+    def test_t18_dispatch_item_kind_per_row_and_budget_gap_real_body(self) -> None:
+        obs = _FakePlayer("obs-a", (10.0, 1.7, 20.0), heading_rad=0.0, pitch_deg=0.0)
+        item_3m = _FakeItem(
+            "AKM",
+            (10.0, 1.7, 23.0),
+            net_low=301,
+            net_high=1,
+            categories=("weapon",),
+        )
+        item_4m = _FakeItem(
+            "Ammo_762x39",
+            (10.0, 1.7, 24.0),
+            net_low=401,
+            net_high=2,
+            categories=("ammo", "magazine"),
+        )
+        item_5m = _FakeItem(
+            "Mag_AKM_30Rnd",
+            (10.0, 1.7, 25.0),
+            net_low=501,
+            net_high=3,
+            categories=("magazine",),
+        )
+        item_6m = _FakeItem(
+            "BakedBeansCan",
+            (10.0, 1.7, 26.0),
+            net_low=601,
+            net_high=4,
+            categories=(),
+        )
+        item_7m = _FakeItem(
+            "HuntingJacket_Autumn",
+            (10.0, 1.7, 27.0),
+            net_low=701,
+            net_high=5,
+            categories=("clothing",),
+        )
+        # Deranged scan order (5 m first, 3 m second): every rowPosition != bestIndex (kills N4).
+        world_objects = [item_5m, item_3m, item_7m, item_4m, item_6m]
+
+        dispatch, meta = self._build_dispatch([obs], world_objects, tick_ms=64000)
+        args = SimpleNamespace(
+            uids=_LootConeArray([_LootConeString.of("obs-a")]),
+            radius=8.0,
+            half_yaw_deg=10.0,
+        )
+        post_now, result = self._run_dispatch(dispatch, args)
+        self.assertIs(post_now, True)
+        self.assertIs(result.ok, True)
+
+        read = result.loot_los_cone
+        summary = read.observers.Get(0)
+        self.assertEqual(
+            (summary.scanned, summary.in_radius, summary.in_cone, summary.rays, summary.rows),
+            (5, 5, 5, 4, 5),
+        )
+        self.assertEqual(len(meta["ray_calls"]), 4)  # type: ignore[arg-type]
+        self.assertEqual(read.rows.Count(), 5)
+        self.assertEqual(
+            [round(r.distance_m, 4) for r in read.rows],
+            [3.0, 4.0, 5.0, 6.0, 7.0],
+        )
+
+        # Kills N1, N2, N3, N4: nearest-first rows each carry their own item_kind,
+        # including the fifth row with ray_budget_exceeded.
+        expected_rows = [
+            ("AKM", "weapon", 301, 1, ""),
+            ("Ammo_762x39", "ammo", 401, 2, ""),
+            ("Mag_AKM_30Rnd", "magazine", 501, 3, ""),
+            ("BakedBeansCan", "other", 601, 4, ""),
+            ("HuntingJacket_Autumn", "clothing", 701, 5, "ray_budget_exceeded"),
+        ]
+        self.assertEqual(
+            [
+                (r.item_type.text, r.item_kind.text, r.net_low, r.net_high, r.gap_kind.text)
+                for r in read.rows
+            ],
+            expected_rows,
+        )
+        class_names = {item_type for item_type, *_rest in expected_rows}
+        for row in read.rows:
+            self.assertNotIn(row.item_kind.text, class_names)
+            self.assertIn(row.item_kind.text, loot_los_cone.ITEM_KINDS)
+
+        # End-to-end through Python normalization (also kills N3, N7).
+        normalized = loot_los_cone.normalize_bridge_result(
+            {"ok": 1, FIELD: _to_wire_value(read)}
+        )
+        published_rows = normalized["evidence"]["rows"]
+        self.assertEqual(
+            [
+                (r["item_type"], r["item_kind"], r["net_low"], r["net_high"], r["gap_kind"])
+                for r in published_rows
+            ],
+            expected_rows,
+        )
+        self.assertNotIn("ray_hit", published_rows[4])
+
     def test_t11_dispatch_source_text_and_no_world_writes(self) -> None:
         dispatch = clean(method_body(self.bridge, SIG_DISPATCH))
         candidate = clean(method_body(self.bridge, SIG_CANDIDATE))
+        item_kind_fn = clean(method_body(self.bridge, SIG_ITEM_KIND))
 
         # Single clock read, single spatial query, single ray helper call; no second cone/FOV/ray.
         self.assertEqual(dispatch.count("GetGame().GetTime()"), 1)
         self.assertEqual(dispatch.count("GetObjectsAtPosition3D("), 1)
         self.assertEqual(dispatch.count("LootConeCandidate("), 1)
+        self.assertEqual(dispatch.count("LootConeItemKind("), 1)
         self.assertEqual(dispatch.count("LosConeCastRay("), 1)
         self.assertEqual(dispatch.count("PopulateRaycastRVProxy"), 0)
         self.assertEqual(dispatch.count("MCPRaycastValidation"), 0)
@@ -2477,6 +2764,7 @@ class DispatchLootLosConeTest(unittest.TestCase):
             "candNetLows.Insert(candNetLow); "
             "candNetHighs.Insert(candNetHigh); "
             "candTypes.Insert(candType); "
+            "candKinds.Insert(LootConeItemKind(candItem)); "
             "candPositions.Insert(candPos); "
             "candDistances.Insert(candDist); "
             "candYawOffs.Insert(yawOffDeg); "
@@ -2510,6 +2798,7 @@ class DispatchLootLosConeTest(unittest.TestCase):
             "candNetLows.Insert(candNetLow);",
             "candNetHighs.Insert(candNetHigh);",
             "candTypes.Insert(candType);",
+            "candKinds.Insert(LootConeItemKind(candItem));",
             "candPositions.Insert(candPos);",
             "candDistances.Insert(candDist);",
             "candYawOffs.Insert(yawOffDeg);",
@@ -2521,6 +2810,7 @@ class DispatchLootLosConeTest(unittest.TestCase):
             "row.net_low = candNetLows.Get(bestIndex);",
             "row.net_high = candNetHighs.Get(bestIndex);",
             "row.item_type = candTypes.Get(bestIndex);",
+            "row.item_kind = candKinds.Get(bestIndex);",
             "VectorToArray(rowItemPos, row.item_pos);",
             "VectorToArray(obsHead, row.observer_head);",
             "row.observer_head_bone = obsHeadBone;",
@@ -2546,7 +2836,7 @@ class DispatchLootLosConeTest(unittest.TestCase):
         )
 
         # No world writes or banned reads across new bridge methods.
-        new_code = "\n".join((candidate, dispatch))
+        new_code = "\n".join((candidate, item_kind_fn, dispatch))
         for banned in (
             "SetPosition",
             "SetTransform",
@@ -2698,6 +2988,7 @@ class SizeBudgetTest(unittest.TestCase):
     def test_t14_worst_case_payload_and_header_budget(self) -> None:
         num24 = "123456789012345678901234"
         longest_gap = max(loot_los_cone.GAP_KINDS, key=len)
+        longest_kind = max(loot_los_cone.ITEM_KINDS, key=len)
         uid64 = "u" * loot_los_cone.UID_MAX_CHARS
         worst_row = {
             "uid": uid64,
@@ -2706,6 +2997,7 @@ class SizeBudgetTest(unittest.TestCase):
             "net_low": num24,
             "net_high": num24,
             "item_type": "I" * 64,
+            "item_kind": longest_kind,
             "item_pos": [num24, num24, num24],
             "observer_head": [num24, num24, num24],
             "observer_head_bone": False,

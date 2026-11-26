@@ -7176,6 +7176,28 @@ class MCPBridge : Managed
 		return item;
 	}
 
+	// loot_los_cone item_kind: the first engine category that matches, else other.
+	protected string LootConeItemKind(InventoryItem item)
+	{
+		if (item.IsWeapon())
+		{
+			return "weapon";
+		}
+		if (item.IsAmmoPile())
+		{
+			return "ammo";
+		}
+		if (item.IsMagazine())
+		{
+			return "magazine";
+		}
+		if (item.IsClothing())
+		{
+			return "clothing";
+		}
+		return "other";
+	}
+
 	// loot_los_cone: narrow short-range server-side view raycast from each named
 	// observer's head to loose world InventoryItem objects inside the yaw cone.
 	// Synchronous read; no world writes.
@@ -7202,6 +7224,7 @@ class MCPBridge : Managed
 		array<int> candNetLows;
 		array<int> candNetHighs;
 		array<string> candTypes;
+		array<string> candKinds;
 		array<vector> candPositions;
 		array<float> candDistances;
 		array<float> candYawOffs;
@@ -7329,6 +7352,7 @@ class MCPBridge : Managed
 				candNetLows = new array<int>();
 				candNetHighs = new array<int>();
 				candTypes = new array<string>();
+				candKinds = new array<string>();
 				candPositions = new array<vector>();
 				candDistances = new array<float>();
 				candYawOffs = new array<float>();
@@ -7371,6 +7395,7 @@ class MCPBridge : Managed
 								candNetLows.Insert(candNetLow);
 								candNetHighs.Insert(candNetHigh);
 								candTypes.Insert(candType);
+								candKinds.Insert(LootConeItemKind(candItem));
 								candPositions.Insert(candPos);
 								candDistances.Insert(candDist);
 								candYawOffs.Insert(yawOffDeg);
@@ -7401,6 +7426,7 @@ class MCPBridge : Managed
 						row.net_low = candNetLows.Get(bestIndex);
 						row.net_high = candNetHighs.Get(bestIndex);
 						row.item_type = candTypes.Get(bestIndex);
+						row.item_kind = candKinds.Get(bestIndex);
 						VectorToArray(rowItemPos, row.item_pos);
 						VectorToArray(obsHead, row.observer_head);
 						row.observer_head_bone = obsHeadBone;
