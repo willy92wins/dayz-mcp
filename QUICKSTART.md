@@ -7,14 +7,15 @@ Everything else in this repo is optional until this works.
 and a DayZ server you may load mods on. The daemon binds `127.0.0.1` and drives a game on the same machine;
 there is no remote mode.
 
-You also need **Claude Code and Codex CLI, both installed as native executables**.
-The daemon only starts when both clients hold an identical `dayz-mcp`
-registration: with just one of them it refuses with
-`daemon_provenance_incomplete` (`tools/dayz_mcp/host_config.py`,
-`resolve_daemon_provenance`), and the installer already refuses a non-native
-CLI with `installer_cli_not_native_exe` (`tools/install-mcp.ps1`). A machine
-without Codex CLI therefore cannot run the daemon, even if you only use
-Claude Code.
+You also need **Claude Code** (and **Codex CLI** if you use Codex), installed as
+native executables: the installer refuses a non-native CLI with
+`installer_cli_not_native_exe` (`tools/install-mcp.ps1`). When Codex is present,
+both clients must hold an identical `dayz-mcp` registration (a Codex config file
+without the entry, or Codex registered without Claude, still refuses with
+`daemon_provenance_incomplete` in `tools/dayz_mcp/host_config.py`,
+`resolve_daemon_provenance`); on a host with Claude Code only (no Codex CLI and
+no `~/.codex/config.toml`), registration and provenance resolve from Claude
+alone.
 
 AddonBuilder also needs the **Visual C++ runtimes**. Without any of them it
 dies with `System.BadImageFormatException: Could not load file or assembly

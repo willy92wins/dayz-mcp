@@ -14366,7 +14366,14 @@ def run(argv: list[str] | None = None) -> int:
     if config.mode == "daemon":
         return _run_daemon(config)
 
-    app, runtime = build_app(config)
+    try:
+        app, runtime = build_app(config)
+    except host_config.HostConfigError as exc:
+        if config.mode == "client":
+            code = str(exc).strip() or "host_config_error"
+            print(f"HostConfigError:{code}", file=sys.stderr, flush=True)
+            return 2
+        raise
     if config.mode == "embedded":
         try:
             runtime.start_loopback()

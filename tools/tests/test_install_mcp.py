@@ -3282,5 +3282,190 @@ if ($Mode -eq 'replace') {
 '''
 
 
+class ClaudeOnlyAndPosixPythonTest(unittest.TestCase):
+    """Issue #422: POSIX venv python paths and Claude-only pinning/registration."""
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.security = self.root / "security"
+        self.security.mkdir()
+        self.local_appdata = self.root / "LocalAppData"
+        self.local_appdata.mkdir()
+        self.claude = self.root / "claude.exe"
+        write_fake_x64_pe(self.claude)
+        self.venv_python = self.root / "venv" / "Scripts" / "python.exe"
+        self.venv_python.parent.mkdir(parents=True)
+        write_fake_x64_pe(self.venv_python)
+        self.env = patch.dict(
+            os.environ,
+            {
+                "DAYZ_MCP_SECURITY_DIR": str(self.security),
+                "LOCALAPPDATA": str(self.local_appdata),
+                "USERPROFILE": str(self.home),
+                "HOME": str(self.home),
+            },
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def test_validate_python_executable_posix_accepts_venv_bin_python_and_python3(
+        self,
+    ) -> None:
+        bin_dir = self.root / "posix-venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        py = bin_dir / "python"
+        py3 = bin_dir / "python3"
+        py311 = bin_dir / "python3.11"
+        scripts_py = self.root / "posix-venv" / "Scripts" / "python"
+        scripts_py.parent.mkdir(parents=True)
+        for path in (py, py3, py311, scripts_py):
+            path.write_bytes(b"#!/bin/sh\n")
+
+        with patch.object(installer, "_is_windows_host", return_value=False):
+            self.assertEqual(installer._validate_python_executable(py), py)
+            self.assertEqual(installer._validate_python_executable(py3), py3)
+            for bad in (py311, scripts_py, Path("bin/python")):
+                with self.subTest(bad=str(bad)):
+                    with self.assertRaises(InstallerContractError) as raised:
+                        installer._validate_python_executable(bad)
+                    self.assertEqual(raised.exception.code, "python_path_not_exact")
+
+    def test_validate_python_executable_windows_rejects_bin_python(self) -> None:
+        bin_py = self.root / "win-venv" / "bin" / "python"
+        bin_py.parent.mkdir(parents=True)
+        bin_py.write_bytes(b"#!/bin/sh\n")
+        with patch.object(installer, "_is_windows_host", return_value=True):
+            with self.assertRaises(InstallerContractError) as raised:
+                installer._validate_python_executable(bin_py)
+        self.assertEqual(raised.exception.code, "python_path_not_exact")
+
+    def test_pin_and_register_claude_only_when_no_codex_cli_and_no_config(self) -> None:
+        with patch.object(installer.shutil, "which", return_value=None):
+            entries = pin_installer_clis(
+                claude_exe=self.claude,
+                runner=absent_probe_runner,
+            )
+        self.assertEqual([entry.role for entry in entries], ["CLAUDE"])
+        manifest_raw = json.loads(
+            installer_cli_manifest_path().read_text(encoding="utf-8")
+        )
+        self.assertIsNone(manifest_raw["entries"]["CODEX"])
+        manifest = load_installer_cli_manifest(installer_cli_manifest_path())
+        self.assertEqual(set(manifest.entries), {"CLAUDE"})
+        fixtures = load_installer_not_found_fixtures(
+            installer_not_found_fixtures_path(),
+            installer_cli_manifest_path(),
+        )
+        self.assertEqual(set(fixtures.entries), {"CLAUDE"})
+
+        options = parse_args(["--register"], tools_root=self.root)
+        captured: list[tuple[object, dict[str, RegistrationSpec], dict[str, object]]] = []
+
+        def fake_transaction(
+            provider: object, desired: dict[str, RegistrationSpec], **kwargs: object
+        ) -> None:
+            captured.append((provider, desired, kwargs))
+
+        with (
+            patch.object(installer, "run_runs_backup_gate", return_value={"status": "verified"}),
+            patch.object(installer, "register_transaction", side_effect=fake_transaction),
+        ):
+            installer.register_clients(
+                options, self.venv_python, runner=absent_probe_runner
+            )
+        self.assertEqual(len(captured), 1)
+        _provider, desired, kwargs = captured[0]
+        self.assertEqual(set(desired), {"CLAUDE"})
+        self.assertEqual(kwargs["host_configs"], (self.home / ".claude.json",))
+
+        # Transaction + host timeout write + crash recovery work for Claude alone.
+        claude_json = self.home / ".claude.json"
+        spec = desired["CLAUDE"]
+        claude_json.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "dayz-mcp": {
+                            "type": "stdio",
+                            "command": str(spec.command),
+                            "args": list(spec.arguments),
+                        }
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        class _ClaudeOnlyProvider:
+            def __init__(self) -> None:
+                self.current: RegistrationSpec | None = None
+
+            def get(self, role: str) -> RegistrationSpec | None:
+                if role != "CLAUDE":
+                    raise AssertionError(f"unexpected role {role}")
+                return self.current
+
+            def remove(self, role: str) -> None:
+                if role != "CLAUDE":
+                    raise AssertionError(f"unexpected role {role}")
+                self.current = None
+
+            def add(self, role: str, value: RegistrationSpec) -> None:
+                if role != "CLAUDE":
+                    raise AssertionError(f"unexpected role {role}")
+                self.current = value
+
+        provider = _ClaudeOnlyProvider()
+        journal_root = self.root / "reg-journal"
+        host_journal_root = self.root / "host-journal"
+        register_transaction(
+            provider,
+            {"CLAUDE": spec},
+            host_configs=(claude_json,),
+            journal_root=journal_root,
+            host_journal_root=host_journal_root,
+        )
+        self.assertEqual(provider.current, spec)
+        updated = json.loads(claude_json.read_text(encoding="utf-8"))
+        self.assertEqual(
+            updated["mcpServers"]["dayz-mcp"]["timeout"], installer.CLAUDE_TIMEOUT_MS
+        )
+        self.assertFalse((self.home / ".codex").exists())
+
+    def test_pin_and_register_error_when_no_codex_cli_but_config_toml_exists(
+        self,
+    ) -> None:
+        codex_config = self.home / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text("", encoding="utf-8")
+        with patch.object(installer.shutil, "which", return_value=None):
+            with self.assertRaises(InstallerContractError) as pin_raised:
+                pin_installer_clis(
+                    claude_exe=self.claude,
+                    runner=absent_probe_runner,
+                )
+        self.assertEqual(pin_raised.exception.code, "installer_cli_missing")
+
+        # If pinned Claude-only earlier and config.toml appears later, register errors.
+        codex_config.unlink()
+        with patch.object(installer.shutil, "which", return_value=None):
+            pin_installer_clis(
+                claude_exe=self.claude,
+                runner=absent_probe_runner,
+            )
+        codex_config.write_text("", encoding="utf-8")
+        options = parse_args(["--register"], tools_root=self.root)
+        with self.assertRaises(InstallerContractError) as reg_raised:
+            installer.register_clients(
+                options, self.venv_python, runner=absent_probe_runner
+            )
+        self.assertEqual(reg_raised.exception.code, "installer_cli_missing")
+
+
 if __name__ == "__main__":
     unittest.main()

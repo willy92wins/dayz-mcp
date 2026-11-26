@@ -187,6 +187,17 @@ def installer_not_found_fixtures_path() -> Path:
     return installer_security_dir() / _NOT_FOUND_FIXTURE_NAME
 
 
+def _codex_config_path() -> Path:
+    return Path.home() / ".codex" / "config.toml"
+
+
+def _codex_config_exists() -> bool:
+    try:
+        return os.path.lexists(_codex_config_path())
+    except RuntimeError:
+        return False
+
+
 def _native_regular_file(path: Path) -> os.stat_result:
     try:
         metadata = path.lstat()
@@ -303,9 +314,12 @@ def load_installer_cli_manifest(path: Path) -> InstallerCliManifest:
     entries = payload.get("entries")
     if not isinstance(entries, dict) or set(entries) != set(_EXPECTED_ROLES):
         raise InstallerContractError("invalid_installer_cli_manifest")
-    return InstallerCliManifest(
-        {role: _validate_cli_entry(role, entries[role]) for role in sorted(entries)}
-    )
+    validated: dict[str, InstallerCliEntry] = {
+        "CLAUDE": _validate_cli_entry("CLAUDE", entries["CLAUDE"])
+    }
+    if entries["CODEX"] is not None:
+        validated["CODEX"] = _validate_cli_entry("CODEX", entries["CODEX"])
+    return InstallerCliManifest(validated)
 
 
 def build_installer_cli_entry_payload(role: str, path: Path) -> dict[str, object]:
@@ -365,6 +379,10 @@ def load_installer_not_found_fixtures(
     entries: dict[str, InstallerNotFoundEntry] = {}
     for role in ("CLAUDE", "CODEX"):
         value = raw_entries[role]
+        if role not in manifest.entries:
+            if value is not None:
+                raise InstallerContractError("invalid_installer_not_found_fixture")
+            continue
         if (
             not isinstance(value, dict)
             or set(value) != {"cli_sha256", "returncode", "stdout", "stderr"}
@@ -458,13 +476,23 @@ def pin_installer_clis(
     codex_exe: Path | None = None,
     runner: CommandRunner = subprocess.run,
 ) -> list[InstallerCliEntry]:
-    resolved = {
+    resolved: dict[str, Path] = {
         "CLAUDE": _resolve_pin_cli("CLAUDE", claude_exe),
-        "CODEX": _resolve_pin_cli("CODEX", codex_exe),
     }
-    entries = {
-        role: build_installer_cli_entry_payload(role, path)
-        for role, path in resolved.items()
+    include_codex = (
+        codex_exe is not None
+        or shutil.which("codex") is not None
+        or _codex_config_exists()
+    )
+    if include_codex:
+        resolved["CODEX"] = _resolve_pin_cli("CODEX", codex_exe)
+    entries: dict[str, object] = {
+        "CLAUDE": build_installer_cli_entry_payload("CLAUDE", resolved["CLAUDE"]),
+        "CODEX": (
+            build_installer_cli_entry_payload("CODEX", resolved["CODEX"])
+            if "CODEX" in resolved
+            else None
+        ),
     }
     manifest_payload = {
         "schema_version": 1,
@@ -476,8 +504,9 @@ def pin_installer_clis(
     _retire_installer_not_found_fixture(fixture_path)
     _atomic_write_json(manifest_path, manifest_payload)
     manifest = load_installer_cli_manifest(manifest_path)
-    fixture_entries: dict[str, dict[str, object]] = {}
-    for role in ("CLAUDE", "CODEX"):
+    active_roles = tuple(role for role in ("CLAUDE", "CODEX") if role in manifest.entries)
+    fixture_entries: dict[str, dict[str, object] | None] = {}
+    for role in active_roles:
         arguments = ["mcp", "get", _ABSENT_PROBE_NAME]
         if role == "CODEX":
             arguments.append("--json")
@@ -517,6 +546,8 @@ def pin_installer_clis(
             "stdout": stdout,
             "stderr": stderr,
         }
+    if "CODEX" not in manifest.entries:
+        fixture_entries["CODEX"] = None
     manifest_bytes = manifest_path.read_bytes()
     fixture_payload = {
         "schema_version": 1,
@@ -530,7 +561,7 @@ def pin_installer_clis(
     }
     _atomic_write_json(fixture_path, fixture_payload)
     load_installer_not_found_fixtures(fixture_path, manifest_path)
-    return [manifest.entries[role] for role in ("CLAUDE", "CODEX")]
+    return [manifest.entries[role] for role in active_roles]
 
 
 _VALUE_FLAGS = frozenset(
@@ -760,10 +791,10 @@ class CliRegistrationProvider:
         runner: CommandRunner = subprocess.run,
         server_name: str = "dayz-mcp",
     ) -> None:
-        if set(manifest.entries) != {"CLAUDE", "CODEX"} or set(not_found.entries) != {
-            "CLAUDE",
-            "CODEX",
-        }:
+        if (
+            set(manifest.entries) not in ({"CLAUDE", "CODEX"}, {"CLAUDE"})
+            or set(not_found.entries) != set(manifest.entries)
+        ):
             raise InstallerContractError("invalid_registration_provider_contract")
         if server_name != "dayz-mcp" and (
             not server_name.startswith("dayz-mcp-") or server_name == "dayz-mcp"
@@ -775,7 +806,7 @@ class CliRegistrationProvider:
         self.server_name = server_name
 
     def _invoke(self, role: str, arguments: Sequence[str]) -> object:
-        if role not in {"CLAUDE", "CODEX"}:
+        if role not in self.manifest.entries:
             raise InstallerContractError("invalid_registration_role")
         return invoke_manifest_cli(self.manifest.entries[role], arguments, self.runner)
 
@@ -987,10 +1018,22 @@ def build_client_args(options: InstallerOptions, platform: str) -> list[str]:
     return arguments
 
 
+def _is_windows_host() -> bool:
+    return os.name == "nt"
+
+
 def _validate_python_executable(path: Path) -> Path:
     candidate = Path(path)
-    if not candidate.is_absolute() or candidate.name.casefold() != "python.exe":
-        raise InstallerContractError("python_path_not_exact")
+    if _is_windows_host():
+        if not candidate.is_absolute() or candidate.name.casefold() != "python.exe":
+            raise InstallerContractError("python_path_not_exact")
+    else:
+        if (
+            not candidate.is_absolute()
+            or candidate.parent.name != "bin"
+            or candidate.name not in {"python", "python3"}
+        ):
+            raise InstallerContractError("python_path_not_exact")
     try:
         resolved = candidate.resolve(strict=True)
     except OSError as error:
@@ -998,7 +1041,8 @@ def _validate_python_executable(path: Path) -> Path:
     if os.path.normcase(str(candidate)) != os.path.normcase(str(resolved)):
         raise InstallerContractError("python_path_not_canonical")
     _native_regular_file(candidate)
-    _validate_x64_pe(candidate)
+    if _is_windows_host():
+        _validate_x64_pe(candidate)
     return candidate
 
 
@@ -1137,7 +1181,11 @@ def install_runtime(
     wheel = _verified_psutil_wheel(tools_root)
 
     venv_root = tools_root / ".venv-mcp"
-    venv_python = venv_root / "Scripts" / "python.exe"
+    venv_python = (
+        venv_root / "Scripts" / "python.exe"
+        if _is_windows_host()
+        else venv_root / "bin" / "python"
+    )
     if not venv_root.exists():
         _run_required(base, ("-m", "venv", str(venv_root)), runner)
     _validate_python_executable(venv_python)
@@ -1194,7 +1242,7 @@ def _rollback_registrations(
     previous: dict[str, RegistrationSpec | None],
     touched: set[str],
 ) -> None:
-    roles = ("CLAUDE", "CODEX")
+    roles = tuple(role for role in ("CLAUDE", "CODEX") if role in previous)
     for role in roles:
         if role not in touched:
             continue
@@ -1416,7 +1464,7 @@ def _load_registration_manifest(
     dict[str, RegistrationSpec | None],
     bool,
     str,
-    tuple[Path, Path] | None,
+    tuple[Path, ...] | None,
     Path | None,
 ] | None:
     published, pending, _staging = _registration_publication_paths(journal)
@@ -1447,19 +1495,20 @@ def _load_registration_manifest(
             "status",
         }
         or not isinstance(value.get("previous"), dict)
-        or set(value["previous"]) != {"CLAUDE", "CODEX"}
+        or set(value["previous"]) not in ({"CLAUDE", "CODEX"}, {"CLAUDE"})
     ):
         raise RegistrationTransactionError("registration_journal_invalid")
+    roles = tuple(role for role in ("CLAUDE", "CODEX") if role in value["previous"])
     raw_hosts = value.get("host_configs")
     raw_host_journal = value.get("host_journal")
     if raw_hosts is None:
         host_configs = None
     elif (
         isinstance(raw_hosts, list)
-        and len(raw_hosts) == 2
+        and len(raw_hosts) == len(roles)
         and all(isinstance(item, str) and item for item in raw_hosts)
     ):
-        host_configs = (Path(raw_hosts[0]), Path(raw_hosts[1]))
+        host_configs = tuple(Path(item) for item in raw_hosts)
     else:
         raise RegistrationTransactionError("registration_journal_invalid")
     if raw_host_journal is None:
@@ -1470,7 +1519,7 @@ def _load_registration_manifest(
         raise RegistrationTransactionError("registration_journal_invalid")
     previous = {
         role: _registration_spec_from_payload(value["previous"][role])
-        for role in ("CLAUDE", "CODEX")
+        for role in roles
     }
     return previous, only_next, value["server_name"], host_configs, host_journal
 
@@ -1479,7 +1528,8 @@ def _restore_registered_roles(
     provider: RegistrationProvider,
     previous: dict[str, RegistrationSpec | None],
 ) -> None:
-    for role in ("CLAUDE", "CODEX"):
+    roles = tuple(role for role in ("CLAUDE", "CODEX") if role in previous)
+    for role in roles:
         current = provider.get(role)
         target = previous[role]
         if current == target:
@@ -1493,7 +1543,7 @@ def _restore_registered_roles(
 
 
 def _recover_pending_host_configs(
-    host_configs: tuple[Path, Path] | None,
+    host_configs: tuple[Path, ...] | None,
     host_journal_root: Path | None,
 ) -> None:
     if host_configs is None:
@@ -1503,7 +1553,11 @@ def _recover_pending_host_configs(
     host_journal = (
         Path(host_journal_root) if host_journal_root is not None else _default_journal_root()
     )
-    _recover_if_needed(host_configs[0], host_configs[1], host_journal)
+    _recover_if_needed(
+        host_configs[0],
+        host_configs[1] if len(host_configs) > 1 else None,
+        host_journal,
+    )
 
 
 def _recover_registration_journal(
@@ -1513,7 +1567,7 @@ def _recover_registration_journal(
         dict[str, RegistrationSpec | None],
         bool,
         str,
-        tuple[Path, Path] | None,
+        tuple[Path, ...] | None,
         Path | None,
     ],
 ) -> None:
@@ -1529,7 +1583,7 @@ def register_transaction(
     provider: RegistrationProvider,
     desired: dict[str, RegistrationSpec],
     *,
-    host_configs: tuple[Path, Path] | None = None,
+    host_configs: tuple[Path, ...] | None = None,
     allow_option_removal: bool = False,
     server_name: str = "dayz-mcp",
     journal_root: Path | None = None,
@@ -1537,14 +1591,14 @@ def register_transaction(
     fault_injector: Callable[[str], None] | None = None,
     lock_timeout_s: float = 120.0,
 ) -> None:
-    roles = ("CLAUDE", "CODEX")
-    if set(desired) != set(roles) or any(
-        not isinstance(desired[role], RegistrationSpec) for role in roles
-    ):
+    if set(desired) not in ({"CLAUDE", "CODEX"}, {"CLAUDE"}):
+        raise InstallerContractError("invalid_registration_contract")
+    roles = tuple(role for role in ("CLAUDE", "CODEX") if role in desired)
+    if any(not isinstance(desired[role], RegistrationSpec) for role in roles):
         raise InstallerContractError("invalid_registration_contract")
     if host_configs is not None and (
         not isinstance(host_configs, tuple)
-        or len(host_configs) != 2
+        or len(host_configs) != len(roles)
         or any(not isinstance(path, Path) for path in host_configs)
     ):
         raise InstallerContractError("invalid_host_config_contract")
@@ -1578,18 +1632,18 @@ def _register_transaction_locked(
     provider: RegistrationProvider,
     desired: dict[str, RegistrationSpec],
     *,
-    host_configs: tuple[Path, Path] | None,
+    host_configs: tuple[Path, ...] | None,
     allow_option_removal: bool,
     server_name: str,
     journal_root: Path,
     host_journal_root: Path | None,
     fault_injector: Callable[[str], None] | None,
 ) -> None:
-    roles = ("CLAUDE", "CODEX")
+    roles = tuple(role for role in ("CLAUDE", "CODEX") if role in desired)
     journal = journal_root / server_name
     _discard_incomplete_registration_publication(journal)
     loaded = _load_registration_manifest(journal)
-    recorded_hosts: tuple[Path, Path] | None = None
+    recorded_hosts: tuple[Path, ...] | None = None
     recorded_host_journal: Path | None = None
     if loaded is not None:
         _previous, _only_next, owner, recorded_hosts, recorded_host_journal = loaded
@@ -1634,7 +1688,7 @@ def _register_transaction_locked(
                 "host_configs": (
                     None
                     if host_configs is None
-                    else [str(host_configs[0]), str(host_configs[1])]
+                    else [str(path) for path in host_configs]
                 ),
                 "host_journal": (
                     None if host_journal_root is None else str(host_journal_root)
@@ -1770,6 +1824,15 @@ def register_clients(
     fixture_path = installer_not_found_fixtures_path()
     manifest = load_installer_cli_manifest(manifest_path)
     not_found = load_installer_not_found_fixtures(fixture_path, manifest_path)
+    manifest_entries = getattr(manifest, "entries", None)
+    codex_in_manifest = (
+        not isinstance(manifest_entries, dict) or "CODEX" in manifest_entries
+    )
+    if not codex_in_manifest and _codex_config_exists():
+        raise InstallerContractError(
+            "installer_cli_missing",
+            f"pass --codex-exe PATH; {_PIN_RECIPE}",
+        )
     from dayz_mcp.server_cli import registration_name
 
     provider = CliRegistrationProvider(
@@ -1782,10 +1845,16 @@ def register_clients(
         "CLAUDE": RegistrationSpec(
             venv_python, tuple(build_client_args(options, "claude"))
         ),
-        "CODEX": RegistrationSpec(
-            venv_python, tuple(build_client_args(options, "codex"))
-        ),
     }
+    host_configs: tuple[Path, ...] = (Path.home() / ".claude.json",)
+    if codex_in_manifest:
+        desired["CODEX"] = RegistrationSpec(
+            venv_python, tuple(build_client_args(options, "codex"))
+        )
+        host_configs = (
+            Path.home() / ".claude.json",
+            _codex_config_path(),
+        )
     run_runs_backup_gate(
         venv_python,
         options.tools_root,
@@ -1796,10 +1865,7 @@ def register_clients(
     )
     transaction_kwargs = {
         "allow_option_removal": options.allow_option_removal,
-        "host_configs": (
-            Path.home() / ".claude.json",
-            Path.home() / ".codex" / "config.toml",
-        ),
+        "host_configs": host_configs,
     }
     selected_name = registration_name(options.instance_token)
     if selected_name != "dayz-mcp":

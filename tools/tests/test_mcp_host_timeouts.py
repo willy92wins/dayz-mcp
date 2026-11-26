@@ -171,6 +171,9 @@ class DaemonProvenanceConfigTest(unittest.TestCase):
             self._resolve()
 
         self._write_claude()
+        # #422: Claude alone resolves only when nothing exists at the Codex path;
+        # a Codex config without the entry still leaves the provenance incomplete.
+        self._write_codex(include_entry=False)
         with self.assertRaisesRegex(
             host_config.HostConfigError, "^daemon_provenance_incomplete$"
         ):

@@ -574,8 +574,14 @@ def main(
                 "role": "claude",
             }
         )
+    codex_config_path = Path.home() / ".codex" / "config.toml"
     codex_exe = _resolve_cli("codex", args.codex_exe)
-    if codex_exe is None:
+    claude_only = (
+        args.codex_exe is None
+        and codex_exe is None
+        and not os.path.lexists(codex_config_path)
+    )
+    if codex_exe is None and not claude_only:
         missing.append(
             {
                 "code": "installer_cli_missing",
@@ -589,7 +595,8 @@ def main(
 
     # Phase 2: pin, key, configs, registration.
     assert item_root is not None and wheel_version is not None
-    assert claude_exe is not None and codex_exe is not None
+    assert claude_exe is not None
+    assert claude_only or codex_exe is not None
     keyfile = state_root / "dayz_mcp.key"
     try:
         install_mcp.pin_installer_clis(
@@ -641,7 +648,7 @@ def main(
             "ok": True,
             "port": port,
             "python": str(venv_python),
-            "registered": ["claude", "codex"],
+            "registered": ["claude"] if claude_only else ["claude", "codex"],
             "server_name": registration_name(token),
             "server_profiles_arg": f"-profiles={server_profiles}",
             "version": str(wheel_version.get("version")),
