@@ -62,6 +62,7 @@ from dayz_mcp.process_lifecycle import (
     RunManifestStore,
     restart_debt_pairs,
 )
+from dayz_mcp.install_layout import installed_venv_root
 from dayz_mcp.native_process_guard import NativeProcessGuard
 from dayz_mcp.session_coordination import CleanupDisposition, SessionCoordinator
 
@@ -293,14 +294,44 @@ class DaemonPythonNotApproved(RuntimeError):
     and DAEMON_PYTHON_NOT_APPROVED instead of a traceback (8575).
     """
 
-    def __init__(self, approved: Path, current: str) -> None:
+    def __init__(
+        self, approved: Path, current: str, installed: bool = False
+    ) -> None:
         super().__init__("daemon_python_not_approved")
         self.approved = approved
         self.current = current
+        self.installed = installed
+
+
+def _installed_python_admitted(aprobado: Path, ejecutable: str) -> bool:
+    """True only for the installed venv's own python.exe, with no link in its path."""
+    try:
+        approved = Path(aprobado)
+        if not approved.is_file():
+            return False
+        if os.path.normcase(os.path.abspath(ejecutable)) != os.path.normcase(
+            os.path.abspath(approved)
+        ):
+            return False
+        resolved = approved.resolve(strict=True)
+        return os.path.normcase(str(resolved)) == os.path.normcase(
+            os.path.abspath(approved)
+        )
+    except OSError:
+        return False
 
 
 def _python_not_approved_line(error: DaemonPythonNotApproved) -> str:
     # The daemon's own stderr, never the MCP wire, so both paths may appear.
+    if error.installed:
+        return (
+            "DAEMON: daemon_python_not_approved: this interpreter is "
+            f"{error.current}, but the daemon runs only under {error.approved}, "
+            "the python.exe of the venv that has this package installed, and "
+            "its path must not pass through a link or a junction. Start the "
+            "daemon with that python.exe or reinstall the package into its "
+            "own venv."
+        )
     return (
         "DAEMON: daemon_python_not_approved: this interpreter is "
         f"{error.current}, but the daemon runs only under {error.approved}, the "
@@ -313,14 +344,23 @@ def _python_not_approved_line(error: DaemonPythonNotApproved) -> str:
 def _ensure_identity_migration(config: Any) -> None:
     venv = Path(__file__).resolve().parents[1] / ".venv-mcp"
     if os.name == "nt":
-        approved_python = venv / "Scripts" / "python.exe"
-        try:
+        installed_root = installed_venv_root(__file__)
+        if installed_root is not None:
+            approved_python = installed_root / "Scripts" / "python.exe"
+            if not _installed_python_admitted(approved_python, sys.executable):
+                raise DaemonPythonNotApproved(
+                    approved_python, sys.executable, installed=True
+                )
             approved = approved_python.resolve(strict=True)
-            current = Path(sys.executable).resolve(strict=True)
-        except OSError as error:
-            raise DaemonPythonNotApproved(approved_python, sys.executable) from error
-        if os.path.normcase(str(current)) != os.path.normcase(str(approved)):
-            raise DaemonPythonNotApproved(approved_python, sys.executable)
+        else:
+            approved_python = venv / "Scripts" / "python.exe"
+            try:
+                approved = approved_python.resolve(strict=True)
+                current = Path(sys.executable).resolve(strict=True)
+            except OSError as error:
+                raise DaemonPythonNotApproved(approved_python, sys.executable) from error
+            if os.path.normcase(str(current)) != os.path.normcase(str(approved)):
+                raise DaemonPythonNotApproved(approved_python, sys.executable)
     else:
         # A POSIX venv's bin/python is a symlink to the system interpreter, so
         # resolving both sides would admit any interpreter of that version. The

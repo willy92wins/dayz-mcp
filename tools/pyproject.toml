@@ -15,6 +15,15 @@ dependencies = [
     "pywin32==312; sys_platform == \"win32\"",
 ]
 
+[project.scripts]
+dayz-mcp = "dayz_mcp.entry:main"
+
 [tool.setuptools]
 packages = ["dayz_mcp"]
-py-modules = ["mcp_capture"]
+py-modules = ["mcp_capture", "install_mcp", "p0s_gate"]
+
+[tool.setuptools.package-data]
+dayz_mcp = ["playbooks/*.toml", "playbooks/*.py", "playbooks/*.md", "playbooks/fixtures/*/*.json", "VERSION.json"]
+
+[tool.setuptools.data-files]
+"Lib/site-packages" = ["mcp-grab.ps1"]

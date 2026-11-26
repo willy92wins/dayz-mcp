@@ -644,9 +644,20 @@ class ForegroundRunTest(unittest.TestCase):
         self.desktop.grant = False
         self.desktop.shows = False
         result = self.foreground(hold_s=3)
+        # fb-20261122-132902-54b8: a denied answer adds what it read after the ask; this fake
+        # layer has none of the three reads, so they are None, and the window is not minimized.
         self.assertEqual(
             result,
-            {"run_id": RUN_ID, "state": "denied", "granted": False, "held_s": 0.0},
+            {
+                "run_id": RUN_ID,
+                "state": "denied",
+                "granted": False,
+                "held_s": 0.0,
+                "last_error": None,
+                "foreground_lock_timeout_ms": None,
+                "input_idle_s": None,
+                "minimized": False,
+            },
         )
         self.assertEqual(self.desktop.asks, [420])
 
