@@ -12,24 +12,37 @@ Problema que traza cada cambio:
 
 Fuera de alcance: Workbench, el exit 75 por cwd, tocar LFPG, dsbx o Grok Bot (lo hace Guillermo con el texto que le demos) y quitar `m1.espera`, que se queda tal cual.
 
-## Fase 2: el lease sin run también caduca (P-c)
+## Fase 2: el lease sin run también caduca (P-c), v3
 
-Cambio en `daemon.py` `idle_hold_probe`: sin ningún run propio en `RUNNING`, devuelve True (hold) solo si el lease:
+Historia. En la v2 la señal del launcher era un registro interno ligado al `lease_id`. NC3 (Grok, 27/11, con las citas comprobadas) mostró que esa señal no existe sin un endpoint nuevo:
+- la transacción y la espera del build lock corren en el proceso cliente (`secure_launcher.py:161`, `dayz_test_worker.py:1812-1827`);
+- el latido solo manda `lease_token` (`control_client.py:911-917`);
+- `SESSION_ROUTES` (`loopback.py:375-384`) no tiene ningún verbo de transacción.
 
-1. no tiene ningún run propio en `STARTING`, `STOPPING` ni `UNRECONCILED`, y
-2. no tiene una transacción del launcher viva. [S1] `purpose="dayz-test"` no vale como señal, porque lo puede elegir cualquier caller. La señal es un registro interno del daemon ligado al `lease_id`, con alta antes de la espera del build lock o del servidor y baja al terminar o al cancelar, dentro de la transacción de `native_launcher_transaction.py` (desde :919). Solo esa ruta acreditada lo puede dar de alta: no hay tool pública ni endpoint sin acreditar que lo haga. Si no hay forma de acreditarlo sin un endpoint nuevo, el implementador para y lo dice.
+Guillermo eligió el 27/11 15:22:50Z «Mover la espera al daemon».
 
-El umbral es el mismo `LEASE_WORK_IDLE_S` (1800 s), sin constante nueva.
+Diseño. El run existe en el daemon antes de que empiece la espera:
 
-Criterios (tests unitarios con reloj inyectado):
+1. `dayz_test_run` (y el CLI del launcher) pide al daemon, ya con el lease y antes del build lock, que cree la fila del run en `STARTING`, con dueño, lease y `run_id`. Es la misma admisión que hoy hace `start_run`: la caja, `m1.espera` y, con 3A, el ticket de la cola. Después pasa al build y por fin al spawn sobre esa misma fila.
+   - El implementador elige si eso es partir `start_run` en «reservar» y «lanzar», o adelantar la fila que ya crea, y lo justifica.
+   - No hay endpoint para «marcar mi lease como vivo». La fila es un run de verdad: ocupa la caja, se ve en `session_status` y la paran las mismas vías.
+2. Una fila en `STARTING` tiene un plazo duro: la espera del build lock, más el build, más el arranque del servidor, del payload ya acreditado, con un tope fijo. Al vencer, el daemon la pasa a `EXITED` con `reason="starting_timeout"`, sin spawn si aún no lo hubo.
+3. `idle_hold_probe`: sin ningún run propio en `RUNNING`, `STARTING`, `STOPPING` ni `UNRECONCILED`, el lease sin run hace hold y caduca a los 1800 s sin trabajo. Con una fila propia en `STARTING` no hace hold, pero esa fila ya tiene su plazo.
 
-- F2-pos [S2]: un lease sin run que solo late cada 40 s recibe `renewal_refused="work_idle"` en t=1800. Su vencimiento sigue siendo el del último latido válido, el token vencido se rechaza después, y el siguiente de la FIFO con ticket vivo obtiene el lease. Se comprueban `expires_at` y la concesión, no el campo `decision` de la auditoría.
-- F2-neg1 [S2]: una operación autorizada con el token mueve `last_work_at`, y el latido siguiente extiende el lease.
-- F2-neg2 [S1]: la ruta real del launcher con el build lock retenido y un presupuesto de espera superior a 1900 s (el default es 900 s) sigue renovando.
-- F2-neg2b [S1]: un lease público con `purpose="dayz-test"` que solo late sí vence.
-- F2-neg3 [S2]: con un run propio en `STARTING`, `STOPPING` o `UNRECONCILED` sigue renovando. Con esos mismos estados pero de otro lease, no protegen.
-- F2-race [S2]: una barrera registra una operación mientras el probe tiene el lock liberado, y el latido no rehúsa.
-- F2-reg: la regresión de entrada humana de #391 sigue en verde. Se actualiza el test que hoy espera False sin run propio (`test_lease_work_idle.py:718`).
+Efecto de rebote buscado: la caja queda reservada desde que empieza el build. Desaparece el `box_taken_during_build` (`box_occupancy.py:782-823`), y la cola común de 3A pasa su claim a esa fila.
+
+Criterios:
+- F2-pos [S2]: un lease sin run que solo late cada 40 s recibe `renewal_refused="work_idle"` en t=1800, con el vencimiento del último latido válido; el siguiente con ticket vivo obtiene el lease.
+- F2-neg1 [S2]: una operación autorizada mueve `last_work_at` y el latido extiende el lease.
+- F2-neg2 [S1]: un `dayz_test_run` por la ruta real con el build lock retenido 1900 s (con un presupuesto mayor que el default) tiene su fila en `STARTING` todo el rato y su lease no caduca. `session_status` muestra la caja ocupada por esa fila.
+- F2-neg2b [S1]: un lease público que solo late, con `purpose="dayz-test"` y sin fila, sí caduca.
+- F2-timeout: una fila en `STARTING` que pasa su plazo queda en `EXITED`, con `starting_timeout`, cero spawns y la caja libre. Si el build acaba después, no lanza.
+- F2-cancel: cancelar la llamada durante el build deja la fila en `EXITED` sin spawn (los caminos de cancelación de `STARTING` existen: `process_lifecycle.py:2763`).
+- F2-neg3 [S2]: `STARTING`, `STOPPING` o `UNRECONCILED` de otro lease no protegen.
+- F2-race [S2]: una operación registrada con el lock del probe soltado hace que el latido no rehúse.
+- F2-reg: #391 (entrada humana), la suite de `start_run` y la de cancelación de `STARTING` siguen en verde. Se actualiza `test_lease_work_idle.py:718`.
+
+Va después de 3A, porque las dos tocan la admisión de `start_run`. Antes de implementar, Sol revisa esta sección sola (R22).
 
 ## Fase 3: una sola cola para la caja física (P-a, P-b)
 
@@ -112,6 +125,7 @@ Prueba en el PC (después del merge, sin tocar lo ajeno):
 
 ## Orden y reparto
 
-1. Fase 2: implementa Muse, con Grok de respaldo (skill delegar); los tests se corren en el PC, en Windows; revisa Sol.
-2. Fase 3A y luego 3B, en PR separadas, con el mismo reparto.
-3. Texto para Guillermo para LFPG, dsbx y Grok Bot (envolver con `box_turn run`, un turno por partida), tras la prueba en el PC.
+1. Fase 3A (Grok implementa en el PC, revisa Sol).
+2. Fase 2 v3: R22 de Sol sobre su sección y luego el mismo reparto.
+3. Fase 3B, con el mismo reparto.
+4. Texto para Guillermo para LFPG, dsbx y Grok Bot (envolver con `box_turn run`, un turno por partida), tras la prueba en el PC.
