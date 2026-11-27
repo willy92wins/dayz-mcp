@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- In installed mode, `dayz-mcp doctor` reports the same retail quarantine the daemon uses (`DayZ_x64.exe` / `DayZ_BE.exe` through `orphan_guard.snapshot_retail_processes`): WARN normally, FAIL under `--require-clean`. It still does not emit `PROCESS_UNREGISTERED` for the person's own server and client. `tools/README-mcp.md` matches that, and `RETAIL_PROCESS_NAMES` is a tuple.
 - `vehicle_enter` no longer seats a player in a driver seat someone else holds (#473, a known issue of 1.6): when the server reads someone in that seat (`CrewMember`, the check vanilla's get-in makes), it answers `seat_occupied` before any `StartCommand_Vehicle`, seats nobody and queues no job, and a player already in a vehicle still gets `already_in_vehicle` first. Tried in game on 2026-11-27 (DayZDiag 1.30.164289, one client, run `d93f87b9`): `vehicle_enter` seated the player in an empty `CivilianSedan` and answered `already_in_vehicle` when asked again; after `player_kill` at the wheel and `player_respawn`, with the dead body still in the driver seat, it answered `seat_occupied`, the new body stayed out, and no script error was logged before the shutdown. Needs a rebuilt PBO.
 
 ## [1.6] - 2026-11-28
