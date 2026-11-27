@@ -237,6 +237,8 @@ exception is driving: a PHYSICS car only moves from its owning client, so
 
 ## Install
 
+Without a clone: subscribe to the [DayZ-MCP Workshop item](https://steamcommunity.com/sharedfiles/filedetails/?id=3846741037) and follow [llms-install.md](llms-install.md), written for an AI agent. The rest of this section installs from a clone.
+
 The usual installer does not need a CLI pin. It registers by calling
 `claude mcp add` / `codex.cmd mcp add` directly, so an npm `.cmd` shim is fine:
 

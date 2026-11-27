@@ -400,6 +400,9 @@ class DoctorInstalledDiagnoseTest(unittest.TestCase):
         self.wheel_version_file = self.root / "wheel_VERSION.json"
         self.write_wheel_version("1.6", self.pbo_sha)
         self.write_item_version(self.item, "1.6", self.pbo_sha)
+        patcher = mock.patch.object(setup_cmd, "WORKSHOP_ITEM_ID", "")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def write_wheel_version(self, version: object, sha: object) -> None:
         self.wheel_version_file.write_text(
@@ -940,6 +943,9 @@ class DoctorInstalledMainTest(unittest.TestCase):
         self.other_python.write_bytes(b"python")
         self.missing_python = self.base / "missing" / "python.exe"
         self.workshop_root: Path | None = self.item
+        patcher = mock.patch.object(setup_cmd, "WORKSHOP_ITEM_ID", "")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def write_client_files(
         self, claude: dict[str, str], codex: dict[str, str]
