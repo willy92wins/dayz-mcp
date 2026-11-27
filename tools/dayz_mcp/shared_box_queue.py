@@ -19,6 +19,10 @@ from typing import Callable
 from dayz_mcp import byte_lock
 from dayz_mcp.runtime_state import atomic_write_json
 
+# Bound at import: the lock deadline runs on the real clock even where a
+# caller patches time.monotonic for its own deadline.
+_monotonic = time.monotonic
+
 
 WAITING_TTL_S = 120.0
 CLAIM_TTL_S = 600.0
@@ -350,7 +354,7 @@ class _Lock:
         path = self.root / LOCK_NAME
         descriptor = open_lock_file(path)
         self.descriptor = descriptor
-        deadline = time.monotonic() + self.wait_s
+        deadline = _monotonic() + self.wait_s
         try:
             while True:
                 try:
@@ -359,7 +363,7 @@ class _Lock:
                     byte_lock.try_lock(descriptor, 0)
                     return self
                 except OSError:
-                    if time.monotonic() >= deadline:
+                    if _monotonic() >= deadline:
                         raise TimeoutError("box_queue_lock_timeout")
                     time.sleep(0.01)
         except BaseException:
