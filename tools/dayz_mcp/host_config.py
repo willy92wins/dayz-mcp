@@ -729,6 +729,115 @@ class _WinFile:
         }
 
 
+class _PosixFile:
+    """POSIX counterpart of ``_WinFile``: exclusive lock and in-place I/O on one regular file."""
+
+    def __init__(self, path: Path) -> None:
+        if os.name == "nt":
+            raise HostConfigError("posix_required")
+        import fcntl
+
+        self.path = Path(path).resolve(strict=True)
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        try:
+            fd = os.open(self.path, flags)
+        except OSError:
+            raise HostConfigError("registration_config_busy") from None
+        try:
+            fd_info = os.fstat(fd)
+            if not stat.S_ISREG(fd_info.st_mode):
+                raise HostConfigError("registration_config_busy")
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            path_info = os.lstat(self.path)
+            if (
+                not stat.S_ISREG(path_info.st_mode)
+                or path_info.st_dev != fd_info.st_dev
+                or path_info.st_ino != fd_info.st_ino
+            ):
+                raise HostConfigError("registration_config_busy")
+        except HostConfigError:
+            os.close(fd)
+            raise
+        except OSError:
+            os.close(fd)
+            raise HostConfigError("registration_config_busy") from None
+        self.fd: int | None = fd
+
+    def close(self) -> None:
+        fd = getattr(self, "fd", None)
+        if fd is not None:
+            self.fd = None
+            try:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
+
+    def __enter__(self) -> "_PosixFile":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def read(self) -> bytes:
+        assert self.fd is not None
+        try:
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(self.fd, 64 * 1024)
+                if not chunk:
+                    return b"".join(chunks)
+                chunks.append(chunk)
+        except OSError:
+            raise HostConfigError("registration_config_io_failed") from None
+
+    def write(self, value: bytes) -> None:
+        assert self.fd is not None
+        try:
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            offset = 0
+            while offset < len(value):
+                chunk = value[offset : offset + 64 * 1024]
+                written = os.write(self.fd, chunk)
+                if written <= 0 or written > len(chunk):
+                    raise HostConfigError("registration_config_io_failed")
+                offset += written
+            os.ftruncate(self.fd, len(value))
+            os.fsync(self.fd)
+        except HostConfigError:
+            raise
+        except OSError:
+            raise HostConfigError("registration_config_io_failed") from None
+
+    def identity(self) -> dict[str, object]:
+        assert self.fd is not None
+        try:
+            info = os.fstat(self.fd)
+        except OSError:
+            raise HostConfigError("registration_config_io_failed") from None
+        return {
+            "volume_serial": int(info.st_dev),
+            "file_id": f"{info.st_ino:032X}",
+        }
+
+    def verify_path_identity(self) -> None:
+        assert self.fd is not None
+        try:
+            fd_info = os.fstat(self.fd)
+            path_info = os.lstat(self.path)
+        except OSError:
+            raise HostConfigError("registration_config_drift") from None
+        if (
+            not stat.S_ISREG(path_info.st_mode)
+            or path_info.st_dev != fd_info.st_dev
+            or path_info.st_ino != fd_info.st_ino
+        ):
+            raise HostConfigError("registration_config_drift")
+
+
 class _PinnedConfigMissing(Exception):
     pass
 
@@ -956,7 +1065,8 @@ def _open_pinned_configs(
 
 @contextmanager
 def open_exclusive_for_test(path: Path) -> Iterator[None]:
-    handle = _WinFile(path)
+    opener = _WinFile if os.name == "nt" else _PosixFile
+    handle = opener(path)
     try:
         yield
     finally:
@@ -974,6 +1084,21 @@ def _default_journal_root() -> Path:
     return Path(local) / "DayZ_MCP" / "host-config-transaction"
 
 
+def _fsync_dir_posix(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _mkdir_restricted(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -982,6 +1107,8 @@ def _mkdir_restricted(path: Path) -> None:
         return
     if os.name != "nt":
         path.mkdir(mode=0o700)
+        _fsync_dir_posix(path.parent)
+        _fsync_dir_posix(path)
         return
     descriptor = wintypes.LPVOID()
     # Protected DACL: local SYSTEM and the object's owner only.
@@ -1028,7 +1155,9 @@ def _persist_manifest(journal: Path, manifest: dict[str, object]) -> None:
     staging = journal / "manifest.staging"
     _write_private(staging, payload)
     os.replace(staging, pending)
+    _fsync_dir_posix(journal)
     os.replace(pending, published)
+    _fsync_dir_posix(journal)
 
 
 def _journal_payload(
@@ -1222,12 +1351,13 @@ def _decode_recovery_sources(
     return decoded
 
 
-def _open_both(paths: dict[str, Path]) -> dict[str, _WinFile]:
-    opened: dict[str, _WinFile] = {}
+def _open_both(paths: dict[str, Path]) -> dict[str, _WinFile | _PosixFile]:
+    opened: dict[str, _WinFile | _PosixFile] = {}
     roles = sorted(paths, key=lambda role: os.path.normcase(str(paths[role].resolve())))
+    opener = _WinFile if os.name == "nt" else _PosixFile
     try:
         for role in roles:
-            opened[role] = _WinFile(paths[role])
+            opened[role] = opener(paths[role])
         return opened
     except Exception:
         for handle in opened.values():
@@ -1235,7 +1365,7 @@ def _open_both(paths: dict[str, Path]) -> dict[str, _WinFile]:
         raise HostConfigError("registration_config_busy") from None
 
 
-def _close_all(handles: dict[str, _WinFile]) -> None:
+def _close_all(handles: dict[str, _WinFile | _PosixFile]) -> None:
     for handle in handles.values():
         handle.close()
 
@@ -1446,6 +1576,11 @@ def apply_host_timeouts(
         build_claude_target(handles["claude"].read(), server_name)
         if "codex" in handles:
             build_codex_target(handles["codex"].read(), server_name)
+        if os.name != "nt":
+            for role in roles:
+                handle = handles[role]
+                assert isinstance(handle, _PosixFile)
+                handle.verify_path_identity()
         manifest["status"] = "committed"
         _persist_manifest(journal, manifest)
         if fault_injector is not None:
