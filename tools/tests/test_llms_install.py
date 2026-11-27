@@ -510,26 +510,52 @@ class LlmsInstallDocsTest(unittest.TestCase):
                 self.assertIn("Codex", body)
                 self.assertIn("registration check failed for Codex", body)
 
+    def _assert_register_precheck_docs(self, body: str, doc_name: str) -> None:
+        lowered = body.casefold()
+        self.assertNotIn("for the add itself", lowered)
+        self.assertNotIn("shim is fine", lowered)
+        self.assertNotIn("the printed lines run automatically", lowered)
+        self.assertNotIn("claude.cmd", body)
+        self.assertIn("pre-check", lowered)
+        self.assertIn("codex.cmd", body)
+        self.assertIn("claude.exe", body)
+        self.assertIn("codex.exe", body)
+        self.assertIn("install_mcp.py", body)
+        self.assertIn("installer_cli_not_native_exe", body)
+        self.assertRegex(
+            body,
+            r"(?s)mcp add.{0,80}(by hand|a mano|manual)"
+            r"|(by hand|a mano|manual).{0,80}mcp add",
+            f"{doc_name} must say the printed mcp add lines are only "
+            "for doing the registration by hand",
+        )
+
     def test_register_docs_distinguish_precheck_from_native_exe(self) -> None:
         for doc_name in ("QUICKSTART.md", "README.md"):
             body = _read(doc_name)
             with self.subTest(doc=doc_name):
-                lowered = body.casefold()
-                self.assertNotIn("for the add itself", lowered)
-                self.assertNotIn("shim is fine", lowered)
-                self.assertIn("pre-check", lowered)
-                self.assertIn("codex.cmd", body)
-                self.assertIn("claude.exe", body)
-                self.assertIn("codex.exe", body)
-                self.assertIn("install_mcp.py", body)
-                self.assertIn("installer_cli_not_native_exe", body)
-                self.assertRegex(
+                self._assert_register_precheck_docs(body, doc_name)
+
+    def test_register_docs_reject_claude_cmd_precheck_and_automatic_printed_lines(self) -> None:
+        """Mutations the looser wording test accepted must now fail."""
+        precheck = r"The pre-check uses\s+`claude`\s*/\s*`codex\.cmd`"
+        for doc_name in ("QUICKSTART.md", "README.md"):
+            body = _read(doc_name)
+            self.assertRegex(body, precheck, f"{doc_name} lost the pre-check sentence")
+            with self.subTest(doc=doc_name, mutation="claude.cmd"):
+                mutated, n = re.subn(
+                    precheck,
+                    "The pre-check uses `claude.cmd` / `codex.cmd`",
                     body,
-                    r"(?s)mcp add.{0,80}(by hand|a mano|manual)"
-                    r"|(by hand|a mano|manual).{0,80}mcp add",
-                    f"{doc_name} must say the printed mcp add lines are only "
-                    "for doing the registration by hand",
+                    count=1,
                 )
+                self.assertEqual(n, 1)
+                with self.assertRaises(AssertionError):
+                    self._assert_register_precheck_docs(mutated, doc_name)
+            with self.subTest(doc=doc_name, mutation="automatic"):
+                mutated = body + "\nThe printed lines run automatically.\n"
+                with self.assertRaises(AssertionError):
+                    self._assert_register_precheck_docs(mutated, doc_name)
 
     def test_documented_release_assets_return_http_200(self) -> None:
         """Every concrete GitHub release asset URL in the user guides must exist.
