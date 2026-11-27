@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import math
@@ -198,6 +199,16 @@ def _codex_config_exists() -> bool:
         return os.path.lexists(_codex_config_path())
     except RuntimeError:
         return False
+
+
+def _codex_present() -> bool:
+    """Codex counts as present when its CLI is on PATH or its config exists.
+
+    --pin-clis and --register share this criterion (fix-forward #464): a
+    Claude-only manifest pinned before a codex CLI appeared must not register
+    Claude alone.
+    """
+    return shutil.which("codex") is not None or _codex_config_exists()
 
 
 def _native_regular_file(path: Path) -> os.stat_result:
@@ -565,11 +576,7 @@ def pin_installer_clis(
     resolved: dict[str, Path] = {
         "CLAUDE": _resolve_pin_cli("CLAUDE", claude_exe),
     }
-    include_codex = (
-        codex_exe is not None
-        or shutil.which("codex") is not None
-        or _codex_config_exists()
-    )
+    include_codex = codex_exe is not None or _codex_present()
     if include_codex:
         resolved["CODEX"] = _resolve_pin_cli("CODEX", codex_exe)
     entries: dict[str, object] = {
@@ -1004,6 +1011,23 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _keyfile_path(value: str | None, canonical_tools: Path) -> Path:
+    """The keyfile path, absolute, without following a link at the leaf.
+
+    On POSIX the directories are resolved but the last component is kept as
+    given (fix-forward #464 round 2): Path.resolve() on the leaf would turn a
+    symbolic link into its target and defeat the O_NOFOLLOW refusal when the
+    key is read or created. Windows keeps the full resolve() it always had.
+    """
+    raw = Path(value) if value else canonical_tools / ".dayz_mcp.key"
+    if os.name != "posix" or raw.name in ("", ".", ".."):
+        return raw.resolve()
+    # Resolve the parent as written: a ".." after a linked directory is taken
+    # relative to the link's target, as Path.resolve() always did (no lexical
+    # abspath collapse, fix-forward #464 round 3). Only the leaf is kept.
+    return raw.parent.resolve() / raw.name
+
+
 def parse_args(
     argv: Sequence[str] | None = None,
     *,
@@ -1044,11 +1068,7 @@ def parse_args(
         parser.error(error.code)
 
     canonical_tools = Path(tools_root).resolve()
-    keyfile = (
-        Path(args.keyfile).resolve()
-        if args.keyfile
-        else (canonical_tools / ".dayz_mcp.key").resolve()
-    )
+    keyfile = _keyfile_path(args.keyfile, canonical_tools)
     return InstallerOptions(
         port=args.port,
         keyfile=keyfile,
@@ -1220,25 +1240,184 @@ def _run_required(
         raise InstallerExecutionError("required_command_failed")
 
 
+_PRIVATE_FILE_MODE = 0o600
+
+
+_NOFOLLOW_FLAGS = (
+    getattr(os, "O_BINARY", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NOCTTY", 0)
+)
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        view = view[written:]
+
+
+def _fsync_parent_posix(path: Path) -> None:
+    if os.name != "posix":
+        return
+    descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _check_owned_regular(info: os.stat_result) -> None:
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != os.geteuid()
+    ):
+        raise PermissionError("private_file_not_owned_regular")
+
+
+def _write_private_file(path: Path, data: bytes, *, exclusive: bool) -> None:
+    """Write a secret-bearing file that is 0600 from the open on POSIX.
+
+    The mode is passed to os.open with O_EXCL, so the umask can only narrow it
+    and no other inode ever holds the new bytes. A new key (exclusive) is
+    created in place; O_EXCL refuses any existing name, a dangling symbolic
+    link included. A rewrite (not exclusive) never reuses the existing inode
+    (fix-forward #464 round 2): a descriptor opened while the old file was
+    0644 would read the new secret through it. The bytes go to a fresh 0600
+    temporary file in the same directory, are fsynced, and os.replace
+    publishes it, followed by an fsync of the directory. An existing leaf that
+    is a symbolic link, not a regular file, hard-linked or not ours is refused
+    and left as it is. On Windows the mode bits carry no access control and
+    the file is rewritten in place as before.
+    """
+    if exclusive:
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW_FLAGS,
+            _PRIVATE_FILE_MODE,
+        )
+        try:
+            if os.name == "posix":
+                _check_owned_regular(os.fstat(descriptor))
+                # The umask can only narrow the open mode; a umask such as
+                # 0400 would leave 0200. Set exactly 0600 on the new file.
+                os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+            _write_all(descriptor, data)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _fsync_parent_posix(path)
+        return
+    if os.name != "posix":
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | _NOFOLLOW_FLAGS, _PRIVATE_FILE_MODE
+        )
+        try:
+            os.ftruncate(descriptor, 0)
+            _write_all(descriptor, data)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        _check_owned_regular(existing)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW_FLAGS,
+        _PRIVATE_FILE_MODE,
+    )
+    try:
+        try:
+            _check_owned_regular(os.fstat(descriptor))
+            os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+            _write_all(descriptor, data)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    _fsync_parent_posix(path)
+
+
+def _read_private_key_posix(path: Path) -> str:
+    """Read the key from the one descriptor that was validated.
+
+    O_NOFOLLOW refuses a symbolic link at the leaf (a dangling one included),
+    and fstat on that same descriptor checks it is a regular file with one
+    link, owned by us and not readable by group or others before any byte is
+    read, so the file cannot be swapped between the check and the read.
+    """
+    try:
+        # O_NONBLOCK: a FIFO at the path must not hang the open; it is then
+        # refused by the fstat check below like any other non-regular file.
+        descriptor = os.open(
+            path, os.O_RDONLY | _NOFOLLOW_FLAGS | getattr(os, "O_NONBLOCK", 0)
+        )
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise InstallerExecutionError("keyfile_permissions_unsafe") from None
+        raise
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+        ):
+            raise InstallerExecutionError("keyfile_permissions_unsafe")
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if sum(map(len, chunks)) > 65536:
+                raise InstallerExecutionError("keyfile_unreadable")
+    finally:
+        os.close(descriptor)
+    return b"".join(chunks).decode("ascii").strip()
+
+
 def _load_or_create_key(
     path: Path,
     token_factory: Callable[[], str],
 ) -> str:
-    if path.exists():
+    # A key readable by group or others is already exposed: refuse it rather
+    # than re-copy it into the configs (fix-forward #464). The POSIX daemon
+    # reader refuses the same modes.
+    value: str | None = None
+    if os.name == "posix":
+        try:
+            value = _read_private_key_posix(path)
+        except FileNotFoundError:
+            value = None
+        except (OSError, UnicodeError) as error:
+            raise InstallerExecutionError("keyfile_unreadable") from error
+    elif path.exists():
         try:
             value = path.read_text(encoding="ascii").strip()
         except (OSError, UnicodeError) as error:
             raise InstallerExecutionError("keyfile_unreadable") from error
-    else:
+    if value is None:
         value = token_factory()
         if not isinstance(value, str) or not value:
             raise InstallerExecutionError("key_generation_failed")
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with path.open("x", encoding="ascii", newline="\n") as handle:
-                handle.write(value + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+            _write_private_file(
+                path, (value + "\n").encode("ascii"), exclusive=True
+            )
         except (OSError, UnicodeError) as error:
             raise InstallerExecutionError("keyfile_write_failed") from error
     if not value:
@@ -1259,9 +1438,12 @@ def config_payload(port: int, key: str) -> str:
 
 
 def _write_config(path: Path, payload: str) -> None:
+    # The payload carries the key: 0600 from the open, like the key itself.
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(payload + "\n", encoding="ascii", newline="\n")
+        _write_private_file(
+            path, (payload + "\n").encode("ascii"), exclusive=False
+        )
     except (OSError, UnicodeError) as error:
         raise InstallerExecutionError("config_write_failed") from error
 
@@ -2110,7 +2292,7 @@ def register_clients(
     codex_in_manifest = (
         not isinstance(manifest_entries, dict) or "CODEX" in manifest_entries
     )
-    if not codex_in_manifest and _codex_config_exists():
+    if not codex_in_manifest and _codex_present():
         raise InstallerContractError(
             "installer_cli_missing",
             f"pass --codex-exe PATH; {_PIN_RECIPE}",

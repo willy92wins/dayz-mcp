@@ -3494,6 +3494,17 @@ class MCPBridge : Managed
 		}
 
 		int crew = 0;
+		// 2026-11-27, two-player run of #432 (#473): with another player at the
+		// wheel, a second StartCommand_Vehicle seated a second driver. Vanilla's
+		// get-in refuses a seat with a crew member in it (actiongetintransport.c),
+		// and query_get_in_condition reads the seat the same way.
+		if (vehicle.CrewMember(crew))
+		{
+			result.ok = false;
+			result.error = "seat_occupied";
+			return true;
+		}
+
 		int seatAnim = vehicle.GetSeatAnimationType(crew);
 		HumanCommandVehicle vehicleCommand = human.StartCommand_Vehicle(vehicle, crew, seatAnim);
 		if (!vehicleCommand)

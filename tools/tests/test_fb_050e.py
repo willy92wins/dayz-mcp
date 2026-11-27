@@ -54,6 +54,7 @@ def _untrusted_client(control, identity, error: Exception | None = None):
     temporary = tempfile.TemporaryDirectory()
     keyfile = Path(temporary.name) / "daemon.key"
     keyfile.write_text("fixture-key\n", encoding="utf-8")
+    keyfile.chmod(0o600)
     policy = _policy(keyfile)
     object.__setattr__(policy, "_revalidation_hook", revalidate)
     client = control.ControlClient(policy=policy, identity=identity)

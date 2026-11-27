@@ -11,12 +11,12 @@ ni OCR**. Control + datos son **engine-native** (CreateObjectEx, StartCommand_Ve
 Car setters, RestApi async, RaycastRVProxy, SetTimeMultiplier). La captura visual es la
 única pieza no-native: `MakeScreenshot` no escribe sin `-autotest` (T165276) y dayz-mcp aún no arranca el cliente así → se hace por **window-grab**
 externo del cliente renderizado (pasivo, solo lee píxeles). Arquitectura cerrada y **en
-producción**: 115 tools registradas (lista en `README.md:108`, contada el 2026-11-12) y puente en `MCP_BRIDGE_VERSION = "13"`
+producción**: 122 tools registradas (lista en `README.md:108`, contada el 2026-11-27) y puente en `MCP_BRIDGE_VERSION = "13"`
 (`addon/scripts/5_Mission/MCPMessages.c:1`). Las 5 fases del plan original están cerradas.
 
 ## Definición de Producto Final
 **Qué es "terminado" → [`product-spec.md`](product-spec.md)** — contrato de aceptación
-(11 tools en 6 dominios en el alcance original —hoy 115 registradas—, seguridad fail-closed, captura visual, criterios verificables por
+(11 tools en 6 dominios en el alcance original —hoy 122 registradas—, seguridad fail-closed, captura visual, criterios verificables por
 fase, fuera de alcance, paridad). Leerlo antes de planificar cualquier fase. El Grill de
 plan (Modo B) exige que cada fase trace a un criterio de ahí.
 
@@ -104,3 +104,10 @@ C1 del embedded) NO se toca — son discriminadores SEPARADOS por modo. Cambios 
 3. No matar procesos DayZ directamente; usar el lifecycle guard.
 4. Ejecutar `session_status` antes del handoff y documentar cierres degradados.
 Runbook: `C:\Users\guill\ObsidianVault\AI\20_Runbooks\dayz-mcp-agent-session-protocol.md`.
+
+## DayZ MCP — la caja es una cola
+- `session_status()` → `box.occupied`. Un daemon o arnés que solo escucha en otro puerto no ocupa la caja. `m1.espera` sí la ocupa aunque no haya DayZ, y nunca caduca solo.
+- Ocupada: `dayz_test_run(..., on_busy="queue")` y espera; no sondees huecos.
+- Nunca cierres ni mates lo ajeno, ni borres `m1.espera`, ni preguntes a Guillermo si cerrarlo.
+- Clasifica por `error_code`, `reason` y `queue_offer`. Solo reencola con oferta FIFO accionable (`retry.on_busy="queue"`), aplicando todos los args de `queue_offer.retry`. `port_in_use_foreign`, `box_reserved` u `own_run` con `queue_offer` nulo son terminales. Plazo monotónico de 1800 s: `wait_for_box_s=min(600, remaining)`; si remaining <= 0, para (no pases 0).
+Detalle: la sección «La caja está ocupada» del runbook.

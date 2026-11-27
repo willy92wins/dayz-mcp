@@ -140,7 +140,7 @@ def read_pinned_keyfile_posix(path: object) -> str:
 
     An absolute, normalized path; no symbolic link in it, the leaf included
     (O_NOFOLLOW, lstat on every parent); a regular file with one link, owned by this
-    user, not writable by group or others, at most 4096 bytes.
+    user, not readable or writable by group or others, at most 4096 bytes.
     """
     if (
         not isinstance(path, str)
@@ -165,7 +165,7 @@ def read_pinned_keyfile_posix(path: object) -> str:
             not _stat.S_ISREG(info.st_mode)
             or info.st_nlink != 1
             or info.st_uid != os.geteuid()
-            or info.st_mode & 0o022
+            or info.st_mode & 0o077
             or info.st_size > _MAX_RAW_BYTES
         ):
             raise ValueError("invalid_daemon_keyfile")

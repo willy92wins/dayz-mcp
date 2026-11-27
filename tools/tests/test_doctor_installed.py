@@ -371,6 +371,39 @@ class DoctorDefaultSourcesInstalledTest(unittest.TestCase):
         self.assertIsNone(sources.codex_config)
         self.assertTrue(sources.codex_expected)
 
+    def test_claude_only_manifest_with_codex_on_path_keeps_codex_expected(self) -> None:
+        # Fix-forward #464 P1-1: a codex CLI that appeared on PATH after a
+        # Claude-only pin is a discrepancy the doctor reports (CLI_NOT_PINNED).
+        home = self.base / "codex-on-path-home"
+        home.mkdir()
+        payload = {
+            "entries": {
+                "CLAUDE": {"path": str(self.claude_exe)},
+                "CODEX": None,
+            }
+        }
+        (self.security / "installer-cli-manifest-v1.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        env = {
+            "DAYZ_MCP_SECURITY_DIR": str(self.security),
+            "USERPROFILE": str(home),
+            "HOME": str(home),
+        }
+        codex_on_path = str(self.cli_dir / "codex")
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch.object(
+                doctor.shutil,
+                "which",
+                side_effect=lambda name: codex_on_path if name.startswith("codex") else None,
+            ),
+        ):
+            sources = _default_sources(str(self.doctor_file))
+        self.assertIsNotNone(sources.claude_config)
+        self.assertIsNone(sources.codex_config)
+        self.assertTrue(sources.codex_expected)
+
     def test_checkout_sources_without_codex_cli_or_config_sets_codex_not_expected(self) -> None:
         home = self.base / "checkout-claude-only-home"
         home.mkdir()
@@ -941,26 +974,83 @@ class DoctorInstalledDiagnoseTest(unittest.TestCase):
             payload,
             {
                 "ok": True,
-                "findings": [self.daemon_ok()],
-                "summary": {"fail": 0, "warn": 0},
+                "findings": [
+                    self.daemon_ok(),
+                    {
+                        "code": "RETAIL_MANUAL_CLOSE_REQUIRED",
+                        "severity": "WARN",
+                        "processes": [
+                            {"pid": 49040, "name": "DayZ_x64.exe"},
+                            {"pid": 49041, "name": "DayZ_BE.exe"},
+                        ],
+                    },
+                ],
+                "summary": {"fail": 0, "warn": 1},
             },
         )
+        self.assertNotIn(
+            "PROCESS_UNREGISTERED",
+            [item["code"] for item in payload["findings"]],
+        )
 
-    def test_installed_with_require_clean_ignores_running_dayz_server_and_client(
+    def test_installed_doctor_retail_names_match_the_daemon_probe(self) -> None:
+        from dayz_mcp import orphan_guard
+
+        self.assertEqual(
+            list(doctor._RETAIL_NAMES),
+            list(orphan_guard.RETAIL_PROCESS_NAMES),
+        )
+        self.assertIsInstance(orphan_guard.RETAIL_PROCESS_NAMES, tuple)
+        self.assertEqual(
+            list(orphan_guard.RETAIL_PROCESS_NAMES),
+            ["DayZ_BE.exe", "DayZ_x64.exe"],
+        )
+
+    def test_readme_mcp_installed_mode_reports_retail_quarantine(self) -> None:
+        from pathlib import Path
+
+        text = (
+            Path(__file__).resolve().parents[2] / "tools" / "README-mcp.md"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn(
+            "doctor reports neither `RETAIL_MANUAL_CLOSE_REQUIRED`",
+            text,
+        )
+        self.assertRegex(
+            text,
+            r"RETAIL_MANUAL_CLOSE_REQUIRED.{0,200}installed mode"
+            r"|installed mode.{0,200}RETAIL_MANUAL_CLOSE_REQUIRED",
+        )
+
+    def test_installed_with_require_clean_fails_on_retail_quarantine(
         self,
     ) -> None:
         payload, exit_code = doctor.execute(
             self.sources(process_snapshot=self._dayz_processes_snapshot),
             require_clean=True,
         )
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(exit_code, 1)
         self.assertEqual(
             payload,
             {
-                "ok": True,
-                "findings": [self.daemon_ok()],
-                "summary": {"fail": 0, "warn": 0},
+                "ok": False,
+                "findings": [
+                    self.daemon_ok(),
+                    {
+                        "code": "RETAIL_MANUAL_CLOSE_REQUIRED",
+                        "severity": "FAIL",
+                        "processes": [
+                            {"pid": 49040, "name": "DayZ_x64.exe"},
+                            {"pid": 49041, "name": "DayZ_BE.exe"},
+                        ],
+                    },
+                ],
+                "summary": {"fail": 1, "warn": 0},
             },
+        )
+        self.assertNotIn(
+            "PROCESS_UNREGISTERED",
+            [item["code"] for item in payload["findings"]],
         )
 
     def test_not_installed_reports_running_dayz_server_and_client(self) -> None:
@@ -1076,14 +1166,26 @@ class DoctorInstalledDiagnoseTest(unittest.TestCase):
                 "findings": [
                     self.daemon_ok(),
                     {
+                        "code": "RETAIL_MANUAL_CLOSE_REQUIRED",
+                        "severity": "WARN",
+                        "processes": [
+                            {"pid": 49040, "name": "DayZ_x64.exe"},
+                            {"pid": 49041, "name": "DayZ_BE.exe"},
+                        ],
+                    },
+                    {
                         "code": "RUN_STALE",
                         "severity": "FAIL",
                         "pid": 900,
                         "run_id": "run-1",
                     },
                 ],
-                "summary": {"fail": 1, "warn": 0},
+                "summary": {"fail": 1, "warn": 1},
             },
+        )
+        self.assertNotIn(
+            "PROCESS_UNREGISTERED",
+            [item["code"] for item in payload["findings"]],
         )
 
     def test_installed_still_reports_process_scan_failed(self) -> None:

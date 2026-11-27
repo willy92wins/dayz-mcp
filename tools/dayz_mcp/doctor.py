@@ -43,7 +43,7 @@ from dayz_mcp.runtime_state import (
 from dayz_mcp.session_coordination import SESSION_TTL_S
 
 
-_RETAIL_NAMES = ["DayZ_BE.exe", "DayZ_x64.exe"]
+_RETAIL_NAMES = list(orphan_guard.RETAIL_PROCESS_NAMES)
 _MANAGED_NAMES = ["DayZDiag_x64.exe", "DayZServer_x64.exe"]
 _BLIND_KILL = re.compile(r"\bStop-Process\b|\btaskkill(?:\.exe)?\b|\.Kill\s*\(", re.I)
 _VALUE_OPTIONS = frozenset(
@@ -357,7 +357,15 @@ def default_sources(
             and "CODEX" in manifest_payload["entries"]
             and manifest_payload["entries"]["CODEX"] is None
         )
-        codex_expected = not (codex_explicitly_absent and not codex_file_exists)
+        # A codex CLI on PATH after a Claude-only pin is a discrepancy, the
+        # same criterion --register applies (fix-forward #464): Codex stays
+        # expected and the missing pin is reported as CLI_NOT_PINNED.
+        codex_on_path = (
+            shutil.which("codex.cmd") is not None or shutil.which("codex") is not None
+        )
+        codex_expected = not (
+            codex_explicitly_absent and not codex_file_exists and not codex_on_path
+        )
         if claude_path is None:
             claude_config = None
         else:
@@ -1701,9 +1709,11 @@ def _diagnose(
     crash_reporters = _safe_snapshot(
         sources.process_snapshot, ["CrashReporter.exe"], "crash_reporter", findings
     )
-    # Installed mode has no dayz_test_run, so running retail DayZ processes
-    # belong to the person and do not require manual closing.
-    if retail and not sources.installed:
+    # Same retail probe the daemon uses (DayZ_x64 / DayZ_BE). Installed mode
+    # still suppresses PROCESS_UNREGISTERED for the person's server and client,
+    # but the effective quarantine is visible: WARN normally, FAIL with
+    # --require-clean.
+    if retail:
         findings.append(
             _finding(
                 "RETAIL_MANUAL_CLOSE_REQUIRED",
