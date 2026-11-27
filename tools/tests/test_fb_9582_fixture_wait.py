@@ -223,8 +223,10 @@ class Fb9582FixtureWaitContract:
     def _assert_job_only_reads(case: unittest.TestCase, is_job_ready: str) -> None:
         gate = 'else if (job.kind == "vehicle_fixture")'
         _, start, end = _block_after(is_job_ready, gate)
+        # b95f: a motorbike subject is read by its own readiness first; both only read.
         case.assertEqual(
-            is_job_ready[start:end].strip(),
+            _flat(is_job_ready[start:end]),
+            "if (MotorbikeScript.Cast(job.subject)) { return IsMotorbikeFixtureReady(MotorbikeScript.Cast(job.subject)); } "
             "return IsVehicleFixtureReady(CarScript.Cast(job.subject));",
         )
 
@@ -321,8 +323,9 @@ class Fb9582FixtureWaitTest(unittest.TestCase):
             # A job of another kind, so IsJobReady never reads the fixture.
             "wrong_job_kind": _mutant(
                 self.source,
-                'job.kind = "vehicle_fixture";',
-                'job.kind = "spawn";',
+                # b95f: the car's queue; DispatchMotorbikeFixture queues the same kind.
+                'job.kind = "vehicle_fixture";\n\t\t\tjob.args = command.args;\n\t\t\tjob.subject = car;',
+                'job.kind = "spawn";\n\t\t\tjob.args = command.args;\n\t\t\tjob.subject = car;',
             ),
             # Codex H1 (r1 of #272; named in r3): IsJobReady still reads the
             # fixture, but its success branch is closed to it, so a ready car
@@ -347,8 +350,8 @@ class Fb9582FixtureWaitTest(unittest.TestCase):
             ),
             "no_wait": _mutant(
                 self.source,
-                "job.deadline_s = m_ElapsedS + VEHICLE_FIXTURE_WAIT_S;",
-                "job.deadline_s = m_ElapsedS;",
+                "job.subject = car;\n\t\t\tjob.deadline_s = m_ElapsedS + VEHICLE_FIXTURE_WAIT_S;",
+                "job.subject = car;\n\t\t\tjob.deadline_s = m_ElapsedS;",
             ),
             "job_spawns_again": _mutant(
                 self.source,
@@ -389,8 +392,8 @@ class Fb9582FixtureWaitTest(unittest.TestCase):
             ),
             "timeout_reads_ok": _mutant(
                 self.source,
-                "result.ok = ready;",
-                "result.ok = true;",
+                "PopulateTelemetryObject(car, telemetry);\n\t\tresult.vehicle_fixture_ready = ready;\n\t\tresult.ok = ready;",
+                "PopulateTelemetryObject(car, telemetry);\n\t\tresult.vehicle_fixture_ready = ready;\n\t\tresult.ok = true;",
             ),
         }
         for label, source in mutants.items():
