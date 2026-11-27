@@ -242,13 +242,25 @@ def _validate_x64_pe(path: Path) -> None:
         raise InstallerContractError("installer_cli_not_native_x64_pe")
 
 
+_ELF64_HEADER_BYTES = 64
+
+
 def _validate_elf(path: Path) -> None:
+    # A whole ELF64 header, little-endian, version 1 (P2 of #465): the four
+    # magic bytes alone also admitted a 4-byte file and 32-bit or big-endian
+    # images. The architecture is left to the probe that runs the file.
     try:
         with path.open("rb") as handle:
-            magic = handle.read(4)
+            header = handle.read(_ELF64_HEADER_BYTES)
     except OSError as error:
         raise InstallerContractError("installer_cli_unreadable") from error
-    if magic != _ELF_MAGIC:
+    if (
+        len(header) < _ELF64_HEADER_BYTES
+        or header[:4] != _ELF_MAGIC
+        or header[4] != 2  # ELFCLASS64
+        or header[5] != 1  # ELFDATA2LSB
+        or header[6] != 1  # EV_CURRENT
+    ):
         raise InstallerContractError("installer_cli_not_elf")
 
 
@@ -1532,16 +1544,22 @@ def _registration_publication_paths(journal: Path) -> tuple[Path, Path, Path]:
 
 
 def _write_registration_manifest(journal: Path, manifest: dict[str, object]) -> None:
-    from dayz_mcp.host_config import _mkdir_restricted, _write_private
+    from dayz_mcp.host_config import _fsync_dir_posix, _mkdir_restricted, _write_private
 
     # The active names appear only after the bytes are complete. A kill during
     # the first write leaves manifest.staging, which is not a journal.
+    # Same durable publication as host_config._persist_manifest: a directory
+    # fsync after each rename, so the journal that holds the previous
+    # registration is on disk before the caller's first provider.remove()
+    # (fix-forward #465).
     _mkdir_restricted(journal)
     payload = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
     published, pending, staging = _registration_publication_paths(journal)
     _write_private(staging, payload)
     os.replace(staging, pending)
+    _fsync_dir_posix(journal)
     os.replace(pending, published)
+    _fsync_dir_posix(journal)
 
 
 def _cleanup_registration_journal(journal: Path) -> None:

@@ -1554,6 +1554,24 @@ def apply_host_timeouts(
     handles = _open_both(paths)
     journal_started = False
     journal_prepared = False
+    # Roles this transaction has written. On POSIX flock is advisory, so a
+    # writer that ignores it can edit the same inode at any point: before each
+    # write and again before committed, every file must still be the inode we
+    # opened and hold the bytes we expect (fix-forward #465).
+    touched: set[str] = set()
+
+    def expected(role: str) -> bytes:
+        return targets[role] if role in touched else originals[role]
+
+    def verify_owned() -> None:
+        if os.name != "nt":
+            for role in roles:
+                handle = handles[role]
+                assert isinstance(handle, _PosixFile)
+                handle.verify_path_identity()
+        if any(handles[role].read() != expected(role) for role in roles):
+            raise HostConfigError("registration_config_concurrent_edit")
+
     try:
         if any(handles[role].read() != originals[role] for role in paths):
             raise HostConfigError("registration_config_drift")
@@ -1568,6 +1586,8 @@ def apply_host_timeouts(
         manifest["status"] = "writing"
         _persist_manifest(journal, manifest)
         for role in roles:
+            verify_owned()
+            touched.add(role)
             handles[role].write(targets[role])
             if fault_injector is not None:
                 fault_injector(f"after_write_{role}")
@@ -1576,11 +1596,7 @@ def apply_host_timeouts(
         build_claude_target(handles["claude"].read(), server_name)
         if "codex" in handles:
             build_codex_target(handles["codex"].read(), server_name)
-        if os.name != "nt":
-            for role in roles:
-                handle = handles[role]
-                assert isinstance(handle, _PosixFile)
-                handle.verify_path_identity()
+        verify_owned()
         manifest["status"] = "committed"
         _persist_manifest(journal, manifest)
         if fault_injector is not None:
@@ -1597,10 +1613,25 @@ def apply_host_timeouts(
                     {role: handles[role].read() for role in paths}
                 )
                 _persist_manifest(journal, manifest)
+                # Restore only files this transaction wrote whose bytes are
+                # still its own. An untouched file, or one another writer
+                # changed after our write, is left exactly as it is: its edit
+                # is kept, never overwritten with our original.
                 for role in roles:
+                    if role not in touched:
+                        continue
+                    if os.name != "nt":
+                        handle = handles[role]
+                        assert isinstance(handle, _PosixFile)
+                        try:
+                            handle.verify_path_identity()
+                        except HostConfigError:
+                            continue
+                    if handles[role].read() != targets[role]:
+                        continue
                     handles[role].write(originals[role])
-                if any(handles[role].read() != originals[role] for role in paths):
-                    raise HostConfigError("registration_config_rollback_failed")
+                    if handles[role].read() != originals[role]:
+                        raise HostConfigError("registration_config_rollback_failed")
                 manifest["status"] = "restored"
                 _persist_manifest(journal, manifest)
                 _cleanup_journal(journal)
