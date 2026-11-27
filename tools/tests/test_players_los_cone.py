@@ -2283,7 +2283,8 @@ class PlayersLosConeToolTest(unittest.IsolatedAsyncioTestCase):
         for fragment in (
             "include_unverified",
             "server's heading for the player, not the client camera",
-            "mouse movement or free look",
+            "measured in game on 2026-11-27 through players_visibility",
+            "free look (holding Alt) does not move it",
             "pitch_filter_applied=false",
             "up to 4 observers",
             "first 8 receive a raycast",
