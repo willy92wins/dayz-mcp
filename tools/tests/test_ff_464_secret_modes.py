@@ -246,6 +246,58 @@ class PosixInstallerSecretModesTest(unittest.TestCase):
             with self.subTest(path=path.name):
                 self.assertEqual(self._mode(path), 0o600)
 
+    # --- follow-up hardening (Auditor, round 3 on #474) -------------------
+
+    def test_a_keyfile_ending_in_dotdot_is_refused(self) -> None:
+        (self.root / "real").mkdir()
+        for value in (f"{self.root}/real/..", ".."):
+            with self.subTest(value=value):
+                with self.assertRaises(installer.InstallerContractError) as raised:
+                    self._options_for(Path(value))
+                self.assertEqual(raised.exception.code, "keyfile_path_invalid")
+
+    def test_a_failure_after_the_exclusive_create_removes_our_key(self) -> None:
+        key = self.root / "k.key"
+        with patch.object(installer, "_write_all", side_effect=OSError(5, "EIO")):
+            with self.assertRaises(InstallerExecutionError) as raised:
+                installer._load_or_create_key(key, lambda: "k-partial")
+        self.assertEqual(str(raised.exception), "keyfile_write_failed")
+        self.assertFalse(os.path.lexists(key))
+        # The next run creates a complete key instead of reading an empty one.
+        self.assertEqual(installer._load_or_create_key(key, lambda: "k-full"), "k-full")
+
+    def test_a_replaced_key_is_never_removed_by_our_cleanup(self) -> None:
+        key = self.root / "k.key"
+        other = self.root / "other.key"
+        other.write_text("someone-else\n", encoding="ascii")
+
+        def swap_then_fail(_descriptor, _data):
+            os.replace(other, key)
+            raise OSError(5, "EIO")
+
+        with patch.object(installer, "_write_all", side_effect=swap_then_fail):
+            with self.assertRaises(InstallerExecutionError):
+                installer._load_or_create_key(key, lambda: "k-partial")
+        self.assertEqual(key.read_text(encoding="ascii"), "someone-else\n")
+
+    def test_a_mode_that_fchmod_did_not_apply_is_refused(self) -> None:
+        # VFAT and similar accept fchmod and keep their own mode bits.
+        os.umask(0o400)
+        key = self.root / "k.key"
+        config = self.root / "dayz_mcp.json"
+        config.write_text("{}\n", encoding="ascii")
+        config.chmod(0o600)
+        with patch.object(installer.os, "fchmod", lambda *_args: None):
+            with self.assertRaises(InstallerExecutionError) as raised:
+                installer._load_or_create_key(key, lambda: "k-vfat")
+            self.assertEqual(str(raised.exception), "keyfile_write_failed")
+            self.assertFalse(os.path.lexists(key))
+            with self.assertRaises(InstallerExecutionError) as raised:
+                installer._write_config(config, installer.config_payload(1, "k-vfat"))
+            self.assertEqual(str(raised.exception), "config_write_failed")
+        self.assertEqual(config.read_text(encoding="ascii"), "{}\n")
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["dayz_mcp.json"])
+
     def test_install_runtime_under_umask_022_leaves_every_secret_0600(self) -> None:
         tools_root = self.root / "tools"
         tools_root.mkdir()
