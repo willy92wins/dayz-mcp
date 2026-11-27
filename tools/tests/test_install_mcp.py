@@ -10,12 +10,13 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import unicodedata
 import unittest
 from ctypes import wintypes
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -3465,6 +3466,262 @@ class ClaudeOnlyAndPosixPythonTest(unittest.TestCase):
                 options, self.venv_python, runner=absent_probe_runner
             )
         self.assertEqual(reg_raised.exception.code, "installer_cli_missing")
+
+
+class PosixInstallerRound3Test(unittest.TestCase):
+    """Issue #422 round 3: POSIX install_runtime and --pin-clis resolution."""
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+
+    def _make_tools_root(self, *, with_psutil_vendor: bool) -> Path:
+        tools_root = self.root / "tools"
+        tools_root.mkdir(exist_ok=True)
+        (tools_root / "requirements-mcp.txt").write_text(
+            "mcp==1.27.2\nPillow==12.2.0\npsutil==7.2.2\n",
+            encoding="utf-8",
+        )
+        (tools_root / "pyproject.toml").write_text(
+            "[build-system]\nrequires=[]\n",
+            encoding="utf-8",
+        )
+        if with_psutil_vendor:
+            vendor = tools_root / "vendor" / "psutil"
+            vendor.mkdir(parents=True, exist_ok=True)
+            wheel_name = "psutil-7.2.2-cp37-abi3-win_amd64.whl"
+            source_vendor = TOOLS_DIR / "vendor" / "psutil"
+            shutil.copyfile(source_vendor / wheel_name, vendor / wheel_name)
+            shutil.copyfile(
+                source_vendor / "SHA256SUMS.json",
+                vendor / "SHA256SUMS.json",
+            )
+        return tools_root
+
+    def test_install_runtime_posix_uses_venv_copies_and_skips_psutil_wheel(
+        self,
+    ) -> None:
+        tools_root = self._make_tools_root(with_psutil_vendor=False)
+        base_python = self.root / "base" / "bin" / "python3"
+        base_python.parent.mkdir(parents=True)
+        base_python.write_bytes(b"#!/bin/sh\n")
+        options = parse_args(["--port", "18765"], tools_root=tools_root)
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def runner(argv: list[str], **kwargs: object) -> object:
+            calls.append((list(argv), dict(kwargs)))
+            if argv[1:3] == ["-m", "venv"]:
+                venv_python = Path(argv[-1]) / "bin" / "python"
+                venv_python.parent.mkdir(parents=True)
+                venv_python.write_bytes(b"#!/bin/sh\n")
+            return type(
+                "Completed",
+                (),
+                {"returncode": 0, "stdout": "", "stderr": ""},
+            )()
+
+        with (
+            patch.object(installer, "_is_windows_host", return_value=False),
+            patch.object(
+                installer,
+                "_verified_psutil_wheel",
+                side_effect=AssertionError("must not verify Windows psutil wheel on POSIX"),
+            ),
+        ):
+            summary = install_runtime(
+                options,
+                base_python=base_python,
+                runner=runner,
+                token_factory=lambda: "posix-fixture-token",
+            )
+
+        venv_root = tools_root / ".venv-mcp"
+        venv_python = venv_root / "bin" / "python"
+        expected_commands = [
+            [str(base_python), "-m", "venv", "--copies", str(venv_root)],
+            [
+                str(venv_python),
+                "-m",
+                "pip",
+                "install",
+                "-r",
+                str(tools_root / "requirements-mcp.txt"),
+            ],
+            [
+                str(venv_python),
+                "-m",
+                "pip",
+                "install",
+                "-e",
+                str(tools_root),
+            ],
+        ]
+        self.assertEqual([call[0] for call in calls], expected_commands)
+        self.assertFalse(
+            any("--no-index" in command or ".whl" in " ".join(command) for command, _ in calls)
+        )
+        self.assertEqual(summary["venv_python"], str(venv_python))
+
+    def test_install_runtime_windows_keeps_psutil_wheel_and_default_venv_argv(
+        self,
+    ) -> None:
+        tools_root = self._make_tools_root(with_psutil_vendor=True)
+        wheel = tools_root / "vendor" / "psutil" / "psutil-7.2.2-cp37-abi3-win_amd64.whl"
+        base_python = self.root / "base" / "python.exe"
+        base_python.parent.mkdir(parents=True)
+        write_fake_x64_pe(base_python)
+        options = parse_args(["--port", "18765"], tools_root=tools_root)
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def runner(argv: list[str], **kwargs: object) -> object:
+            calls.append((list(argv), dict(kwargs)))
+            if argv[1:3] == ["-m", "venv"]:
+                venv_python = Path(argv[3]) / "Scripts" / "python.exe"
+                venv_python.parent.mkdir(parents=True)
+                write_fake_x64_pe(venv_python)
+            return type(
+                "Completed",
+                (),
+                {"returncode": 0, "stdout": "", "stderr": ""},
+            )()
+
+        with patch.object(installer, "_is_windows_host", return_value=True):
+            summary = install_runtime(
+                options,
+                base_python=base_python,
+                runner=runner,
+                token_factory=lambda: "windows-fixture-token",
+            )
+
+        venv_root = tools_root / ".venv-mcp"
+        venv_python = venv_root / "Scripts" / "python.exe"
+        expected_commands = [
+            [str(base_python), "-m", "venv", str(venv_root)],
+            [
+                str(venv_python),
+                "-m",
+                "pip",
+                "install",
+                "--no-index",
+                "--no-deps",
+                str(wheel),
+            ],
+            [
+                str(venv_python),
+                "-m",
+                "pip",
+                "install",
+                "-r",
+                str(tools_root / "requirements-mcp.txt"),
+            ],
+            [
+                str(venv_python),
+                "-m",
+                "pip",
+                "install",
+                "-e",
+                str(tools_root),
+            ],
+        ]
+        self.assertEqual([call[0] for call in calls], expected_commands)
+        self.assertNotIn("--copies", calls[0][0])
+        self.assertEqual(summary["venv_python"], str(venv_python))
+
+    def test_resolve_pin_cli_posix_accepts_executable_regular_file_and_rejects_bad_targets(
+        self,
+    ) -> None:
+        claude = self.root / "claude"
+        codex = self.root / "codex"
+        for path in (claude, codex):
+            path.write_bytes(b"#!/bin/sh\n")
+            path.chmod(0o755)
+        no_exec = self.root / "noexec" / "claude"
+        no_exec.parent.mkdir()
+        no_exec.write_bytes(b"#!/bin/sh\n")
+        no_exec.chmod(0o644)
+        directory = self.root / "dir" / "claude"
+        directory.mkdir(parents=True)
+        missing = self.root / "missing" / "claude"
+
+        real_claude = Path(os.path.realpath(claude, strict=True))
+        real_codex = Path(os.path.realpath(codex, strict=True))
+        real_no_exec = Path(os.path.realpath(no_exec, strict=True))
+
+        # NTFS does not store POSIX execute bits on extensionless files. Only
+        # supply the chmod modes via lstat when the host filesystem drops them.
+        if bool(real_claude.lstat().st_mode & 0o111):
+            lstat_ctx = nullcontext()
+        else:
+            mode_overrides = {
+                real_claude: 0o755,
+                real_codex: 0o755,
+                real_no_exec: 0o644,
+            }
+            real_lstat = Path.lstat
+
+            def fake_lstat(path: Path) -> os.stat_result:
+                result = real_lstat(path)
+                mode = mode_overrides.get(path)
+                if mode is not None:
+                    return os.stat_result(
+                        (stat.S_IFMT(result.st_mode) | mode, *result[1:])
+                    )
+                return result
+
+            lstat_ctx = patch.object(Path, "lstat", fake_lstat)
+
+        with patch.object(installer, "_is_windows_host", return_value=False), lstat_ctx:
+            self.assertEqual(
+                installer._resolve_pin_cli("CLAUDE", claude), real_claude
+            )
+            self.assertEqual(
+                installer._resolve_pin_cli("CODEX", codex), real_codex
+            )
+
+            with self.assertRaises(InstallerContractError) as dir_err:
+                installer._resolve_pin_cli("CLAUDE", directory)
+            self.assertEqual(dir_err.exception.code, "installer_cli_is_directory")
+
+            with self.assertRaises(InstallerContractError) as nonexec_err:
+                installer._resolve_pin_cli("CLAUDE", no_exec)
+            self.assertEqual(
+                nonexec_err.exception.code, "installer_cli_not_executable"
+            )
+
+            with self.assertRaises(InstallerContractError) as missing_err:
+                installer._resolve_pin_cli("CLAUDE", missing)
+            self.assertEqual(missing_err.exception.code, "installer_cli_missing")
+
+            with self.assertRaises(InstallerContractError) as role_err:
+                installer._resolve_pin_cli("CLAUDE", codex)
+            self.assertEqual(
+                role_err.exception.code, "installer_cli_role_path_mismatch"
+            )
+
+            with self.assertRaises(InstallerContractError) as rel_err:
+                installer._resolve_pin_cli("CLAUDE", Path("claude"))
+            self.assertEqual(
+                rel_err.exception.code, "installer_cli_path_not_absolute"
+            )
+
+    def test_resolve_pin_cli_windows_still_rejects_path_without_exe_suffix(
+        self,
+    ) -> None:
+        claude_no_ext = self.root / "claude"
+        claude_no_ext.write_bytes(b"#!/bin/sh\n")
+        claude_no_ext.chmod(0o755)
+        claude_exe = self.root / "claude.exe"
+        write_fake_x64_pe(claude_exe)
+
+        with patch.object(installer, "_is_windows_host", return_value=True):
+            with self.assertRaises(InstallerContractError) as raised:
+                installer._resolve_pin_cli("CLAUDE", claude_no_ext)
+            self.assertEqual(raised.exception.code, "installer_cli_not_native_exe")
+            self.assertEqual(
+                installer._resolve_pin_cli("CLAUDE", claude_exe),
+                claude_exe.resolve(),
+            )
 
 
 if __name__ == "__main__":

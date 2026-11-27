@@ -438,6 +438,51 @@ def _retire_installer_not_found_fixture(path: Path) -> None:
     os.replace(fixture, stale)
 
 
+def _has_posix_executable_bit(metadata: os.stat_result) -> bool:
+    return bool(metadata.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+
+
+def _resolve_pin_cli_posix(role: str, candidate: Path, flag: str) -> Path:
+    expected_name = role.lower()
+    if not candidate.is_absolute():
+        raise InstallerContractError(
+            "installer_cli_path_not_absolute",
+            f"pass {flag} PATH; {_PIN_RECIPE}",
+        )
+    try:
+        resolved = Path(os.path.realpath(candidate, strict=True))
+    except OSError as error:
+        raise InstallerContractError(
+            "installer_cli_missing",
+            f"pass {flag} PATH; {_PIN_RECIPE}",
+        ) from error
+    try:
+        metadata = resolved.lstat()
+    except OSError as error:
+        raise InstallerContractError(
+            "installer_cli_missing",
+            f"pass {flag} PATH; {_PIN_RECIPE}",
+        ) from error
+    if stat.S_ISDIR(metadata.st_mode):
+        raise InstallerContractError(
+            "installer_cli_is_directory",
+            f"pass {flag} PATH to an executable {expected_name}; {_PIN_RECIPE}",
+        )
+    if not stat.S_ISREG(metadata.st_mode) or resolved.is_symlink():
+        raise InstallerContractError(
+            "installer_cli_not_native_regular_file",
+            f"pass {flag} PATH to an executable {expected_name}; {_PIN_RECIPE}",
+        )
+    if not _has_posix_executable_bit(metadata):
+        raise InstallerContractError(
+            "installer_cli_not_executable",
+            f"pass {flag} PATH to an executable {expected_name}; {_PIN_RECIPE}",
+        )
+    if resolved.name.casefold() != expected_name:
+        raise InstallerContractError("installer_cli_role_path_mismatch")
+    return resolved
+
+
 def _resolve_pin_cli(role: str, explicit: Path | None) -> Path:
     expected_name = _EXPECTED_ROLES[role]
     flag = f"--{role.lower()}-exe"
@@ -451,6 +496,8 @@ def _resolve_pin_cli(role: str, explicit: Path | None) -> Path:
                 f"pass {flag} PATH; {_PIN_RECIPE}",
             )
         candidate = Path(found)
+    if not _is_windows_host():
+        return _resolve_pin_cli_posix(role, candidate, flag)
     if candidate.suffix.casefold() != ".exe":
         raise InstallerContractError(
             "installer_cli_not_native_exe",
@@ -1178,23 +1225,30 @@ def install_runtime(
     pyproject = tools_root / "pyproject.toml"
     if not requirements.is_file() or not pyproject.is_file():
         raise InstallerContractError("installer_source_incomplete")
-    wheel = _verified_psutil_wheel(tools_root)
+    is_windows = _is_windows_host()
+    wheel = _verified_psutil_wheel(tools_root) if is_windows else None
 
     venv_root = tools_root / ".venv-mcp"
     venv_python = (
         venv_root / "Scripts" / "python.exe"
-        if _is_windows_host()
+        if is_windows
         else venv_root / "bin" / "python"
     )
     if not venv_root.exists():
-        _run_required(base, ("-m", "venv", str(venv_root)), runner)
+        venv_args = (
+            ("-m", "venv", str(venv_root))
+            if is_windows
+            else ("-m", "venv", "--copies", str(venv_root))
+        )
+        _run_required(base, venv_args, runner)
     _validate_python_executable(venv_python)
 
-    _run_required(
-        venv_python,
-        ("-m", "pip", "install", "--no-index", "--no-deps", str(wheel)),
-        runner,
-    )
+    if wheel is not None:
+        _run_required(
+            venv_python,
+            ("-m", "pip", "install", "--no-index", "--no-deps", str(wheel)),
+            runner,
+        )
     _run_required(
         venv_python,
         ("-m", "pip", "install", "-r", str(requirements)),

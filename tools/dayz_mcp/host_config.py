@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import errno
 import hashlib
 import json
 import math
 import os
 import re
 import shutil
+import stat
 import sys
 import tomllib
 from contextlib import contextmanager
@@ -423,7 +425,7 @@ def resolve_daemon_provenance(
         if codex is None:
             if handles["codex"] is not None:
                 raise HostConfigError("daemon_provenance_incomplete")
-            if os.path.lexists(paths["codex"]):
+            if _pinned_path_exists(paths["codex"]):
                 raise HostConfigError("daemon_provenance_conflict")
         elif claude != codex:
             raise HostConfigError("daemon_provenance_conflict")
@@ -462,7 +464,7 @@ def resolve_daemon_provenance(
         for platform in ("claude", "codex"):
             handle = handles[platform]
             if handle is None:
-                if os.path.lexists(paths[platform]):
+                if _pinned_path_exists(paths[platform]):
                     raise HostConfigError("daemon_provenance_conflict")
                 continue
             # Compare content through the same strict registration parser.
@@ -731,12 +733,15 @@ class _PinnedConfigMissing(Exception):
     pass
 
 
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
+_WIN_ABSENT_ERRORS = frozenset({2, 3})
+_POSIX_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR})
+
 if os.name == "nt":
     _FILE_SHARE_READ = 0x00000001
     _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
-    _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
     _FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
-    _INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
 
     class _FILE_ATTRIBUTE_TAG_INFO(ctypes.Structure):
         _fields_ = [
@@ -755,18 +760,60 @@ if os.name == "nt":
     _kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
 
 
+def _is_absent_os_error(error: OSError) -> bool:
+    if os.name == "nt":
+        winerror = getattr(error, "winerror", None)
+        if winerror is not None:
+            return winerror in _WIN_ABSENT_ERRORS
+        return isinstance(error, (FileNotFoundError, NotADirectoryError))
+    return (
+        isinstance(error, (FileNotFoundError, NotADirectoryError))
+        or error.errno in _POSIX_ABSENT_ERRNOS
+    )
+
+
+def _pinned_path_exists(path: Path) -> bool:
+    try:
+        os.lstat(path)
+    except OSError as error:
+        if _is_absent_os_error(error):
+            return False
+        raise HostConfigError("daemon_provenance_conflict") from None
+    return True
+
+
+def _win_file_attributes(path: Path) -> tuple[int, int]:
+    attributes = int(_kernel32.GetFileAttributesW(str(path)))
+    if attributes == _INVALID_FILE_ATTRIBUTES:
+        return attributes, int(ctypes.get_last_error())
+    return attributes, 0
+
+
+def _assert_no_reparse_parents_win(absolute: Path) -> None:
+    for parent in reversed(absolute.parents):
+        attributes, winerror = _win_file_attributes(parent)
+        if attributes == _INVALID_FILE_ATTRIBUTES:
+            if winerror in _WIN_ABSENT_ERRORS:
+                raise _PinnedConfigMissing()
+            raise HostConfigError("daemon_provenance_conflict", winerror=winerror)
+        if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+            raise HostConfigError("daemon_provenance_conflict")
+
+
 def _assert_no_reparse_parents(path: Path) -> None:
     absolute = Path(os.path.abspath(path))
     if os.name != "nt":
-        if any(parent.is_symlink() for parent in absolute.parents):
-            raise HostConfigError("daemon_provenance_conflict")
+        for parent in reversed(absolute.parents):
+            try:
+                metadata = os.lstat(parent)
+            except OSError as error:
+                if _is_absent_os_error(error):
+                    raise _PinnedConfigMissing() from None
+                raise HostConfigError("daemon_provenance_conflict") from None
+            if stat.S_ISLNK(metadata.st_mode):
+                raise HostConfigError("daemon_provenance_conflict")
         return
-    for parent in reversed(absolute.parents):
-        attributes = int(_kernel32.GetFileAttributesW(str(parent)))
-        if attributes == _INVALID_FILE_ATTRIBUTES:
-            raise _PinnedConfigMissing()
-        if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-            raise HostConfigError("daemon_provenance_conflict")
+    _assert_no_reparse_parents_win(absolute)
 
 
 def _final_handle_path(handle: object) -> str:
@@ -804,7 +851,7 @@ class _PinnedConfigFile:
             )
             if handle == _INVALID_HANDLE_VALUE:
                 error = ctypes.get_last_error()
-                if error in {2, 3}:
+                if error in _WIN_ABSENT_ERRORS:
                     raise _PinnedConfigMissing()
                 raise HostConfigError("daemon_provenance_conflict", winerror=error)
             self.handle = handle
@@ -829,9 +876,9 @@ class _PinnedConfigFile:
             flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
             try:
                 self.handle = os.open(self.path, flags)
-            except FileNotFoundError:
-                raise _PinnedConfigMissing() from None
-            except OSError:
+            except OSError as error:
+                if _is_absent_os_error(error):
+                    raise _PinnedConfigMissing() from None
                 raise HostConfigError("daemon_provenance_conflict") from None
             if not os.path.isfile(self.path):
                 self.close()
