@@ -39,6 +39,8 @@ _EXPECTED_ROLES = {"CLAUDE": "claude.exe", "CODEX": "codex.exe"}
 _HEX_UPPER = frozenset("0123456789ABCDEF")
 _PE_X64_MACHINE = 0x8664
 _PE32_PLUS_MAGIC = 0x20B
+_ELF_MAGIC = b"\x7fELF"
+_POSIX_PYTHON_NAME_RE = re.compile(r"python(?:3(?:\.[0-9]+)?)?")
 _PSUTIL_WHEEL_BYTES = 137_737
 _PSUTIL_WHEEL_SHA256 = "eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988"
 _ABSENT_PROBE_NAME = "p0s-absent-fixture-do-not-create"
@@ -237,6 +239,16 @@ def _validate_x64_pe(path: Path) -> None:
         raise InstallerContractError("installer_cli_not_native_x64_pe")
 
 
+def _validate_elf(path: Path) -> None:
+    try:
+        with path.open("rb") as handle:
+            magic = handle.read(4)
+    except OSError as error:
+        raise InstallerContractError("installer_cli_unreadable") from error
+    if magic != _ELF_MAGIC:
+        raise InstallerContractError("installer_cli_not_elf")
+
+
 def _validate_cli_entry(role: str, value: object) -> InstallerCliEntry:
     if role not in _EXPECTED_ROLES or not isinstance(value, dict):
         raise InstallerContractError("invalid_installer_cli_manifest")
@@ -258,11 +270,18 @@ def _validate_cli_entry(role: str, value: object) -> InstallerCliEntry:
     ):
         raise InstallerContractError("invalid_installer_cli_manifest")
 
+    is_windows = _is_windows_host()
     path = Path(raw_path)
-    if not path.is_absolute() or path.suffix.casefold() != ".exe":
-        raise InstallerContractError("installer_cli_path_not_absolute_exe")
-    if path.name.casefold() != _EXPECTED_ROLES[role]:
-        raise InstallerContractError("installer_cli_role_path_mismatch")
+    if is_windows:
+        if not path.is_absolute() or path.suffix.casefold() != ".exe":
+            raise InstallerContractError("installer_cli_path_not_absolute_exe")
+        if path.name.casefold() != _EXPECTED_ROLES[role]:
+            raise InstallerContractError("installer_cli_role_path_mismatch")
+    else:
+        if not path.is_absolute():
+            raise InstallerContractError("installer_cli_path_not_absolute")
+        if path.suffix or path.name != role.lower():
+            raise InstallerContractError("installer_cli_role_path_mismatch")
     try:
         resolved = path.resolve(strict=True)
     except OSError as error:
@@ -284,7 +303,10 @@ def _validate_cli_entry(role: str, value: object) -> InstallerCliEntry:
     metadata = _native_regular_file(path)
     if metadata.st_size != expected_bytes:
         raise InstallerContractError("installer_cli_byte_drift", _PIN_RECIPE)
-    _validate_x64_pe(path)
+    if is_windows:
+        _validate_x64_pe(path)
+    else:
+        _validate_elf(path)
     try:
         digest = hashlib.sha256(path.read_bytes()).hexdigest().upper()
     except OSError as error:
@@ -1069,28 +1091,47 @@ def _is_windows_host() -> bool:
     return os.name == "nt"
 
 
-def _validate_python_executable(path: Path) -> Path:
+def _is_posix_python_name(name: str) -> bool:
+    return bool(_POSIX_PYTHON_NAME_RE.fullmatch(name))
+
+
+def _validate_python_executable(
+    path: Path, *, allow_symlink: bool = False
+) -> Path:
     candidate = Path(path)
-    if _is_windows_host():
+    is_windows = _is_windows_host()
+    if is_windows:
         if not candidate.is_absolute() or candidate.name.casefold() != "python.exe":
             raise InstallerContractError("python_path_not_exact")
     else:
         if (
             not candidate.is_absolute()
             or candidate.parent.name != "bin"
-            or candidate.name not in {"python", "python3"}
+            or not _is_posix_python_name(candidate.name)
         ):
             raise InstallerContractError("python_path_not_exact")
     try:
         resolved = candidate.resolve(strict=True)
     except OSError as error:
         raise InstallerContractError("python_executable_missing") from error
-    if os.path.normcase(str(candidate)) != os.path.normcase(str(resolved)):
+    if is_windows or not allow_symlink:
+        if os.path.normcase(str(candidate)) != os.path.normcase(str(resolved)):
+            raise InstallerContractError("python_path_not_canonical")
+        _native_regular_file(candidate)
+        if is_windows:
+            _validate_x64_pe(candidate)
+        return candidate
+    if os.path.normpath(str(candidate)) != str(candidate):
         raise InstallerContractError("python_path_not_canonical")
-    _native_regular_file(candidate)
-    if _is_windows_host():
-        _validate_x64_pe(candidate)
-    return candidate
+    if resolved.parent.name != "bin" or not _is_posix_python_name(resolved.name):
+        raise InstallerContractError("python_path_not_exact")
+    metadata = _native_regular_file(resolved)
+    if (
+        os.path.normcase(str(candidate)) != os.path.normcase(str(resolved))
+        and not _has_posix_executable_bit(metadata)
+    ):
+        raise InstallerContractError("python_executable_not_executable")
+    return resolved
 
 
 def _verified_psutil_wheel(tools_root: Path) -> Path:
@@ -1217,15 +1258,17 @@ def install_runtime(
     runner: CommandRunner = subprocess.run,
     token_factory: Callable[[], str] = lambda: secrets.token_urlsafe(32),
 ) -> dict[str, object]:
-    base = _validate_python_executable(Path(base_python))
-    if base != Path(base_python):
+    is_windows = _is_windows_host()
+    base = _validate_python_executable(
+        Path(base_python), allow_symlink=not is_windows
+    )
+    if is_windows and base != Path(base_python):
         raise InstallerContractError("python_path_not_exact")
     tools_root = options.tools_root
     requirements = tools_root / "requirements-mcp.txt"
     pyproject = tools_root / "pyproject.toml"
     if not requirements.is_file() or not pyproject.is_file():
         raise InstallerContractError("installer_source_incomplete")
-    is_windows = _is_windows_host()
     wheel = _verified_psutil_wheel(tools_root) if is_windows else None
 
     venv_root = tools_root / ".venv-mcp"
@@ -1364,11 +1407,10 @@ class _HeldRegistrationLock:
         if descriptor < 0:
             return
         self._descriptor = -1
-        import msvcrt
+        from dayz_mcp import byte_lock
 
         try:
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            byte_lock.unlock(descriptor, 0)
         except OSError:
             pass
         finally:
@@ -1382,12 +1424,23 @@ def _registration_lock_path(journal_root: Path) -> Path:
 
 
 def _open_registration_lock(path: Path) -> int:
-    """Open the lock without FILE_SHARE_DELETE.
+    """Open the lock without FILE_SHARE_DELETE on Windows, or via byte_lock off Windows.
 
     Sharing delete lets another process remove the held file and lock a new
     file of the same name. Read and write are shared so a waiter can open the
     same file and fail LK_NBLCK instead of failing the open.
     """
+    if not _is_windows_host():
+        from dayz_mcp import byte_lock
+
+        try:
+            return byte_lock.open_lock_file(path)
+        except AttributeError:
+            if os.name != "nt":
+                raise
+        except OSError as error:
+            raise OSError(error.errno, "registration_lock_open_failed") from error
+
     import ctypes
     import msvcrt
 
@@ -1428,15 +1481,14 @@ def _acquire_registration_lock(journal_root: Path, timeout_s: float) -> _HeldReg
         raise InstallerContractError("invalid_registration_lock_timeout")
     path = _registration_lock_path(journal_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    import msvcrt
+    from dayz_mcp import byte_lock
 
     owner = _RegistrationLockToken()
     deadline = time.monotonic() + float(timeout_s)
     while True:
         descriptor = _open_registration_lock(path)
         try:
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            byte_lock.try_lock(descriptor, 0)
         except OSError:
             os.close(descriptor)
             if time.monotonic() >= deadline:
@@ -1991,8 +2043,17 @@ def _public_installer_error_code(error: BaseException) -> str:
     return "installer_failed"
 
 
+def _ensure_posix_localappdata() -> None:
+    if _is_windows_host():
+        return
+    from dayz_mcp.linux_compat import ensure_localappdata
+
+    ensure_localappdata()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     try:
+        _ensure_posix_localappdata()
         options = parse_args(argv)
         if options.pin_clis:
             entries = pin_installer_clis(
