@@ -133,6 +133,21 @@ class ConcurrentSameInodeEditTest(unittest.TestCase):
             self._apply(edit)
         self.assertEqual(self.claude.read_bytes(), edited["claude"])
 
+    def test_a_rename_after_the_last_write_blocks_committed(self) -> None:
+        from dayz_mcp import host_config
+
+        replacement = b'{"external_writer": true}\n'
+
+        def swap(phase: str) -> None:
+            if phase == "after_write_codex":
+                staged = self.root / "replacement.json"
+                staged.write_bytes(replacement)
+                os.replace(staged, self.claude)
+
+        with self.assertRaises(host_config.HostConfigError):
+            self._apply(swap)
+        self.assertEqual(self.claude.read_bytes(), replacement)
+
     def test_without_a_concurrent_writer_it_still_commits(self) -> None:
         self.assertEqual(self._apply(None), {"status": "committed"})
         self.assertFalse(self.journal.exists())
