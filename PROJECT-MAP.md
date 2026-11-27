@@ -100,7 +100,7 @@ Los módulos unittest están en `tools/tests/`; el gate de este mapa es `tests.t
 
 Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar autorreferencia.
 - `HANDOFF.md` - estado vivo; leer hasta `LIVE-STATE:END`.
-- `AGENTS.md` - 381 B, touched 2026-11-01 (UTC)
+- `AGENTS.md` - 866 B, touched 2026-11-27 (UTC)
 - `ARCHITECTURE-DECISIONS.md` - 11 KB, touched 2026-11-01 (UTC)
 - `CHANGELOG.md` - historial append-only; crece con cada cambio, sin tamaño fijado.
 - `CLAUDE.md` - 7 KB, touched 2026-11-11 (UTC)
