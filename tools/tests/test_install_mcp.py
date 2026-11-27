@@ -3373,7 +3373,10 @@ class ClaudeOnlyAndPosixPythonTest(unittest.TestCase):
         ) -> None:
             captured.append((provider, desired, kwargs))
 
+        # Still no codex CLI on PATH at registration time (fix-forward #464:
+        # --register rechecks it like --pin-clis).
         with (
+            patch.object(installer.shutil, "which", return_value=None),
             patch.object(installer, "run_runs_backup_gate", return_value={"status": "verified"}),
             patch.object(installer, "register_transaction", side_effect=fake_transaction),
         ):
