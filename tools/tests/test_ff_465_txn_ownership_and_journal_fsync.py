@@ -709,6 +709,176 @@ class InstallerOuterRollbackRound2Test(unittest.TestCase):
         self.assertFalse((self.root / "reg-journal" / "dayz-mcp").exists())
 
 
+@unittest.skipUnless(POSIX, "the POSIX host-config transaction")
+class TwoJournalsRound5Test(unittest.TestCase):
+    """Round 5 (Sol r4 P1-1/P1-2 on 502ce52e): two clients, two server names."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(os.path.realpath(self.temporary.name))
+        self.claude = self.root / "claude.json"
+        self.codex = self.root / "codex.toml"
+        self.claude.write_text('{"mcpServers": {}}')
+        self.codex.write_text("")
+
+    def _spec(self, name: str):
+        from install_mcp import RegistrationSpec
+
+        return RegistrationSpec(Path("/opt") / name, ("--client",))
+
+    def _provider(self, name: str = "dayz-mcp"):
+        import tomllib
+
+        from install_mcp import RegistrationSpec
+
+        claude, codex = self.claude, self.codex
+
+        class TwoFileProvider:
+            def get(self, role):
+                if role == "CLAUDE":
+                    entry = json.loads(claude.read_text())["mcpServers"].get(name)
+                else:
+                    entry = tomllib.loads(codex.read_text()).get("mcp_servers", {}).get(name)
+                if not entry:
+                    return None
+                return RegistrationSpec(Path(entry["command"]), tuple(entry["args"]))
+
+            def add(self, role, value):
+                if role == "CLAUDE":
+                    entries = json.loads(claude.read_text())["mcpServers"]
+                    entries.pop(name, None)
+                    if value is not None:
+                        entries[name] = {"command": str(value.command), "args": list(value.arguments)}
+                    claude.write_text(json.dumps({"mcpServers": entries}))
+                    return
+                text = ""
+                if value is not None:
+                    text = (
+                        f"[mcp_servers.{name}]\n"
+                        f"command = {json.dumps(str(value.command))}\n"
+                        f"args = {json.dumps(list(value.arguments))}\n"
+                    )
+                codex.write_text(text)
+
+            def remove(self, role):
+                self.add(role, None)
+
+        return TwoFileProvider()
+
+    def _install(self, provider, *, dual: bool = True, edit_at: str | None = None, name="dayz-mcp"):
+        import install_mcp
+
+        desired = {"CLAUDE": self._spec("new")}
+        paths: tuple[Path, ...] = (self.claude,)
+        if dual:
+            desired["CODEX"] = self._spec("new")
+            paths += (self.codex,)
+
+        def edit(phase: str) -> None:
+            if phase == edit_at:
+                provider.add("CLAUDE", self._spec("foreign"))
+
+        return install_mcp.register_transaction(
+            provider,
+            desired,
+            host_configs=paths,
+            server_name=name,
+            journal_root=self.root / "reg",
+            host_journal_root=self.root / "host",
+            fault_injector=edit,
+        )
+
+    def _fails(self, code: str, *args, **kwargs):
+        import install_mcp
+
+        with self.assertRaisesRegex(install_mcp.InstallerExecutionError, f"^{code}$") as raised:
+            self._install(*args, **kwargs)
+        return raised.exception
+
+    def _edit_after_write_codex(self):
+        client = self._provider()
+        client.add("CODEX", self._spec("old"))
+        self._fails(
+            "registration_rollback_preserved_foreign_edit",
+            client,
+            edit_at="after_write_codex",
+        )
+        self.assertEqual(client.get("CLAUDE"), self._spec("foreign"))
+        self.assertEqual(client.get("CODEX"), self._spec("old"))
+        self.assertTrue((self.root / "host").exists())
+        self.assertTrue((self.root / "reg" / "dayz-mcp").exists())
+        return client
+
+    def test_p1_a_removing_claude_after_after_write_codex_releases_both_journals(self) -> None:
+        client = self._edit_after_write_codex()
+        client.remove("CLAUDE")
+        self._install(client)
+        self.assertEqual(client.get("CLAUDE"), self._spec("new"))
+        self.assertEqual(client.get("CODEX"), self._spec("new"))
+        self.assertIn("tool_timeout_sec", self.codex.read_text())
+        self.assertFalse((self.root / "host").exists())
+        self.assertFalse((self.root / "reg" / "dayz-mcp").exists())
+
+    def test_p1_a_the_live_foreign_claude_entry_still_refuses(self) -> None:
+        client = self._edit_after_write_codex()
+        self._fails("registration_preserved_foreign_edit", client)
+        self.assertEqual(client.get("CLAUDE"), self._spec("foreign"))
+        self.assertTrue((self.root / "host").exists())
+        self.assertTrue((self.root / "reg" / "dayz-mcp").exists())
+
+    def test_p1_a_a_foreign_codex_entry_after_the_rollback_is_never_released(self) -> None:
+        client = self._edit_after_write_codex()
+        client.remove("CLAUDE")
+        client.add("CODEX", self._spec("other-writer"))
+        self._fails("registration_recovery_conflict", client)
+        self.assertEqual(client.get("CODEX"), self._spec("other-writer"))
+        self.assertTrue((self.root / "host").exists())
+        self.assertTrue((self.root / "reg" / "dayz-mcp").exists())
+
+    def test_p1_b_resolving_one_server_name_never_releases_another_names_journal(self) -> None:
+        a, b = self._provider("dayz-mcp"), self._provider("dayz-mcp-b")
+        self._fails(
+            "registration_rollback_preserved_foreign_edit", a, dual=False, edit_at="after_prepare"
+        )
+        self.assertFalse((self.root / "host").exists())
+        self._fails(
+            "registration_rollback_preserved_foreign_edit",
+            b, dual=False, edit_at="after_write_claude", name="dayz-mcp-b",
+        )
+        self.assertTrue((self.root / "host").exists())
+        a.remove("CLAUDE")
+        error = self._fails("registration_recovery_conflict", a, dual=False)
+        self.assertIn("another", error.remedy)
+        self.assertTrue((self.root / "host").exists())
+        self.assertTrue((self.root / "reg" / "dayz-mcp-b").exists())
+        self.assertEqual(b.get("CLAUDE"), self._spec("foreign"))
+        # Resolving B (its own explicit action) releases B, and then A.
+        b.remove("CLAUDE")
+        self._install(b, dual=False, name="dayz-mcp-b")
+        self.assertEqual(b.get("CLAUDE"), self._spec("new"))
+        self._install(a, dual=False)
+        self.assertEqual(a.get("CLAUDE"), self._spec("new"))
+        self.assertFalse((self.root / "host").exists())
+        self.assertFalse((self.root / "reg" / "dayz-mcp").exists())
+        self.assertFalse((self.root / "reg" / "dayz-mcp-b").exists())
+
+    def test_p1_b_a_timeouts_journal_without_an_attempt_id_is_refused(self) -> None:
+        client = self._provider()
+        self._fails(
+            "registration_rollback_preserved_foreign_edit",
+            client, dual=False, edit_at="after_write_claude",
+        )
+        manifest_path = self.root / "host" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest.pop("attempt", None)
+        manifest_path.write_text(json.dumps(manifest))
+        client.remove("CLAUDE")
+        self._fails("registration_recovery_conflict", client, dual=False)
+        self.assertTrue((self.root / "host").exists())
+        self.assertTrue((self.root / "reg" / "dayz-mcp").exists())
+
+
 class PreservedWayOutDocsTest(unittest.TestCase):
     """Round 4 (Sol r3 P2): the CLI and QUICKSTART name the way out."""
 
@@ -725,10 +895,13 @@ class PreservedWayOutDocsTest(unittest.TestCase):
             "registration_recovery_conflict",
         ):
             self.assertIn(f"`{code}`", quickstart)
-        self.assertIn("claude mcp remove dayz-mcp", quickstart)
+        # Round 5 (Sol r4 P2): the user-scope entry needs -s user to be removed.
+        self.assertIn("claude mcp remove -s user dayz-mcp", quickstart)
+        self.assertIn("codex mcp remove dayz-mcp", quickstart)
         for remedy in (install_mcp._PRESERVED_REMEDY, install_mcp._RECOVERY_CONFLICT_REMEDY):
             self.assertIn("'Interrupted install'", remedy)
-        self.assertIn("claude mcp remove dayz-mcp", install_mcp._PRESERVED_REMEDY)
+            self.assertIn("claude mcp remove -s user dayz-mcp", remedy)
+            self.assertIn("codex mcp remove dayz-mcp", remedy)
 
     def test_main_prints_the_remedy_of_a_preserved_registration(self) -> None:
         import contextlib

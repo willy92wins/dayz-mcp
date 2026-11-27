@@ -1285,6 +1285,12 @@ def _load_manifest_publication(journal: Path) -> tuple[dict[str, object], bool]:
     ):
         raise HostConfigError("registration_journal_invalid")
     expected_keys = {"schema", "status", "files"}
+    if "attempt" in value:
+        # The registration attempt that wrote this journal (fix-forward #465
+        # round 5, Sol r4 P1-2). Older journals have none.
+        if not isinstance(value["attempt"], str) or not _ATTEMPT_RE.fullmatch(value["attempt"]):
+            raise HostConfigError("registration_journal_invalid")
+        expected_keys.add("attempt")
     if value["status"] in _RESTORE_STATUSES:
         expected_keys.add("recovery_source")
         if "restore_roles" in value or "conflict_roles" in value:
@@ -1301,6 +1307,7 @@ def _load_manifest_publication(journal: Path) -> tuple[dict[str, object], bool]:
     return value, only_next
 
 
+_ATTEMPT_RE = re.compile(r"[0-9a-f]{32}")
 _RESTORE_STATUSES = frozenset({"restoring_original", "restored", "restore_conflict"})
 _JOURNAL_STATUSES = frozenset({"prepared", "writing", "committed"}) | _RESTORE_STATUSES
 
@@ -1486,15 +1493,18 @@ def _recover_if_needed(
     journal: Path,
     *,
     fault_injector: _FaultInjector | None = None,
-    release_conflict_roles: frozenset[str] = frozenset(),
+    release_attempt: str | None = None,
 ) -> None:
     """Recover or release a host-config journal left by an earlier run.
 
-    ``release_conflict_roles`` (fix-forward #465 round 4, Sol r3 P1-2): roles
-    of a terminal restore_conflict journal whose kept bytes the caller has
-    resolved by an explicit action elsewhere (the installer, when the
-    registration it preserved for that file is removed or put back). Nothing
-    is written for them; the journal no longer asks for the original bytes.
+    ``release_attempt`` (fix-forward #465 rounds 4-5, Sol r3 P1-2 and r4
+    P1-1/P1-2): a terminal restore_conflict journal written by exactly this
+    registration attempt is released without writes. The installer passes it
+    only after the explicit action on that attempt's preserved registration
+    (entry removed, or the previous or desired spec put back) and after
+    checking that every other client holds what that attempt's own rollback
+    left there. A journal of another attempt, or with none, is never released
+    this way.
     """
     if _release_unrecorded_journal(journal):
         return
@@ -1560,12 +1570,15 @@ def _recover_if_needed(
             # A kept role is never written. It may be released only once it
             # is exactly the original again; anything else stays a conflict
             # with the journal kept (Sol P1-1/P1-2).
-            released = release_conflict_roles if status == "restore_conflict" else frozenset()
-            if any(
-                currents[role] != decoded[role][2]
-                for role in conflict_roles
-                if role not in released
+            if (
+                status == "restore_conflict"
+                and release_attempt is not None
+                and manifest.get("attempt") == release_attempt
             ):
+                # Terminal: nothing of ours is pending, nothing is written.
+                _cleanup_journal(journal)
+                return
+            if any(currents[role] != decoded[role][2] for role in conflict_roles):
                 raise HostConfigError("registration_recovery_conflict")
             if status in {"restored", "restore_conflict"}:
                 if any(currents[role] != decoded[role][2] for role in restore_roles):
@@ -1614,21 +1627,26 @@ def _recover_if_needed(
         _close_all(handles)
 
 
-def restore_conflict_roles(journal: Path) -> tuple[str, ...]:
-    """Kept roles of a published terminal restore_conflict journal, else ().
+def restore_conflict_state(
+    journal: Path,
+) -> tuple[str | None, tuple[str, ...], tuple[str, ...]] | None:
+    """(attempt, restored roles, kept roles) of a terminal restore_conflict journal.
 
-    Such a journal writes nothing on recovery, so its host files hold no torn
-    write of ours and a provider may parse them (fix-forward #465 round 4).
+    None for any other state. Such a journal writes nothing on recovery, so its
+    host files hold no torn write of ours and a provider may parse them
+    (fix-forward #465 rounds 4-5).
     """
     if not journal.exists():
-        return ()
+        return None
     try:
         manifest, only_next = _load_manifest_publication(journal)
         if only_next or manifest["status"] != "restore_conflict":
-            return ()
-        return _restore_selection(manifest)[1]
+            return None
+        restored, kept = _restore_selection(manifest)
     except HostConfigError:
-        return ()
+        return None
+    attempt = manifest.get("attempt")
+    return (attempt if isinstance(attempt, str) else None), restored, kept
 
 
 def apply_host_timeouts(
@@ -1638,7 +1656,10 @@ def apply_host_timeouts(
     journal_root: Path | None = None,
     fault_injector: _FaultInjector | None = None,
     server_name: str = "dayz-mcp",
+    attempt: str | None = None,
 ) -> dict[str, str]:
+    if attempt is not None and (not isinstance(attempt, str) or not _ATTEMPT_RE.fullmatch(attempt)):
+        raise HostConfigError("registration_journal_invalid")
     claude_path = Path(claude_path).resolve(strict=True)
     resolved_codex: Path | None = None
     if codex_path is not None:
@@ -1704,6 +1725,8 @@ def apply_host_timeouts(
         _mkdir_restricted(journal)
         journal_started = True
         manifest = _journal_payload(paths, identities, originals, targets)
+        if attempt is not None:
+            manifest["attempt"] = attempt
         _persist_manifest(journal, manifest)
         journal_prepared = True
         if fault_injector is not None:

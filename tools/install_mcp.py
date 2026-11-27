@@ -90,16 +90,19 @@ class RegistrationRollbackError(InstallerExecutionError):
 _PRESERVED_REMEDY = (
     "another writer changed the dayz-mcp registration while the last install "
     "ran, and it was kept as it is. Decide explicitly: remove that entry "
-    "(claude mcp remove dayz-mcp / codex mcp remove dayz-mcp, or the instance "
-    "name), or put back the registration you had before; then run the install "
-    "again. See QUICKSTART.md, 'Interrupted install'."
+    "(claude mcp remove -s user dayz-mcp; codex mcp remove dayz-mcp; a named "
+    "instance uses its own name), or put back the registration you had "
+    "before; then run the install again. See QUICKSTART.md, 'Interrupted install'."
 )
 _RECOVERY_CONFLICT_REMEDY = (
-    "an interrupted install left a journal, and a file or registration it "
-    "recorded now holds something it did not write; nothing was overwritten. "
-    "Put it back as it was before that install, or remove the dayz-mcp entry "
-    "if the change is in it; then run the install again. See QUICKSTART.md, "
-    "'Interrupted install'."
+    "an interrupted install left a journal that no longer matches the config "
+    "files or the registration, so nothing was overwritten and the journal "
+    "was kept. If another writer changed the dayz-mcp entry during that "
+    "install, removing it (claude mcp remove -s user dayz-mcp; codex mcp "
+    "remove dayz-mcp) and running the install again releases it. If the "
+    "journal belongs to another server name or install on this host, resolve "
+    "that one first. In any other case the files must go back to what that "
+    "install recorded. See QUICKSTART.md, 'Interrupted install'."
 )
 
 
@@ -1833,6 +1836,7 @@ def _load_registration_manifest(
     Path | None,
     dict[str, RegistrationSpec | None] | None,
     frozenset[str],
+    str | None,
 ] | None:
     published, pending, _staging = _registration_publication_paths(journal)
     only_next = False
@@ -1861,6 +1865,7 @@ def _load_registration_manifest(
             "server_name",
             "status",
         } <= set(value) <= {
+            "attempt",
             "desired",
             "host_configs",
             "host_journal",
@@ -1900,6 +1905,11 @@ def _load_registration_manifest(
         or len(set(raw_preserved)) != len(raw_preserved)
     ):
         raise RegistrationTransactionError("registration_journal_invalid")
+    raw_attempt = value.get("attempt")
+    if raw_attempt is not None and (
+        not isinstance(raw_attempt, str) or not re.fullmatch(r"[0-9a-f]{32}", raw_attempt)
+    ):
+        raise RegistrationTransactionError("registration_journal_invalid")
     raw_desired = value.get("desired")
     if raw_desired is not None and (
         not isinstance(raw_desired, dict) or set(raw_desired) != set(roles)
@@ -1922,6 +1932,7 @@ def _load_registration_manifest(
         host_journal,
         desired,
         frozenset(raw_preserved),
+        raw_attempt,
     )
 
 
@@ -1958,7 +1969,7 @@ def _recover_pending_host_configs(
         HostConfigError,
         _default_journal_root,
         _recover_if_needed,
-        restore_conflict_roles,
+        restore_conflict_state,
     )
 
     host_journal = (
@@ -1972,30 +1983,51 @@ def _recover_pending_host_configs(
         if str(error) != "registration_recovery_conflict":
             raise
         conflict = error
-    # Fix-forward #465 round 4 (Sol r3 P1-2): a foreign edit after our timeouts
-    # write leaves this journal in restore_conflict and the registration
-    # journal with that role preserved. Both describe the same kept edit. Once
-    # the preserved registration is resolved (removed, or the previous or the
-    # desired spec put back), the timeouts journal stops asking for bytes the
-    # user cannot know. Any other conflict keeps refusing.
-    kept = set(restore_conflict_roles(host_journal))
-    preserved = loaded[6] if loaded is not None else frozenset()
-    if (
-        provider is None
-        or loaded is None
-        or not kept
-        or not kept <= {_HOST_ROLE[role] for role in preserved}
-    ):
-        raise _with_remedy(
+    # Fix-forward #465 rounds 4-5 (Sol r3 P1-2, r4 P1-1/P1-2): a foreign edit
+    # after our timeouts write leaves this journal in restore_conflict and the
+    # registration journal with that role preserved, both from one attempt.
+    # The timeouts journal is released, without writes, only when:
+    # - both journals carry the same attempt id (a journal of another server
+    #   name or install, or one without an id, is never released here);
+    # - every kept file belongs to a preserved registration role, and the
+    #   user resolved each preserved entry (removed, or previous/desired back);
+    # - every other client holds what that attempt's own outer rollback left
+    #   there: its previous registration, or the desired one if the rollback
+    #   was cut before reaching it.
+    # Anything else keeps refusing, with the journals kept.
+    def refuse(cause: BaseException) -> RegistrationTransactionError:
+        error = _with_remedy(
             RegistrationTransactionError("registration_recovery_conflict"),
             _RECOVERY_CONFLICT_REMEDY,
-        ) from conflict
-    full_previous, desired = loaded[0], loaded[5]
-    _release_preserved_or_refuse(provider, full_previous, desired, preserved)
-    try:
-        _recover_if_needed(
-            claude, codex, host_journal, release_conflict_roles=frozenset(kept)
         )
+        error.__cause__ = cause
+        return error
+
+    state = restore_conflict_state(host_journal)
+    if provider is None or loaded is None or state is None:
+        raise refuse(conflict)
+    host_attempt, restored, kept = state
+    full_previous, desired, preserved, attempt = loaded[0], loaded[5], loaded[6], loaded[7]
+    by_host_role = {host: role for role, host in _HOST_ROLE.items()}
+    if (
+        attempt is None
+        or host_attempt != attempt
+        or not kept
+        or any(by_host_role[host] not in preserved for host in kept)
+    ):
+        raise refuse(conflict)
+    _release_preserved_or_refuse(provider, full_previous, desired, preserved)
+    for host in restored:
+        role = by_host_role[host]
+        if role in preserved:
+            continue
+        accepted = {full_previous.get(role)}
+        if desired is not None:
+            accepted.add(desired.get(role))
+        if provider.get(role) not in accepted:
+            raise refuse(conflict)
+    try:
+        _recover_if_needed(claude, codex, host_journal, release_attempt=attempt)
     except HostConfigError as error:
         if str(error) != "registration_recovery_conflict":
             raise
@@ -2016,9 +2048,19 @@ def _recover_registration_journal(
         Path | None,
         dict[str, RegistrationSpec | None] | None,
         frozenset[str],
+        str | None,
     ],
 ) -> None:
-    full_previous, only_next, _owner, _hosts, _host_journal, desired, preserved = loaded
+    (
+        full_previous,
+        only_next,
+        _owner,
+        _hosts,
+        _host_journal,
+        desired,
+        preserved,
+        _attempt,
+    ) = loaded
     # A role recorded as preserved holds another writer's entry that the
     # rollback decided to keep: recovery never restores over it.
     previous = {
@@ -2154,6 +2196,7 @@ def _register_transaction_locked(
             recorded_host_journal,
             _desired,
             _preserved,
+            _attempt,
         ) = loaded
         if owner != server_name:
             # Another instance owns this journal. Do not restore its specs here
@@ -2194,6 +2237,9 @@ def _register_transaction_locked(
             "registration_would_drop_options",
             f"{detail} (re-run with --allow-option-removal to drop them)",
         )
+    # Ties this registration journal to the timeouts journal it may leave
+    # (fix-forward #465 round 5, Sol r4 P1-2).
+    attempt = secrets.token_hex(16)
     try:
         _write_registration_manifest(
             journal,
@@ -2212,6 +2258,7 @@ def _register_transaction_locked(
                 "previous": {
                     role: _registration_spec_payload(previous[role]) for role in roles
                 },
+                "attempt": attempt,
                 "schema": _REGISTRATION_JOURNAL_SCHEMA,
                 "server_name": server_name,
                 "status": "prepared",
@@ -2239,6 +2286,7 @@ def _register_transaction_locked(
                 timeout_kwargs["journal_root"] = Path(host_journal_root)
             if fault_injector is not None:
                 timeout_kwargs["fault_injector"] = fault_injector
+            timeout_kwargs["attempt"] = attempt
             apply_host_timeouts(*host_configs, **timeout_kwargs)
             for role in roles:
                 if provider.get(role) != desired[role]:
