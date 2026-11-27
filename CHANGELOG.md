@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- In installed mode, `dayz-mcp doctor` reports the same retail quarantine the daemon uses (`DayZ_x64.exe` / `DayZ_BE.exe` through `orphan_guard.snapshot_retail_processes`): WARN normally, FAIL under `--require-clean`. It still does not emit `PROCESS_UNREGISTERED` for the person's own server and client. `tools/README-mcp.md` matches that, and `RETAIL_PROCESS_NAMES` is a tuple.
+
 ### Changed
 
 - The box-queue pocket rule classifies rejections by `error_code`, `reason` and `queue_offer`. Only an actionable FIFO offer (`queue_offer.retry.on_busy="queue"`) is contention; `port_in_use_foreign`, `box_reserved` or `own_run` with a null offer is terminal. Each re-queue passes `wait_for_box_s=min(600, remaining)` so the 1800 s cap is strict (do not pass 0: that means 600 s). `m1.espera` occupies the box even without DayZ and never expires on its own. The lease also covers low-level lifecycle.
