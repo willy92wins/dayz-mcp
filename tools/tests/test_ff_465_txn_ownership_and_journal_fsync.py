@@ -240,6 +240,263 @@ class RegistrationJournalDurabilityTest(unittest.TestCase):
         self.assertIsNotNone(installer)
 
 
+@unittest.skipUnless(POSIX, "the POSIX host-config transaction")
+class RollbackRound2Test(ConcurrentSameInodeEditTest):
+    """Round 2 of the #465 fix-forward (Sol P1-1, P1-2, P1-3 on 0e2fd35d)."""
+
+    # The inherited tests already ran in the parent class.
+    test_an_edit_after_prepare_is_kept_and_nothing_commits = None
+    test_an_edit_to_a_written_file_is_never_overwritten_by_rollback = None
+    test_an_edit_to_the_other_file_restores_only_the_touched_one = None
+    test_an_edit_after_the_last_write_blocks_committed = None
+    test_a_rename_after_the_last_write_blocks_committed = None
+    test_without_a_concurrent_writer_it_still_commits = None
+
+    def test_p1_1_a_short_write_then_eio_is_restored_not_left_torn(self) -> None:
+        from dayz_mcp import host_config
+
+        real_write = os.write
+        state = {"claude_fd": None, "calls": 0}
+        real_init = host_config._PosixFile.__init__
+
+        def tracking_init(handle, path):
+            real_init(handle, path)
+            if Path(path).resolve() == self.claude:
+                state["claude_fd"] = handle.fd
+
+        torn: dict[str, list[bool]] = {"seen": []}
+
+        def short_then_eio(fd, data):
+            if fd == state["claude_fd"] and state["calls"] == 1:
+                torn["seen"].append(self.claude.read_bytes() in (self.original_claude,))
+            if fd == state["claude_fd"] and state["calls"] < 2:
+                state["calls"] += 1
+                if state["calls"] == 1:
+                    # Past the prefix target and original share, so the
+                    # inode really holds torn bytes.
+                    payload = bytes(data)
+                    shared = 0
+                    while payload[shared] == self.original_claude[shared]:
+                        shared += 1
+                    return real_write(fd, payload[: shared + 8])
+                raise OSError(5, "injected EIO")
+            return real_write(fd, data)
+
+        with patch.object(host_config._PosixFile, "__init__", tracking_init), \
+                patch.object(host_config.os, "write", side_effect=short_then_eio):
+            with self.assertRaises(host_config.HostConfigError):
+                self._apply(None)
+        self.assertEqual(state["calls"], 2)
+        self.assertEqual(torn["seen"][:1], [False])
+        self.assertEqual(self.claude.read_bytes(), self.original_claude)
+        self.assertEqual(self.codex.read_bytes(), self.original_codex)
+        self.assertFalse(self.journal.exists())
+
+    def test_p1_1_a_foreign_edit_on_a_written_file_keeps_the_journal_unrestored(self) -> None:
+        from dayz_mcp import host_config
+
+        edited: dict[str, bytes] = {}
+
+        def edit(phase: str) -> None:
+            if phase == "after_write_claude":
+                edited["claude"] = self._add_foreign_server(self.claude)
+
+        with self.assertRaisesRegex(
+            host_config.HostConfigError, "^registration_config_rollback_conflict$"
+        ):
+            self._apply(edit)
+        self.assertEqual(self.claude.read_bytes(), edited["claude"])
+        manifest = json.loads((self.journal / "manifest.json").read_bytes())
+        self.assertEqual(manifest["status"], "restore_conflict")
+        self.assertEqual(manifest["conflict_roles"], ["claude"])
+        # The next run refuses instead of overwriting the kept edit.
+        with self.assertRaisesRegex(
+            host_config.HostConfigError, "^registration_recovery_conflict$"
+        ):
+            self._apply(None)
+        self.assertEqual(self.claude.read_bytes(), edited["claude"])
+        self.assertTrue(self.journal.exists())
+
+    def test_p1_2_a_resumed_restore_never_overwrites_a_foreign_codex_edit(self) -> None:
+        from dayz_mcp import host_config
+
+        edited_codex = self.original_codex + b'\n[mcp_servers.other]\ncommand = "/bin/true"\n'
+
+        def edit(phase: str) -> None:
+            if phase == "after_write_claude":
+                self.codex.write_bytes(edited_codex)
+
+        real_persist = host_config._persist_manifest
+
+        def persist_then_crash(journal, manifest):
+            real_persist(journal, manifest)
+            if manifest.get("status") == "restoring_original":
+                raise host_config.HostConfigCrash("cut after restoring_original")
+
+        with patch.object(host_config, "_persist_manifest", persist_then_crash):
+            with self.assertRaises(host_config.HostConfigCrash):
+                self._apply(edit)
+        self.assertEqual(self.codex.read_bytes(), edited_codex)
+        # The retry resumes the restore: Claude goes back, Codex keeps the
+        # other writer's server and then gets its timeouts on top of it.
+        self._apply(None)
+        after_codex = self.codex.read_bytes()
+        self.assertIn(b"[mcp_servers.other]", after_codex)
+        self.assertNotEqual(after_codex, self.original_codex)
+        self.assertFalse(self.journal.exists())
+
+
+@unittest.skipUnless(POSIX, "the POSIX host-config transaction")
+class InstallerOuterRollbackRound2Test(unittest.TestCase):
+    """Sol P1-3: register_transaction's rollback keeps an edit timeouts kept."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(os.path.realpath(self.temporary.name))
+        self.claude = self.root / ".claude.json"
+        self.claude.write_bytes(
+            (
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "dayz-mcp": {
+                                "type": "stdio",
+                                "command": "/opt/venv/bin/python",
+                                "args": ["-m", "dayz_mcp", "--client"],
+                            }
+                        }
+                    },
+                    indent=2,
+                )
+                + "\n"
+            ).encode()
+        )
+
+    def _provider(self):
+        from install_mcp import RegistrationSpec
+
+        path = self.claude
+
+        class SameFileProvider:
+            def get(self, role):
+                entry = json.loads(path.read_bytes()).get("mcpServers", {}).get("dayz-mcp")
+                if not isinstance(entry, dict):
+                    return None
+                return RegistrationSpec(Path(entry["command"]), tuple(entry["args"]))
+
+            def _store(self, document):
+                path.write_bytes((json.dumps(document, indent=2) + "\n").encode())
+
+            def remove(self, role):
+                document = json.loads(path.read_bytes())
+                document["mcpServers"].pop("dayz-mcp", None)
+                self._store(document)
+
+            def add(self, role, spec):
+                document = json.loads(path.read_bytes())
+                document.setdefault("mcpServers", {})["dayz-mcp"] = {
+                    "type": "stdio",
+                    "command": str(spec.command),
+                    "args": list(spec.arguments),
+                }
+                self._store(document)
+
+        return SameFileProvider()
+
+    def _command(self) -> str:
+        return json.loads(self.claude.read_bytes())["mcpServers"]["dayz-mcp"]["command"]
+
+    def _edit_command(self, value: str) -> None:
+        document = json.loads(self.claude.read_bytes())
+        document["mcpServers"]["dayz-mcp"]["command"] = value
+        self.claude.write_bytes((json.dumps(document, indent=2) + "\n").encode())
+
+    def test_p1_3_an_edit_kept_by_apply_host_timeouts_survives_the_outer_rollback(self) -> None:
+        import install_mcp
+        from install_mcp import RegistrationSpec
+
+        desired = {"CLAUDE": RegistrationSpec(Path("/opt/new/bin/python"), ("-m", "dayz_mcp", "--client"))}
+
+        def edit(phase: str) -> None:
+            if phase == "after_prepare":
+                self._edit_command("/bin/edited-command")
+
+        with self.assertRaises(install_mcp.InstallerExecutionError):
+            install_mcp.register_transaction(
+                self._provider(),
+                desired,
+                host_configs=(self.claude,),
+                journal_root=self.root / "reg-journal",
+                host_journal_root=self.root / "host-journal",
+                fault_injector=edit,
+            )
+        self.assertEqual(self._command(), "/bin/edited-command")
+        self.assertFalse((self.root / "reg-journal" / "dayz-mcp").exists())
+
+    def test_p1_3_recovery_after_a_crash_keeps_a_foreign_entry(self) -> None:
+        import install_mcp
+        from install_mcp import RegistrationCrash, RegistrationSpec
+
+        desired = {"CLAUDE": RegistrationSpec(Path("/opt/new/bin/python"), ("-m", "dayz_mcp", "--client"))}
+
+        def crash(phase: str) -> None:
+            if phase == "after_add_CLAUDE":
+                raise RegistrationCrash("cut after add")
+
+        with self.assertRaises(RegistrationCrash):
+            install_mcp.register_transaction(
+                self._provider(), desired, journal_root=self.root / "reg-journal",
+                fault_injector=crash,
+            )
+        self._edit_command("/bin/foreign-command")
+        with self.assertRaises(install_mcp.InstallerExecutionError):
+            install_mcp.register_transaction(
+                self._provider(), desired, journal_root=self.root / "reg-journal",
+            )
+        self.assertEqual(self._command(), "/bin/foreign-command")
+        self.assertTrue((self.root / "reg-journal" / "dayz-mcp").exists())
+
+    def test_recovery_after_a_crash_still_restores_our_own_entry(self) -> None:
+        import install_mcp
+        from install_mcp import RegistrationCrash, RegistrationSpec
+
+        desired = {"CLAUDE": RegistrationSpec(Path("/opt/new/bin/python"), ("-m", "dayz_mcp", "--client"))}
+
+        def crash(phase: str) -> None:
+            if phase == "after_add_CLAUDE":
+                raise RegistrationCrash("cut after add")
+
+        with self.assertRaises(RegistrationCrash):
+            install_mcp.register_transaction(
+                self._provider(), desired, journal_root=self.root / "reg-journal",
+                fault_injector=crash,
+            )
+        install_mcp.register_transaction(
+            self._provider(), desired, journal_root=self.root / "reg-journal",
+        )
+        self.assertEqual(self._command(), "/opt/new/bin/python")
+        self.assertFalse((self.root / "reg-journal" / "dayz-mcp").exists())
+
+
+@unittest.skipUnless(POSIX, "directory fsync is a POSIX barrier")
+class DurableAncestorsTest(unittest.TestCase):
+    """Residual: every directory mkdir creates is fsynced in its parent."""
+
+    def test_each_new_ancestor_is_fsynced_in_its_parent(self) -> None:
+        from dayz_mcp import host_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(os.path.realpath(tmp))
+            synced: list[Path] = []
+            with patch.object(
+                host_config, "_fsync_dir_posix", side_effect=lambda p: synced.append(Path(p))
+            ):
+                host_config._mkdir_restricted(root / "a" / "b" / "journal")
+            self.assertEqual(synced[:2], [root, root / "a"])
+            self.assertIn(root / "a" / "b", synced)
+
+
 class ElfHeaderTest(unittest.TestCase):
     """P2 of #465: the ELF check reads a whole ELF64 little-endian header."""
 

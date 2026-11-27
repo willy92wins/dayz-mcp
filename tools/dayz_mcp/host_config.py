@@ -1099,8 +1099,30 @@ def _fsync_dir_posix(path: Path) -> None:
         os.close(descriptor)
 
 
+def _makedirs_durable(path: Path) -> None:
+    """mkdir -p where each new directory's entry is fsynced in its parent.
+
+    A crash right after creating a journal under a new ancestor must not lose
+    that ancestor's entry (fix-forward #465 round 2 residual). On Windows the
+    directory fsync is a no-op, as for every other publication here.
+    """
+    missing: list[Path] = []
+    current = Path(path)
+    while not current.exists():
+        missing.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            continue
+        _fsync_dir_posix(directory.parent)
+
+
 def _mkdir_restricted(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _makedirs_durable(path.parent)
     if path.exists():
         if not path.is_dir() or path.is_symlink():
             raise HostConfigError("registration_journal_invalid")
@@ -1257,24 +1279,63 @@ def _load_manifest_publication(journal: Path) -> tuple[dict[str, object], bool]:
     if (
         not isinstance(value, dict)
         or value.get("schema") != _JOURNAL_SCHEMA
-        or value.get("status")
-        not in {"prepared", "writing", "committed", "restoring_original", "restored"}
+        or value.get("status") not in _JOURNAL_STATUSES
         or not isinstance(value.get("files"), dict)
         or set(value["files"]) not in ({"claude", "codex"}, {"claude"})
     ):
         raise HostConfigError("registration_journal_invalid")
     expected_keys = {"schema", "status", "files"}
-    if value["status"] in {"restoring_original", "restored"}:
+    if value["status"] in _RESTORE_STATUSES:
         expected_keys.add("recovery_source")
+        if "restore_roles" in value or "conflict_roles" in value:
+            expected_keys.update({"restore_roles", "conflict_roles"})
+        restore_roles, _conflict_roles = _restore_selection(value)
         _decode_recovery_sources(
             value.get("recovery_source"),
-            expected_roles=set(value["files"]),
+            expected_roles=set(restore_roles),
         )
     if set(value) != expected_keys:
         raise HostConfigError("registration_journal_invalid")
     if only_next and value["status"] != "prepared":
         raise HostConfigError("registration_journal_invalid")
     return value, only_next
+
+
+_RESTORE_STATUSES = frozenset({"restoring_original", "restored", "restore_conflict"})
+_JOURNAL_STATUSES = frozenset({"prepared", "writing", "committed"}) | _RESTORE_STATUSES
+
+
+def _restore_selection(manifest: dict[str, object]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Roles a rollback is authorised to restore, and roles it must keep.
+
+    Fix-forward #465 round 2 (Sol P1-2): the decision is persisted with
+    restoring_original and replayed as is on recovery, so a file another
+    writer changed is never overwritten by a resumed restore. A journal
+    without the two lists (written before this change) restores every role,
+    as before.
+    """
+    files = manifest.get("files")
+    if not isinstance(files, dict):
+        raise HostConfigError("registration_journal_invalid")
+    all_roles = tuple(role for role in ("claude", "codex") if role in files)
+    if "restore_roles" not in manifest and "conflict_roles" not in manifest:
+        return all_roles, ()
+    restore = manifest.get("restore_roles")
+    conflict = manifest.get("conflict_roles")
+    if (
+        not isinstance(restore, list)
+        or not isinstance(conflict, list)
+        or any(role not in all_roles for role in [*restore, *conflict])
+        or len(set(restore)) != len(restore)
+        or len(set(conflict)) != len(conflict)
+        or set(restore) & set(conflict)
+    ):
+        raise HostConfigError("registration_journal_invalid")
+    order = {role: index for index, role in enumerate(all_roles)}
+    return (
+        tuple(sorted(restore, key=order.__getitem__)),
+        tuple(sorted(conflict, key=order.__getitem__)),
+    )
 
 
 def _decode_manifest_file(value: object) -> tuple[Path, dict[str, object], bytes, bytes]:
@@ -1464,13 +1525,19 @@ def _recover_if_needed(
                 raise HostConfigError("registration_recovery_conflict")
             _cleanup_journal(journal)
             return
-        if status in {"restoring_original", "restored"}:
+        if status in _RESTORE_STATUSES:
+            restore_roles, conflict_roles = _restore_selection(manifest)
             sources = _decode_recovery_sources(
                 manifest["recovery_source"],
-                expected_roles=set(roles),
+                expected_roles=set(restore_roles),
             )
-            if status == "restored":
-                if any(currents[role] != decoded[role][2] for role in decoded):
+            # A kept role is never written. It may be released only once it
+            # is exactly the original again; anything else stays a conflict
+            # with the journal kept (Sol P1-1/P1-2).
+            if any(currents[role] != decoded[role][2] for role in conflict_roles):
+                raise HostConfigError("registration_recovery_conflict")
+            if status in {"restored", "restore_conflict"}:
+                if any(currents[role] != decoded[role][2] for role in restore_roles):
                     raise HostConfigError("registration_recovery_conflict")
                 _cleanup_journal(journal)
                 return
@@ -1478,7 +1545,7 @@ def _recover_if_needed(
                 not _is_restore_progress(
                     currents[role], decoded[role][2], sources[role]
                 )
-                for role in decoded
+                for role in restore_roles
             ):
                 raise HostConfigError("registration_recovery_conflict")
         else:
@@ -1491,16 +1558,23 @@ def _recover_if_needed(
             if all(value == "target" for value in classes.values()):
                 _cleanup_journal(journal)
                 return
+            restore_roles = tuple(
+                role for role in roles if classes[role] in {"target", "own_torn"}
+            )
             manifest["status"] = "restoring_original"
-            manifest["recovery_source"] = _encode_recovery_sources(currents)
+            manifest["restore_roles"] = list(restore_roles)
+            manifest["conflict_roles"] = []
+            manifest["recovery_source"] = _encode_recovery_sources(
+                {role: currents[role] for role in restore_roles}
+            )
             _persist_manifest(journal, manifest)
             if fault_injector is not None:
                 fault_injector("after_recovery_prepare")
-        for role in roles:
+        for role in restore_roles:
             handles[role].write(decoded[role][2])
             if fault_injector is not None:
                 fault_injector(f"after_recovery_write_{role}")
-        if any(handles[role].read() != decoded[role][2] for role in decoded):
+        if any(handles[role].read() != decoded[role][2] for role in restore_roles):
             raise HostConfigError("registration_recovery_restore_failed")
         manifest["status"] = "restored"
         _persist_manifest(journal, manifest)
@@ -1607,18 +1681,23 @@ def apply_host_timeouts(
         raise
     except Exception:
         if journal_prepared:
+            conflict_roles: list[str] = []
             try:
-                manifest["status"] = "restoring_original"
-                manifest["recovery_source"] = _encode_recovery_sources(
-                    {role: handles[role].read() for role in paths}
-                )
-                _persist_manifest(journal, manifest)
-                # Restore only files this transaction wrote whose bytes are
-                # still its own. An untouched file, or one another writer
-                # changed after our write, is left exactly as it is: its edit
-                # is kept, never overwritten with our original.
+                # Decide per file before any write, and persist the decision
+                # (fix-forward #465 round 2):
+                # - not written by us: not ours, left as it is;
+                # - written, still the original: nothing to undo;
+                # - written, holding our target or a torn prefix of it (a
+                #   short write followed by EIO): ours, restored;
+                # - written, path unlinked or now another inode: none of our
+                #   bytes are reachable at the path, nothing to restore;
+                # - written, same inode, anything else (another writer's
+                #   edit): kept as it is, and the journal stays as
+                #   restore_conflict instead of claiming restored.
+                currents = {role: handles[role].read() for role in paths}
+                restore_roles: list[str] = []
                 for role in roles:
-                    if role not in touched:
+                    if role not in touched or currents[role] == originals[role]:
                         continue
                     if os.name != "nt":
                         handle = handles[role]
@@ -1626,17 +1705,40 @@ def apply_host_timeouts(
                         try:
                             handle.verify_path_identity()
                         except HostConfigError:
+                            # The path was unlinked or now names another
+                            # inode: none of our bytes are reachable there,
+                            # and what is there is another writer's.
                             continue
-                    if handles[role].read() != targets[role]:
-                        continue
+                    if currents[role] == targets[role] or _is_own_write(
+                        currents[role], originals[role], targets[role]
+                    ):
+                        restore_roles.append(role)
+                    else:
+                        conflict_roles.append(role)
+                manifest["status"] = "restoring_original"
+                manifest["restore_roles"] = restore_roles
+                manifest["conflict_roles"] = conflict_roles
+                manifest["recovery_source"] = _encode_recovery_sources(
+                    {role: currents[role] for role in restore_roles}
+                )
+                _persist_manifest(journal, manifest)
+                for role in restore_roles:
                     handles[role].write(originals[role])
                     if handles[role].read() != originals[role]:
                         raise HostConfigError("registration_config_rollback_failed")
-                manifest["status"] = "restored"
-                _persist_manifest(journal, manifest)
-                _cleanup_journal(journal)
+                if conflict_roles:
+                    manifest["status"] = "restore_conflict"
+                    _persist_manifest(journal, manifest)
+                else:
+                    manifest["status"] = "restored"
+                    _persist_manifest(journal, manifest)
+                    _cleanup_journal(journal)
+            except HostConfigCrash:
+                raise
             except Exception:
                 raise HostConfigError("registration_config_rollback_failed") from None
+            if conflict_roles:
+                raise HostConfigError("registration_config_rollback_conflict") from None
         elif journal_started:
             try:
                 _cleanup_journal(journal)

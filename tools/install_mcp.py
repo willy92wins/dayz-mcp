@@ -1349,22 +1349,53 @@ def install_runtime(
     }
 
 
+def _foreign_registration_roles(
+    provider: RegistrationProvider,
+    roles: Sequence[str],
+    previous: dict[str, RegistrationSpec | None],
+    ours: dict[str, set[RegistrationSpec | None]],
+) -> set[str]:
+    """Roles whose live entry is neither the previous one nor one we wrote.
+
+    Fix-forward #465 round 2 (Sol P1-3): an entry another writer changed while
+    the transaction ran (apply_host_timeouts keeps such an edit) is preserved,
+    never replaced by the previous registration. None counts as ours: the
+    transaction removed the entry before adding its own.
+    """
+    foreign: set[str] = set()
+    for role in roles:
+        current = provider.get(role)
+        if current is None or current == previous[role] or current in ours.get(role, set()):
+            continue
+        foreign.add(role)
+    return foreign
+
+
 def _rollback_registrations(
     provider: RegistrationProvider,
     previous: dict[str, RegistrationSpec | None],
     touched: set[str],
+    *,
+    ours: dict[str, set[RegistrationSpec | None]] | None = None,
+    preserved: set[str] | frozenset[str] = frozenset(),
 ) -> None:
     roles = tuple(role for role in ("CLAUDE", "CODEX") if role in previous)
     for role in roles:
-        if role not in touched:
+        if role not in touched or role in preserved:
             continue
         current = provider.get(role)
+        if current == previous[role]:
+            continue
+        if ours is not None and not (current is None or current in ours.get(role, set())):
+            raise RegistrationRollbackError("registration_rollback_conflict")
         if current is not None:
             provider.remove(role)
         original = previous[role]
         if original is not None:
             provider.add(role, original)
     for role in roles:
+        if role in preserved:
+            continue
         if provider.get(role) != previous[role]:
             raise RegistrationRollbackError("registration_rollback_verify_failed")
 
@@ -1495,7 +1526,9 @@ def _acquire_registration_lock(journal_root: Path, timeout_s: float) -> _HeldReg
     ):
         raise InstallerContractError("invalid_registration_lock_timeout")
     path = _registration_lock_path(journal_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    from dayz_mcp.host_config import _makedirs_durable
+
+    _makedirs_durable(path.parent)
     from dayz_mcp import byte_lock
 
     owner = _RegistrationLockToken()
@@ -1593,6 +1626,7 @@ def _load_registration_manifest(
     str,
     tuple[Path, ...] | None,
     Path | None,
+    dict[str, RegistrationSpec | None] | None,
 ] | None:
     published, pending, _staging = _registration_publication_paths(journal)
     only_next = False
@@ -1613,9 +1647,18 @@ def _load_registration_manifest(
         or value.get("status") != "prepared"
         or value.get("server_name") in (None, "")
         or not isinstance(value.get("server_name"), str)
-        or set(value) != {
+        or not {
             "host_configs",
             "host_journal",
+            "previous",
+            "schema",
+            "server_name",
+            "status",
+        } <= set(value) <= {
+            "desired",
+            "host_configs",
+            "host_journal",
+            "preserved",
             "previous",
             "schema",
             "server_name",
@@ -1644,11 +1687,29 @@ def _load_registration_manifest(
         host_journal = Path(raw_host_journal)
     else:
         raise RegistrationTransactionError("registration_journal_invalid")
+    raw_preserved = value.get("preserved", [])
+    if not isinstance(raw_preserved, list) or any(
+        role not in roles for role in raw_preserved
+    ):
+        raise RegistrationTransactionError("registration_journal_invalid")
+    raw_desired = value.get("desired")
+    if raw_desired is not None and (
+        not isinstance(raw_desired, dict) or set(raw_desired) != set(roles)
+    ):
+        raise RegistrationTransactionError("registration_journal_invalid")
+    # A role recorded as preserved holds another writer's entry that the
+    # rollback decided to keep: recovery leaves it as it is too.
     previous = {
         role: _registration_spec_from_payload(value["previous"][role])
         for role in roles
+        if role not in raw_preserved
     }
-    return previous, only_next, value["server_name"], host_configs, host_journal
+    desired: dict[str, RegistrationSpec | None] | None = None
+    if raw_desired is not None:
+        desired = {
+            role: _registration_spec_from_payload(raw_desired[role]) for role in roles
+        }
+    return previous, only_next, value["server_name"], host_configs, host_journal, desired
 
 
 def _restore_registered_roles(
@@ -1696,12 +1757,27 @@ def _recover_registration_journal(
         str,
         tuple[Path, ...] | None,
         Path | None,
+        dict[str, RegistrationSpec | None] | None,
     ],
 ) -> None:
-    previous, only_next, _owner, _hosts, _host_journal = loaded
+    previous, only_next, _owner, _hosts, _host_journal, desired = loaded
     if only_next and all(provider.get(role) == previous[role] for role in previous):
         _cleanup_registration_journal(journal)
         return
+    if only_next:
+        # A first publication cut before its rename: make it the durable
+        # manifest before any provider mutation (fix-forward #465 round 2).
+        from dayz_mcp.host_config import _fsync_dir_posix
+
+        published, pending, _staging = _registration_publication_paths(journal)
+        os.replace(pending, published)
+        _fsync_dir_posix(journal)
+    if desired is not None:
+        ours = {role: {desired[role]} for role in previous if role in desired}
+        if _foreign_registration_roles(provider, tuple(previous), previous, ours):
+            # Another writer's entry: keep it and keep the journal, so nothing
+            # restores the previous spec over it (fix-forward #465 round 2).
+            raise RegistrationTransactionError("registration_recovery_conflict")
     _restore_registered_roles(provider, previous)
     _cleanup_registration_journal(journal)
 
@@ -1773,7 +1849,7 @@ def _register_transaction_locked(
     recorded_hosts: tuple[Path, ...] | None = None
     recorded_host_journal: Path | None = None
     if loaded is not None:
-        _previous, _only_next, owner, recorded_hosts, recorded_host_journal = loaded
+        _previous, _only_next, owner, recorded_hosts, recorded_host_journal, _desired = loaded
         if owner != server_name:
             # Another instance owns this journal. Do not restore its specs here
             # and do not delete it.
@@ -1788,6 +1864,9 @@ def _register_transaction_locked(
         _recover_registration_journal(provider, journal, loaded)
     previous: dict[str, RegistrationSpec | None] = {}
     touched: set[str] = set()
+    # What this transaction itself put in the provider: the desired spec and
+    # whatever the provider reported right after our add.
+    ours: dict[str, set[RegistrationSpec | None]] = {role: {desired[role]} for role in roles}
     try:
         for role in roles:
             previous[role] = provider.get(role)
@@ -1820,6 +1899,9 @@ def _register_transaction_locked(
                 "host_journal": (
                     None if host_journal_root is None else str(host_journal_root)
                 ),
+                "desired": {
+                    role: _registration_spec_payload(desired[role]) for role in roles
+                },
                 "previous": {
                     role: _registration_spec_payload(previous[role]) for role in roles
                 },
@@ -1833,12 +1915,14 @@ def _register_transaction_locked(
                 provider.remove(role)
                 touched.add(role)
         for role in roles:
-            provider.add(role, desired[role])
             touched.add(role)
+            provider.add(role, desired[role])
             if fault_injector is not None:
                 fault_injector(f"after_add_{role}")
         for role in roles:
-            if provider.get(role) != desired[role]:
+            observed = provider.get(role)
+            ours[role].add(observed)
+            if observed != desired[role]:
                 raise RegistrationTransactionError("registration_verify_mismatch")
         if host_configs is not None:
             timeout_kwargs: dict[str, object] = {}
@@ -1857,10 +1941,27 @@ def _register_transaction_locked(
         raise
     except Exception as error:
         try:
-            _rollback_registrations(provider, previous, touched)
+            preserved = _foreign_registration_roles(
+                provider, tuple(role for role in roles if role in touched), previous, ours
+            )
+            if preserved:
+                # Record the decision before acting on it, so a crash during
+                # this rollback is recovered the same way (Sol P1-3).
+                manifest = json.loads(
+                    _registration_publication_paths(journal)[0].read_bytes()
+                )
+                manifest["preserved"] = sorted(preserved)
+                _write_registration_manifest(journal, manifest)
+            _rollback_registrations(
+                provider, previous, touched, ours=ours, preserved=preserved
+            )
             _cleanup_registration_journal(journal)
         except Exception as rollback_error:
             raise RegistrationRollbackError("registration_rollback_failed") from rollback_error
+        if preserved:
+            raise RegistrationRollbackError(
+                "registration_rollback_preserved_foreign_edit"
+            ) from error
         raise RegistrationTransactionError("registration_transaction_failed") from error
 
 
