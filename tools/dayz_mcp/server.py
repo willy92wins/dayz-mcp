@@ -9249,12 +9249,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("query_get_in_condition", args, "server", _timeout(timeout_s))
 
-    # General fixture prep for any CarScript (no classname allowlist).
+    # General fixture prep for any CarScript or MotorbikeScript (no classname allowlist).
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Prepare a vehicle "
-            "fixture near pos (OnDebugSpawn when needed). Any CarScript "
-            "classname; non-vehicles return fixture_not_vehicle."
+            "fixture near pos (OnDebugSpawn when needed). Any CarScript or "
+            "MotorbikeScript classname; anything else, such as a boat, "
+            "returns fixture_not_vehicle. A motorbike is ready with every "
+            "wheel on, fuel above 0, its spark plug when vital and its "
+            "battery when it needs one; its reply carries the same vehicle "
+            "fields as a car's (engine_on_server, speedo, wheel_count, "
+            "fuel_fraction, lights_on_server)."
         )
     )
     async def vehicle_prepare_fixture(
