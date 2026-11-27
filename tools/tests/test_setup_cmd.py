@@ -848,6 +848,9 @@ class SetupCmdTest(unittest.TestCase):
     def test_reject_installer_cli_missing_codex(self) -> None:
         empty = self.base / "empty-path"
         empty.mkdir()
+        codex_dir = self.home / ".codex"
+        codex_dir.mkdir(parents=True)
+        (codex_dir / "config.toml").write_text("", encoding="utf-8")
         args = ["--json", "--claude-exe", str(self.claude_exe)]
         with mock.patch.dict(os.environ, {"PATH": str(empty)}):
             self.assert_rejected(
@@ -971,6 +974,46 @@ class SetupCmdTest(unittest.TestCase):
                     {
                         "code": "workshop_item_missing",
                         "remedy": "subscribe to the DayZ-MCP item in the Steam Workshop, let Steam download it, then run dayz-mcp setup --json again; or pass --item PATH",
+                    }
+                ],
+            )
+
+    def test_claude_only_when_no_codex_cli_and_no_config_toml(self) -> None:
+        empty = self.base / "empty-path"
+        empty.mkdir()
+        args = ["--json", "--claude-exe", str(self.claude_exe)]
+        with mock.patch.dict(os.environ, {"PATH": str(empty)}):
+            code, payload, _text = self.run_setup(args)
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["registered"], ["claude"])
+        self.assertEqual(payload["missing"], [])
+        manifest = install_mcp.load_installer_cli_manifest(
+            install_mcp.installer_cli_manifest_path()
+        )
+        self.assertEqual(set(manifest.entries), {"CLAUDE"})
+        self.assertEqual(len(self.register_calls), 1)
+        self.assertEqual(set(self.register_calls[0]["desired"]), {"CLAUDE"})
+        self.assertEqual(
+            self.register_calls[0]["kwargs"]["host_configs"],
+            (self.home / ".claude.json",),
+        )
+
+    def test_reject_missing_codex_cli_when_config_toml_exists(self) -> None:
+        empty = self.base / "empty-path"
+        empty.mkdir()
+        codex_dir = self.home / ".codex"
+        codex_dir.mkdir(parents=True)
+        (codex_dir / "config.toml").write_text("", encoding="utf-8")
+        args = ["--json", "--claude-exe", str(self.claude_exe)]
+        with mock.patch.dict(os.environ, {"PATH": str(empty)}):
+            self.assert_rejected(
+                args,
+                [
+                    {
+                        "code": "installer_cli_missing",
+                        "remedy": "install the native codex CLI, or pass --codex-exe PATH",
+                        "role": "codex",
                     }
                 ],
             )

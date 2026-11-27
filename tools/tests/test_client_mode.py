@@ -1705,5 +1705,45 @@ class StrictParserTest(unittest.TestCase):
                 self.assertEqual(stderr.getvalue(), "")
 
 
+class ClientStartupHostConfigErrorTest(unittest.TestCase):
+    """Issue #422: --client startup writes HostConfigError:<code> to stderr."""
+
+    def test_client_run_writes_host_config_error_code_to_stderr(self) -> None:
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        from dayz_mcp.instance_context import reset_instance_context_for_tests
+
+        self.addCleanup(reset_instance_context_for_tests)
+        with tempfile.TemporaryDirectory(prefix="client-host-err-") as tmp:
+            keyfile = Path(tmp) / "daemon.key"
+            keyfile.write_text("fixture-key\n", encoding="ascii")
+            for code in (
+                "daemon_provenance_conflict",
+                "daemon_provenance_incomplete",
+            ):
+                with self.subTest(code=code):
+                    stderr = StringIO()
+                    with (
+                        patch.object(
+                            host_config,
+                            "resolve_daemon_provenance",
+                            side_effect=host_config.HostConfigError(code),
+                        ),
+                        redirect_stderr(stderr),
+                    ):
+                        exit_code = server.run(
+                            [
+                                "--client",
+                                "--port",
+                                "18765",
+                                "--keyfile",
+                                str(keyfile),
+                            ]
+                        )
+                    self.assertEqual(exit_code, 2)
+                    self.assertIn(f"HostConfigError:{code}", stderr.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

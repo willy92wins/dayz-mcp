@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import errno
 import hashlib
 import json
 import math
 import os
 import re
 import shutil
+import stat
 import sys
 import tomllib
 from contextlib import contextmanager
@@ -395,7 +397,7 @@ def resolve_daemon_provenance(
     codex_path: Path | None = None,
     server_name: str = "dayz-mcp",
 ) -> DaemonProvenance:
-    """Resolve the daemon policy only from both canonical local registrations."""
+    """Resolve the daemon policy from canonical local registrations."""
     paths = {
         "claude": claude_path or (Path.home() / ".claude.json"),
         "codex": codex_path or (Path.home() / ".codex" / "config.toml"),
@@ -414,14 +416,18 @@ def resolve_daemon_provenance(
                 raw, platform=platform, **_selector_call_kwargs(server_name)
             )
 
-        present = sum(registration is not None for registration in registrations.values())
-        if present == 0:
-            raise HostConfigError("daemon_provenance_unavailable")
-        if present == 1:
-            raise HostConfigError("daemon_provenance_incomplete")
         claude = registrations["claude"]
         codex = registrations["codex"]
-        if claude is None or codex is None or claude != codex:
+        if claude is None and codex is None:
+            raise HostConfigError("daemon_provenance_unavailable")
+        if claude is None:
+            raise HostConfigError("daemon_provenance_incomplete")
+        if codex is None:
+            if handles["codex"] is not None:
+                raise HostConfigError("daemon_provenance_incomplete")
+            if _pinned_path_exists(paths["codex"]):
+                raise HostConfigError("daemon_provenance_conflict")
+        elif claude != codex:
             raise HostConfigError("daemon_provenance_conflict")
 
         # Local import keeps the timeout/config transaction module independently
@@ -454,10 +460,11 @@ def resolve_daemon_provenance(
             instance_token=claude.instance_token,
             game_path=claude.game_path,
         )
+        object.__setattr__(provenance, "_codex_present", codex is not None)
         for platform in ("claude", "codex"):
             handle = handles[platform]
             if handle is None:
-                if os.path.lexists(paths[platform]):
+                if _pinned_path_exists(paths[platform]):
                     raise HostConfigError("daemon_provenance_conflict")
                 continue
             # Compare content through the same strict registration parser.
@@ -726,12 +733,15 @@ class _PinnedConfigMissing(Exception):
     pass
 
 
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
+_WIN_ABSENT_ERRORS = frozenset({2, 3})
+_POSIX_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR})
+
 if os.name == "nt":
     _FILE_SHARE_READ = 0x00000001
     _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
-    _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
     _FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
-    _INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
 
     class _FILE_ATTRIBUTE_TAG_INFO(ctypes.Structure):
         _fields_ = [
@@ -750,18 +760,60 @@ if os.name == "nt":
     _kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
 
 
+def _is_absent_os_error(error: OSError) -> bool:
+    if os.name == "nt":
+        winerror = getattr(error, "winerror", None)
+        if winerror is not None:
+            return winerror in _WIN_ABSENT_ERRORS
+        return isinstance(error, (FileNotFoundError, NotADirectoryError))
+    return (
+        isinstance(error, (FileNotFoundError, NotADirectoryError))
+        or error.errno in _POSIX_ABSENT_ERRNOS
+    )
+
+
+def _pinned_path_exists(path: Path) -> bool:
+    try:
+        os.lstat(path)
+    except OSError as error:
+        if _is_absent_os_error(error):
+            return False
+        raise HostConfigError("daemon_provenance_conflict") from None
+    return True
+
+
+def _win_file_attributes(path: Path) -> tuple[int, int]:
+    attributes = int(_kernel32.GetFileAttributesW(str(path)))
+    if attributes == _INVALID_FILE_ATTRIBUTES:
+        return attributes, int(ctypes.get_last_error())
+    return attributes, 0
+
+
+def _assert_no_reparse_parents_win(absolute: Path) -> None:
+    for parent in reversed(absolute.parents):
+        attributes, winerror = _win_file_attributes(parent)
+        if attributes == _INVALID_FILE_ATTRIBUTES:
+            if winerror in _WIN_ABSENT_ERRORS:
+                raise _PinnedConfigMissing()
+            raise HostConfigError("daemon_provenance_conflict", winerror=winerror)
+        if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+            raise HostConfigError("daemon_provenance_conflict")
+
+
 def _assert_no_reparse_parents(path: Path) -> None:
     absolute = Path(os.path.abspath(path))
     if os.name != "nt":
-        if any(parent.is_symlink() for parent in absolute.parents):
-            raise HostConfigError("daemon_provenance_conflict")
+        for parent in reversed(absolute.parents):
+            try:
+                metadata = os.lstat(parent)
+            except OSError as error:
+                if _is_absent_os_error(error):
+                    raise _PinnedConfigMissing() from None
+                raise HostConfigError("daemon_provenance_conflict") from None
+            if stat.S_ISLNK(metadata.st_mode):
+                raise HostConfigError("daemon_provenance_conflict")
         return
-    for parent in reversed(absolute.parents):
-        attributes = int(_kernel32.GetFileAttributesW(str(parent)))
-        if attributes == _INVALID_FILE_ATTRIBUTES:
-            raise _PinnedConfigMissing()
-        if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-            raise HostConfigError("daemon_provenance_conflict")
+    _assert_no_reparse_parents_win(absolute)
 
 
 def _final_handle_path(handle: object) -> str:
@@ -799,7 +851,7 @@ class _PinnedConfigFile:
             )
             if handle == _INVALID_HANDLE_VALUE:
                 error = ctypes.get_last_error()
-                if error in {2, 3}:
+                if error in _WIN_ABSENT_ERRORS:
                     raise _PinnedConfigMissing()
                 raise HostConfigError("daemon_provenance_conflict", winerror=error)
             self.handle = handle
@@ -824,9 +876,9 @@ class _PinnedConfigFile:
             flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
             try:
                 self.handle = os.open(self.path, flags)
-            except FileNotFoundError:
-                raise _PinnedConfigMissing() from None
-            except OSError:
+            except OSError as error:
+                if _is_absent_os_error(error):
+                    raise _PinnedConfigMissing() from None
                 raise HostConfigError("daemon_provenance_conflict") from None
             if not os.path.isfile(self.path):
                 self.close()
@@ -985,6 +1037,7 @@ def _journal_payload(
     originals: dict[str, bytes],
     targets: dict[str, bytes],
 ) -> dict[str, object]:
+    roles = tuple(role for role in ("claude", "codex") if role in paths)
     return {
         "schema": _JOURNAL_SCHEMA,
         "status": "prepared",
@@ -997,7 +1050,7 @@ def _journal_payload(
                 "original": base64.b64encode(originals[role]).decode("ascii"),
                 "target": base64.b64encode(targets[role]).decode("ascii"),
             }
-            for role in ("claude", "codex")
+            for role in roles
         },
     }
 
@@ -1078,13 +1131,16 @@ def _load_manifest_publication(journal: Path) -> tuple[dict[str, object], bool]:
         or value.get("status")
         not in {"prepared", "writing", "committed", "restoring_original", "restored"}
         or not isinstance(value.get("files"), dict)
-        or set(value["files"]) != {"claude", "codex"}
+        or set(value["files"]) not in ({"claude", "codex"}, {"claude"})
     ):
         raise HostConfigError("registration_journal_invalid")
     expected_keys = {"schema", "status", "files"}
     if value["status"] in {"restoring_original", "restored"}:
         expected_keys.add("recovery_source")
-        _decode_recovery_sources(value.get("recovery_source"))
+        _decode_recovery_sources(
+            value.get("recovery_source"),
+            expected_roles=set(value["files"]),
+        )
     if set(value) != expected_keys:
         raise HostConfigError("registration_journal_invalid")
     if only_next and value["status"] != "prepared":
@@ -1128,14 +1184,26 @@ def _encode_recovery_sources(values: dict[str, bytes]) -> dict[str, dict[str, st
             "sha256": _sha256(values[role]),
         }
         for role in ("claude", "codex")
+        if role in values
     }
 
 
-def _decode_recovery_sources(value: object) -> dict[str, bytes]:
-    if not isinstance(value, dict) or set(value) != {"claude", "codex"}:
+def _decode_recovery_sources(
+    value: object,
+    *,
+    expected_roles: set[str] | None = None,
+) -> dict[str, bytes]:
+    if not isinstance(value, dict):
+        raise HostConfigError("registration_journal_invalid")
+    if expected_roles is None:
+        if set(value) not in ({"claude", "codex"}, {"claude"}):
+            raise HostConfigError("registration_journal_invalid")
+    elif set(value) != expected_roles:
         raise HostConfigError("registration_journal_invalid")
     decoded: dict[str, bytes] = {}
     for role in ("claude", "codex"):
+        if role not in value:
+            continue
         item = value[role]
         if (
             not isinstance(item, dict)
@@ -1223,7 +1291,7 @@ def _classify(current: bytes, original: bytes, target: bytes) -> str:
 
 def _recover_if_needed(
     claude_path: Path,
-    codex_path: Path,
+    codex_path: Path | None,
     journal: Path,
     *,
     fault_injector: _FaultInjector | None = None,
@@ -1234,13 +1302,18 @@ def _recover_if_needed(
         return
     manifest, only_next = _load_manifest_publication(journal)
     files = manifest["files"]
+    roles = tuple(role for role in ("claude", "codex") if role in files)
+    if "codex" in roles and codex_path is None:
+        raise HostConfigError("registration_recovery_conflict")
     decoded = {
-        role: _decode_manifest_file(files[role]) for role in ("claude", "codex")
+        role: _decode_manifest_file(files[role]) for role in roles
     }
     expected_paths = {
         "claude": claude_path.resolve(strict=True),
-        "codex": codex_path.resolve(strict=True),
     }
+    if "codex" in roles:
+        assert codex_path is not None
+        expected_paths["codex"] = codex_path.resolve(strict=True)
     if any(decoded[role][0] != expected_paths[role] for role in decoded):
         raise HostConfigError("registration_recovery_conflict")
     handles = _open_both(expected_paths)
@@ -1250,7 +1323,7 @@ def _recover_if_needed(
         currents = {role: handles[role].read() for role in decoded}
         if only_next:
             # First publication never reaches a host write. Discard only when
-            # both files are still the recorded originals; anything else is replayed.
+            # all recorded files are still the recorded originals; anything else is replayed.
             if all(currents[role] == decoded[role][2] for role in decoded):
                 _cleanup_journal(journal)
                 return
@@ -1262,7 +1335,10 @@ def _recover_if_needed(
             _cleanup_journal(journal)
             return
         if status in {"restoring_original", "restored"}:
-            sources = _decode_recovery_sources(manifest["recovery_source"])
+            sources = _decode_recovery_sources(
+                manifest["recovery_source"],
+                expected_roles=set(roles),
+            )
             if status == "restored":
                 if any(currents[role] != decoded[role][2] for role in decoded):
                     raise HostConfigError("registration_recovery_conflict")
@@ -1290,7 +1366,7 @@ def _recover_if_needed(
             _persist_manifest(journal, manifest)
             if fault_injector is not None:
                 fault_injector("after_recovery_prepare")
-        for role in ("claude", "codex"):
+        for role in roles:
             handles[role].write(decoded[role][2])
             if fault_injector is not None:
                 fault_injector(f"after_recovery_write_{role}")
@@ -1305,42 +1381,46 @@ def _recover_if_needed(
 
 def apply_host_timeouts(
     claude_path: Path,
-    codex_path: Path,
+    codex_path: Path | None = None,
     *,
     journal_root: Path | None = None,
     fault_injector: _FaultInjector | None = None,
     server_name: str = "dayz-mcp",
 ) -> dict[str, str]:
     claude_path = Path(claude_path).resolve(strict=True)
-    codex_path = Path(codex_path).resolve(strict=True)
-    if claude_path == codex_path:
-        raise HostConfigError("registration_config_paths_conflict")
+    resolved_codex: Path | None = None
+    if codex_path is not None:
+        resolved_codex = Path(codex_path).resolve(strict=True)
+        if claude_path == resolved_codex:
+            raise HostConfigError("registration_config_paths_conflict")
     journal = Path(journal_root) if journal_root is not None else _default_journal_root()
     _recover_if_needed(
         claude_path,
-        codex_path,
+        resolved_codex,
         journal,
         fault_injector=fault_injector,
     )
 
+    roles = ("claude", "codex") if resolved_codex is not None else ("claude",)
+    paths: dict[str, Path] = {"claude": claude_path}
+    if resolved_codex is not None:
+        paths["codex"] = resolved_codex
+
     try:
-        originals = {
-            "claude": claude_path.read_bytes(),
-            "codex": codex_path.read_bytes(),
-        }
+        originals = {role: paths[role].read_bytes() for role in roles}
     except OSError:
         raise HostConfigError("registration_config_busy") from None
     try:
         targets = {
             "claude": build_claude_target(originals["claude"], server_name),
-            "codex": build_codex_target(originals["codex"], server_name),
         }
+        if "codex" in originals:
+            targets["codex"] = build_codex_target(originals["codex"], server_name)
     except HostConfigError:
         raise
     except OSError:
         raise HostConfigError("registration_config_read_failed") from None
 
-    paths = {"claude": claude_path, "codex": codex_path}
     handles = _open_both(paths)
     journal_started = False
     journal_prepared = False
@@ -1357,14 +1437,15 @@ def apply_host_timeouts(
             fault_injector("after_prepare")
         manifest["status"] = "writing"
         _persist_manifest(journal, manifest)
-        for role in ("claude", "codex"):
+        for role in roles:
             handles[role].write(targets[role])
             if fault_injector is not None:
                 fault_injector(f"after_write_{role}")
         if any(handles[role].read() != targets[role] for role in paths):
             raise HostConfigError("registration_config_verify_failed")
         build_claude_target(handles["claude"].read(), server_name)
-        build_codex_target(handles["codex"].read(), server_name)
+        if "codex" in handles:
+            build_codex_target(handles["codex"].read(), server_name)
         manifest["status"] = "committed"
         _persist_manifest(journal, manifest)
         if fault_injector is not None:
@@ -1381,7 +1462,7 @@ def apply_host_timeouts(
                     {role: handles[role].read() for role in paths}
                 )
                 _persist_manifest(journal, manifest)
-                for role in ("claude", "codex"):
+                for role in roles:
                     handles[role].write(originals[role])
                 if any(handles[role].read() != originals[role] for role in paths):
                     raise HostConfigError("registration_config_rollback_failed")

@@ -388,5 +388,319 @@ class SupervisedFlagRegistrationTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "daemon_provenance_conflict")
 
 
+class ClaudeOnlyProvenanceTests(unittest.TestCase):
+    """Issue #422: Claude-only hosts resolve when no Codex config file exists."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="claude-only-prov-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name).resolve()
+        self.paths = {
+            "claude": self.root / ".claude.json",
+            "codex": self.root / "config.toml",
+        }
+        self.keyfile = self.root / "daemon.key"
+        self.keyfile.write_bytes(b"test-fixture-only")
+
+    def _entry(self, platform: str, *, port: int = 18765) -> dict:
+        entry = {
+            "command": str(Path(sys.executable).resolve()),
+            "args": [
+                "-m",
+                "dayz_mcp",
+                "--client",
+                "--port",
+                str(port),
+                "--keyfile",
+                str(self.keyfile),
+                "--idle-timeout",
+                "12.5",
+                "--client-platform",
+                platform,
+            ],
+        }
+        if platform == "claude":
+            entry.update(type="stdio", timeout=host_config.CLAUDE_TIMEOUT_MS)
+        else:
+            entry["tool_timeout_sec"] = host_config.CODEX_TIMEOUT_SECONDS
+        return entry
+
+    def _write_claude(self, *, port: int = 18765, name: str = "dayz-mcp") -> None:
+        claude = {"mcpServers": {name: self._entry("claude", port=port)}}
+        self.paths["claude"].write_bytes((json.dumps(claude) + "\n").encode("utf-8"))
+
+    def _write_codex(self, *, port: int = 18765, name: str = "dayz-mcp") -> None:
+        entry = self._entry("codex", port=port)
+        lines = [
+            f"[mcp_servers.{name}]",
+            f"command = {json.dumps(entry['command'])}",
+            f"args = {json.dumps(entry['args'])}",
+            f"tool_timeout_sec = {host_config.CODEX_TIMEOUT_SECONDS}",
+            "",
+        ]
+        self.paths["codex"].write_bytes("\n".join(lines).encode("utf-8"))
+
+    def _resolve(self):
+        return host_config.resolve_daemon_provenance(
+            claude_path=self.paths["claude"], codex_path=self.paths["codex"]
+        )
+
+    def test_claude_only_without_codex_file_resolves_with_claude_argv(self):
+        self._write_claude()
+        self.assertFalse(os.path.lexists(self.paths["codex"]))
+        claude_only = self._resolve()
+        self.assertEqual(claude_only.port, 18765)
+        self.assertEqual(claude_only.keyfile, str(self.keyfile))
+        self.assertEqual(
+            claude_only.launch_executable, str(Path(sys.executable).resolve())
+        )
+        self.assertIn("--daemon", claude_only.argv)
+        self.assertIn("18765", claude_only.argv)
+        self.assertIn(str(self.keyfile), claude_only.argv)
+
+        # Same argv/cwd/fields as when Codex is also present and matches.
+        self._write_codex()
+        dual = self._resolve()
+        self.assertEqual(claude_only, dual)
+
+        # Normal daemon policy loads and revalidates cleanly in Claude-only mode.
+        self.paths["codex"].unlink()
+        real_resolve = host_config.resolve_daemon_provenance
+        with patch.object(
+            host_config,
+            "resolve_daemon_provenance",
+            side_effect=lambda: real_resolve(
+                claude_path=self.paths["claude"], codex_path=self.paths["codex"]
+            ),
+        ):
+            policy = daemon_policy.load_normal_daemon_policy()
+            policy.revalidate()
+
+    def test_codex_file_exists_without_entry_still_incomplete(self):
+        self._write_claude()
+        for raw in (b"", b'[mcp_servers.other]\ncommand = "x"\nargs = []\n'):
+            with self.subTest(raw=raw):
+                self.paths["codex"].write_bytes(raw)
+                with self.assertRaises(host_config.HostConfigError) as caught:
+                    self._resolve()
+                self.assertEqual(str(caught.exception), "daemon_provenance_incomplete")
+
+    def test_only_codex_registered_without_claude_still_incomplete(self):
+        self._write_codex()
+        self.assertFalse(os.path.lexists(self.paths["claude"]))
+        with self.assertRaises(host_config.HostConfigError) as caught:
+            self._resolve()
+        self.assertEqual(str(caught.exception), "daemon_provenance_incomplete")
+
+    def test_both_registered_different_still_conflict(self):
+        self._write_claude(port=18765)
+        self._write_codex(port=18766)
+        with self.assertRaises(host_config.HostConfigError) as caught:
+            self._resolve()
+        self.assertEqual(str(caught.exception), "daemon_provenance_conflict")
+
+    def test_neither_registered_still_unavailable(self):
+        with self.assertRaises(host_config.HostConfigError) as caught:
+            self._resolve()
+        self.assertEqual(str(caught.exception), "daemon_provenance_unavailable")
+
+        self.paths["claude"].write_bytes(b'{"mcpServers": {}}\n')
+        self.paths["codex"].write_bytes(b"")
+        with self.assertRaises(host_config.HostConfigError) as caught:
+            self._resolve()
+        self.assertEqual(str(caught.exception), "daemon_provenance_unavailable")
+
+    def test_codex_file_appearing_between_reads_still_conflicts(self):
+        self._write_claude()
+        real_native = host_config._local_native_executable
+
+        def appear_mid_resolution() -> str:
+            self._write_codex()
+            return real_native()
+
+        with patch.object(
+            host_config, "_local_native_executable", side_effect=appear_mid_resolution
+        ):
+            with self.assertRaises(host_config.HostConfigError) as caught:
+                self._resolve()
+        self.assertEqual(str(caught.exception), "daemon_provenance_conflict")
+
+
+class CodexInspectionFailClosedTests(unittest.TestCase):
+    """Issue #422 round 3: fail closed when the Codex path or parents cannot be inspected."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="codex-fail-closed-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name).resolve()
+        self.codex_dir = self.root / ".codex"
+        self.paths = {
+            "claude": self.root / ".claude.json",
+            "codex": self.codex_dir / "config.toml",
+        }
+        self.keyfile = self.root / "daemon.key"
+        self.keyfile.write_bytes(b"test-fixture-only")
+
+    def _write_claude(self, *, port: int = 18765) -> None:
+        entry = {
+            "type": "stdio",
+            "command": str(Path(sys.executable).resolve()),
+            "args": [
+                "-m",
+                "dayz_mcp",
+                "--client",
+                "--port",
+                str(port),
+                "--keyfile",
+                str(self.keyfile),
+                "--idle-timeout",
+                "12.5",
+                "--client-platform",
+                "claude",
+            ],
+            "timeout": host_config.CLAUDE_TIMEOUT_MS,
+        }
+        claude = {"mcpServers": {"dayz-mcp": entry}}
+        self.paths["claude"].write_bytes((json.dumps(claude) + "\n").encode("utf-8"))
+
+    def _resolve(self):
+        return host_config.resolve_daemon_provenance(
+            claude_path=self.paths["claude"], codex_path=self.paths["codex"]
+        )
+
+    def test_claude_registered_without_codex_file_resolves_claude_only(self):
+        self._write_claude()
+        self.assertFalse(os.path.lexists(self.codex_dir))
+        provenance = self._resolve()
+        self.assertEqual(provenance.port, 18765)
+        self.assertEqual(provenance.keyfile, str(self.keyfile))
+        self.assertFalse(getattr(provenance, "_codex_present", True))
+
+        # Existing empty .codex directory without config.toml also resolves Claude-only.
+        self.codex_dir.mkdir()
+        provenance = self._resolve()
+        self.assertEqual(provenance.port, 18765)
+        self.assertFalse(getattr(provenance, "_codex_present", True))
+
+    def test_lstat_permission_error_on_codex_path_conflicts(self):
+        self._write_claude()
+        codex_target = Path(os.path.abspath(self.paths["codex"]))
+        real_lstat = os.lstat
+
+        def deny_codex_lstat(path, *args, **kwargs):
+            if (
+                isinstance(path, (str, os.PathLike))
+                and Path(os.path.abspath(path)) == codex_target
+            ):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_lstat(path, *args, **kwargs)
+
+        with patch.object(host_config.os, "lstat", side_effect=deny_codex_lstat):
+            with self.assertRaises(host_config.HostConfigError) as caught:
+                self._resolve()
+        self.assertEqual(str(caught.exception), "daemon_provenance_conflict")
+
+        # Also fail closed if PermissionError happens on the re-check loop.
+        seen_codex = 0
+
+        def deny_second_codex_lstat(path, *args, **kwargs):
+            nonlocal seen_codex
+            if (
+                isinstance(path, (str, os.PathLike))
+                and Path(os.path.abspath(path)) == codex_target
+            ):
+                seen_codex += 1
+                if seen_codex >= 2:
+                    raise PermissionError(13, "Permission denied", str(path))
+            return real_lstat(path, *args, **kwargs)
+
+        with patch.object(host_config.os, "lstat", side_effect=deny_second_codex_lstat):
+            with self.assertRaises(host_config.HostConfigError) as caught:
+                self._resolve()
+        self.assertEqual(str(caught.exception), "daemon_provenance_conflict")
+        self.assertGreaterEqual(seen_codex, 2)
+
+    def test_get_file_attributes_non_absent_error_on_codex_parent_conflicts(self):
+        self._write_claude()
+        codex_parent = Path(os.path.abspath(self.codex_dir))
+        codex_abs = Path(os.path.abspath(self.paths["codex"]))
+
+        if os.name == "nt":
+            real_attrs = host_config._win_file_attributes
+
+            for winerror in (5, 32):
+                with self.subTest(winerror=winerror):
+                    def fail_parent(path: Path, code: int = winerror) -> tuple[int, int]:
+                        if Path(os.path.abspath(path)) == codex_parent:
+                            return host_config._INVALID_FILE_ATTRIBUTES, code
+                        return real_attrs(path)
+
+                    with patch.object(
+                        host_config, "_win_file_attributes", side_effect=fail_parent
+                    ):
+                        with self.assertRaises(host_config.HostConfigError) as caught:
+                            self._resolve()
+                    self.assertEqual(str(caught.exception), "daemon_provenance_conflict")
+                    self.assertEqual(caught.exception.winerror, winerror)
+
+            # Control: ERROR_FILE_NOT_FOUND (2) and ERROR_PATH_NOT_FOUND (3) count as absent.
+            for winerror in (2, 3):
+                with self.subTest(absent_winerror=winerror):
+                    def absent_parent(path: Path, code: int = winerror) -> tuple[int, int]:
+                        if Path(os.path.abspath(path)) == codex_parent:
+                            return host_config._INVALID_FILE_ATTRIBUTES, code
+                        return real_attrs(path)
+
+                    with patch.object(
+                        host_config, "_win_file_attributes", side_effect=absent_parent
+                    ):
+                        provenance = self._resolve()
+                    self.assertEqual(provenance.port, 18765)
+        else:
+            for winerror in (5, 32):
+                with self.subTest(winerror=winerror):
+                    def fail_parent(path: Path, code: int = winerror) -> tuple[int, int]:
+                        if Path(os.path.abspath(path)) == codex_parent:
+                            return host_config._INVALID_FILE_ATTRIBUTES, code
+                        return 0x10, 0
+
+                    with patch.object(
+                        host_config, "_win_file_attributes", side_effect=fail_parent
+                    ):
+                        with self.assertRaises(host_config.HostConfigError) as caught:
+                            host_config._assert_no_reparse_parents_win(codex_abs)
+                    self.assertEqual(str(caught.exception), "daemon_provenance_conflict")
+                    self.assertEqual(caught.exception.winerror, winerror)
+
+            for winerror in (2, 3):
+                with self.subTest(absent_winerror=winerror):
+                    def absent_parent(path: Path, code: int = winerror) -> tuple[int, int]:
+                        if Path(os.path.abspath(path)) == codex_parent:
+                            return host_config._INVALID_FILE_ATTRIBUTES, code
+                        return 0x10, 0
+
+                    with patch.object(
+                        host_config, "_win_file_attributes", side_effect=absent_parent
+                    ):
+                        with self.assertRaises(host_config._PinnedConfigMissing):
+                            host_config._assert_no_reparse_parents_win(codex_abs)
+
+            # On POSIX, PermissionError on a parent directory also conflicts end-to-end.
+            real_lstat = os.lstat
+
+            def deny_parent_lstat(path, *args, **kwargs):
+                if (
+                    isinstance(path, (str, os.PathLike))
+                    and Path(os.path.abspath(path)) == codex_parent
+                ):
+                    raise PermissionError(13, "Permission denied", str(path))
+                return real_lstat(path, *args, **kwargs)
+
+            with patch.object(host_config.os, "lstat", side_effect=deny_parent_lstat):
+                with self.assertRaises(host_config.HostConfigError) as caught:
+                    self._resolve()
+            self.assertEqual(str(caught.exception), "daemon_provenance_conflict")
+
+
 if __name__ == "__main__":
     unittest.main()

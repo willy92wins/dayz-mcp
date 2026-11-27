@@ -324,6 +324,66 @@ class DoctorDefaultSourcesInstalledTest(unittest.TestCase):
         self.assertIsNone(sources.item_root)
         self.assertIsNone(sources.wheel_version_path)
 
+    def test_claude_only_manifest_without_codex_config_sets_codex_not_expected(self) -> None:
+        home = self.base / "claude-only-home"
+        home.mkdir()
+        payload = {
+            "entries": {
+                "CLAUDE": {"path": str(self.claude_exe)},
+                "CODEX": None,
+            }
+        }
+        (self.security / "installer-cli-manifest-v1.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        env = {
+            "DAYZ_MCP_SECURITY_DIR": str(self.security),
+            "USERPROFILE": str(home),
+            "HOME": str(home),
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            sources = _default_sources(str(self.doctor_file))
+        self.assertIsNotNone(sources.claude_config)
+        self.assertIsNone(sources.codex_config)
+        self.assertFalse(sources.codex_expected)
+
+    def test_claude_only_manifest_with_codex_config_keeps_codex_expected(self) -> None:
+        home = self.base / "codex-file-home"
+        (home / ".codex").mkdir(parents=True)
+        (home / ".codex" / "config.toml").write_text("", encoding="utf-8")
+        payload = {
+            "entries": {
+                "CLAUDE": {"path": str(self.claude_exe)},
+                "CODEX": None,
+            }
+        }
+        (self.security / "installer-cli-manifest-v1.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        env = {
+            "DAYZ_MCP_SECURITY_DIR": str(self.security),
+            "USERPROFILE": str(home),
+            "HOME": str(home),
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            sources = _default_sources(str(self.doctor_file))
+        self.assertIsNotNone(sources.claude_config)
+        self.assertIsNone(sources.codex_config)
+        self.assertTrue(sources.codex_expected)
+
+    def test_checkout_sources_without_codex_cli_or_config_sets_codex_not_expected(self) -> None:
+        home = self.base / "checkout-claude-only-home"
+        home.mkdir()
+        env = {"USERPROFILE": str(home), "HOME": str(home)}
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch.object(doctor.shutil, "which", return_value=None),
+        ):
+            sources = _default_sources(doctor.__file__)
+        self.assertIsNotNone(sources.claude_config)
+        self.assertIsNone(sources.codex_config)
+        self.assertFalse(sources.codex_expected)
+
 
 class DoctorInstalledDiagnoseTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -456,6 +516,18 @@ class DoctorInstalledDiagnoseTest(unittest.TestCase):
 
     def test_equal_halves_add_nothing(self) -> None:
         payload, exit_code = self.execute()
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            payload,
+            {
+                "ok": True,
+                "findings": [self.daemon_ok()],
+                "summary": {"fail": 0, "warn": 0},
+            },
+        )
+
+    def test_claude_only_without_codex_expected_is_clean(self) -> None:
+        payload, exit_code = self.execute(codex_config=None, codex_expected=False)
         self.assertEqual(exit_code, 0)
         self.assertEqual(
             payload,

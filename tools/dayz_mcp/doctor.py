@@ -150,6 +150,7 @@ class DoctorSources:
     installed: bool = False
     item_root: Path | None = None
     wheel_version_path: Path | None = None
+    codex_expected: bool = True
 
 
 @dataclass(frozen=True)
@@ -301,6 +302,11 @@ def default_sources(
 
     claude_config: CommandSource | None
     codex_config: CommandSource | None
+    codex_expected = True
+    try:
+        codex_file_exists = os.path.lexists(Path.home() / ".codex" / "config.toml")
+    except RuntimeError:
+        codex_file_exists = False
     item_root: Path | None = None
     wheel_version_path: Path | None = None
     if installed:
@@ -345,6 +351,13 @@ def default_sources(
 
         claude_path = pinned_path("CLAUDE", "claude.exe")
         codex_path = pinned_path("CODEX", "codex.exe")
+        codex_explicitly_absent = (
+            isinstance(manifest_payload, dict)
+            and isinstance(manifest_payload.get("entries"), dict)
+            and "CODEX" in manifest_payload["entries"]
+            and manifest_payload["entries"]["CODEX"] is None
+        )
+        codex_expected = not (codex_explicitly_absent and not codex_file_exists)
         if claude_path is None:
             claude_config = None
         else:
@@ -358,11 +371,16 @@ def default_sources(
                 [codex_path, "mcp", "get", selected_name, "--json"]
             )
     else:
-        codex = shutil.which("codex.cmd") or "codex.cmd"
         claude_config = lambda: _run_command(["claude", "mcp", "get", selected_name])
-        codex_config = lambda: _run_command(
-            [codex, "mcp", "get", selected_name, "--json"]
-        )
+        codex_cli = shutil.which("codex.cmd") or shutil.which("codex")
+        if codex_cli is None and not codex_file_exists:
+            codex_config = None
+            codex_expected = False
+        else:
+            codex = codex_cli or "codex.cmd"
+            codex_config = lambda codex=codex: _run_command(
+                [codex, "mcp", "get", selected_name, "--json"]
+            )
 
     return DoctorSources(
         claude_config=claude_config,
@@ -381,6 +399,7 @@ def default_sources(
         installed=installed,
         item_root=item_root,
         wheel_version_path=wheel_version_path,
+        codex_expected=codex_expected,
     )
 
 
@@ -1504,6 +1523,8 @@ def _diagnose(
         ("claude", sources.claude_config),
         ("codex", sources.codex_config),
     ):
+        if platform == "codex" and source is None and not sources.codex_expected:
+            continue
         if source is None and sources.installed:
             findings.append(
                 _finding(

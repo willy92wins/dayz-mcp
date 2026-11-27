@@ -165,10 +165,15 @@ def load_normal_daemon_policy(server_name: str | None = None) -> AccreditedDaemo
             return host_config.resolve_daemon_provenance()
         return host_config.resolve_daemon_provenance(server_name=selected)
 
-    policy = _from_provenance(_resolve())
+    provenance = _resolve()
+    initial_codex_present = bool(getattr(provenance, "_codex_present", True))
+    policy = _from_provenance(provenance)
 
     def revalidate_normal() -> None:
-        if _from_provenance(_resolve()) != policy:
+        resolved = _resolve()
+        if initial_codex_present and not bool(getattr(resolved, "_codex_present", True)):
+            raise host_config.HostConfigError("daemon_provenance_incomplete")
+        if _from_provenance(resolved) != policy:
             raise ValueError("daemon_policy_drift")
 
     object.__setattr__(policy, "_revalidation_hook", revalidate_normal)
