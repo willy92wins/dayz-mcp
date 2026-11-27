@@ -8,14 +8,14 @@ already-built PBO and stages five verifiable release assets.
 
 Set the release version in
 [`tools/pyproject.toml:7`](../tools/pyproject.toml#L7). Use the same value, without
-the leading `v`, throughout this runbook.
+the leading `v`, throughout this runbook. Set the same value in `llms-install.md`, in its `venv-X.Y.Z` folder and its release URL: `tools/tests/test_llms_install.py` fails while they differ from `tools/pyproject.toml`.
 
 [EXACT]
 
 ```powershell
 $Version = "X.Y.Z"
-git diff -- tools/pyproject.toml
-git add tools/pyproject.toml
+git diff -- tools/pyproject.toml llms-install.md
+git add tools/pyproject.toml llms-install.md
 git commit -m "Bump version to $Version"
 if (git status --porcelain) { throw "Release worktree is not clean" }
 ```
@@ -492,7 +492,7 @@ PowerShell session, `$VerifyDir\@DayZ_MCP`, with its five files. Point the
 Publisher from DayZ Tools at that `@DayZ_MCP` folder itself; pointed at its
 `Addons` folder, the Publisher fails without uploading anything. Never publish
 the build folder. Use the Publisher because SteamCMD with the owner's account
-closes the owner's Steam client session.
+closes the owner's Steam client session. The item's description links to `https://github.com/willy92wins/dayz-mcp/blob/main/llms-install.md`.
 
 ## Updating the dependency lock
 
