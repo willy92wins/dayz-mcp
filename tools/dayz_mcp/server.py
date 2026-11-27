@@ -9103,6 +9103,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "read query_all_players (in_vehicle) before you retry. A player "
             "the server already reads in a vehicle (a vehicle command or in "
             "transport) answers already_in_vehicle and is not seated again. "
+            "If the server already reads someone in the driver seat, "
+            "vehicle_enter answers seat_occupied and seats nobody. "
             "engine_set and vehicle_control require client-side ownership; "
             "establish it with vehicle_get_in_client."
         )
