@@ -36,6 +36,7 @@ MESSAGES = (_MISSION / "MCPMessages.c").read_text(encoding="utf-8")
 UID_A = "76561198000000001"
 UID_B = "76561198000000002"
 DRIVER = 0
+PASSENGER = 1
 
 FIRST_HUMAN = "protected Human GetFirstHuman()"
 HUMAN_BY_UID = "protected Human FindHumanByUid(string uid)"
@@ -110,6 +111,13 @@ class _Human:
 
 
 class _Vehicle:
+    def __init__(self) -> None:
+        # Crew index -> whoever the server reads in that seat.
+        self.crew: dict[int, object] = {}
+
+    def CrewMember(self, index: int) -> object | None:
+        return self.crew.get(index)
+
     def GetSeatAnimationType(self, _crew: int) -> int:
         return 1
 
@@ -240,6 +248,9 @@ class VehicleEnterAlreadySeatedTest(unittest.TestCase):
         bridge = _Bridge(players)
         players[0].in_transport = True
         players[0].command = _VehicleCommand(bridge.vehicle, getting_in=False)
+        # In another seat of the same car: the driver seat is free.
+        players[0].command.seat = PASSENGER
+        bridge.vehicle.crew[PASSENGER] = players[0]
         done, _result = bridge.enter(UID_B)
         self.assertIs(done, False)
         self.assertEqual(players[1].started, [bridge.vehicle])
@@ -253,6 +264,61 @@ class VehicleEnterAlreadySeatedTest(unittest.TestCase):
         self.assertIn("return true;", refusal)
         self.assertLess(body.index(guard), body.index("human.StartCommand_Vehicle("))
         self.assertLess(body.index("HasActiveJobFor(human, vehicle)"), body.index(guard))
+
+
+class VehicleEnterSeatOccupiedTest(unittest.TestCase):
+    """2026-11-27, two-player run of #432: with another player at the wheel,
+    vehicle_enter seated a second driver. A driver seat the server reads
+    someone in (CrewMember of that seat, the check vanilla's get-in makes)
+    answers seat_occupied before any StartCommand_Vehicle."""
+
+    def _assert_occupied(self, bridge: _Bridge, players: list[_Human], uid: str) -> None:
+        done, result = bridge.enter(uid)
+        self.assertIs(done, True)
+        self.assertEqual((result.ok, result.error.text), (False, "seat_occupied"))
+        self.assertEqual([player.started for player in players], [[], []])
+        self.assertEqual(bridge.jobs.Count(), 0)
+
+    def test_another_player_at_the_wheel_answers_seat_occupied(self) -> None:
+        players = [_Human(UID_A), _Human(UID_B)]
+        bridge = _Bridge(players)
+        players[0].in_transport = True
+        players[0].command = _VehicleCommand(bridge.vehicle, getting_in=False)
+        bridge.vehicle.crew[DRIVER] = players[0]
+        self._assert_occupied(bridge, players, UID_B)
+
+    def test_an_occupant_that_is_no_connected_player_takes_the_seat_too(self) -> None:
+        # Whoever the server reads in the seat, connected player or not.
+        players = [_Human(UID_A), _Human(UID_B)]
+        bridge = _Bridge(players)
+        bridge.vehicle.crew[DRIVER] = _Human("")
+        self._assert_occupied(bridge, players, UID_A)
+
+    def test_the_driver_asking_again_is_still_already_in_vehicle(self) -> None:
+        players = [_Human(UID_A), _Human(UID_B)]
+        bridge = _Bridge(players)
+        players[0].in_transport = True
+        players[0].command = _VehicleCommand(bridge.vehicle, getting_in=False)
+        bridge.vehicle.crew[DRIVER] = players[0]
+        done, result = bridge.enter(UID_A)
+        self.assertIs(done, True)
+        self.assertEqual((result.ok, result.error.text), (False, "already_in_vehicle"))
+        self.assertEqual([player.started for player in players], [[], []])
+        self.assertEqual(bridge.jobs.Count(), 0)
+
+    def test_the_seat_guard_sits_between_already_in_vehicle_and_the_seat_command(self) -> None:
+        body = method_body(BRIDGE, VEHICLE_ENTER)
+        guard = "if (vehicle.CrewMember(crew))"
+        self.assertEqual(body.count(guard), 1)
+        seat_anim = "int seatAnim = vehicle.GetSeatAnimationType(crew);"
+        self.assertEqual(body.count(seat_anim), 1)
+        refusal = body[body.index(guard) : body.index(seat_anim)]
+        self.assertIn('result.error = "seat_occupied";', refusal)
+        self.assertIn("result.ok = false;", refusal)
+        self.assertIn("return true;", refusal)
+        self.assertLess(body.index("int crew = 0;"), body.index(guard))
+        self.assertLess(body.index('result.error = "already_in_vehicle";'), body.index(guard))
+        self.assertLess(body.index(guard), body.index("human.StartCommand_Vehicle("))
 
 
 def _player_gate_source() -> str:
