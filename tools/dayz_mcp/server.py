@@ -10290,6 +10290,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 raise ToolError(
                     _bad_args("ammo", ammo, "be an integer of 0 or more")
                 )
+            if ammo > 2147483647:
+                raise ToolError(
+                    _bad_args("ammo", ammo, "be at most 2147483647")
+                )
             args["ammo"] = ammo
             args["ammo_set"] = True
         if uid != "":
