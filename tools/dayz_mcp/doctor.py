@@ -357,7 +357,15 @@ def default_sources(
             and "CODEX" in manifest_payload["entries"]
             and manifest_payload["entries"]["CODEX"] is None
         )
-        codex_expected = not (codex_explicitly_absent and not codex_file_exists)
+        # A codex CLI on PATH after a Claude-only pin is a discrepancy, the
+        # same criterion --register applies (fix-forward #464): Codex stays
+        # expected and the missing pin is reported as CLI_NOT_PINNED.
+        codex_on_path = (
+            shutil.which("codex.cmd") is not None or shutil.which("codex") is not None
+        )
+        codex_expected = not (
+            codex_explicitly_absent and not codex_file_exists and not codex_on_path
+        )
         if claude_path is None:
             claude_config = None
         else:

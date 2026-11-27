@@ -200,6 +200,16 @@ def _codex_config_exists() -> bool:
         return False
 
 
+def _codex_present() -> bool:
+    """Codex counts as present when its CLI is on PATH or its config exists.
+
+    --pin-clis and --register share this criterion (fix-forward #464): a
+    Claude-only manifest pinned before a codex CLI appeared must not register
+    Claude alone.
+    """
+    return shutil.which("codex") is not None or _codex_config_exists()
+
+
 def _native_regular_file(path: Path) -> os.stat_result:
     try:
         metadata = path.lstat()
@@ -553,11 +563,7 @@ def pin_installer_clis(
     resolved: dict[str, Path] = {
         "CLAUDE": _resolve_pin_cli("CLAUDE", claude_exe),
     }
-    include_codex = (
-        codex_exe is not None
-        or shutil.which("codex") is not None
-        or _codex_config_exists()
-    )
+    include_codex = codex_exe is not None or _codex_present()
     if include_codex:
         resolved["CODEX"] = _resolve_pin_cli("CODEX", codex_exe)
     entries: dict[str, object] = {
@@ -1208,12 +1214,73 @@ def _run_required(
         raise InstallerExecutionError("required_command_failed")
 
 
+_PRIVATE_FILE_MODE = 0o600
+
+
+def _write_private_file(path: Path, data: bytes, *, exclusive: bool) -> None:
+    """Write a secret-bearing file that is 0600 from the open on POSIX.
+
+    The mode is passed to os.open, so the umask can only narrow it. An existing
+    file must be a regular file with one link owned by this user; it is
+    narrowed to 0600 before its old bytes are truncated and the new ones
+    written. A symbolic link at the leaf is refused (O_NOFOLLOW). On Windows
+    the mode bits carry no access control and the file is written as before.
+    """
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NOCTTY", 0)
+    )
+    if exclusive:
+        flags |= os.O_EXCL
+    descriptor = os.open(path, flags, _PRIVATE_FILE_MODE)
+    try:
+        if os.name == "posix":
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or info.st_uid != os.geteuid()
+            ):
+                raise PermissionError("private_file_not_owned_regular")
+            if stat.S_IMODE(info.st_mode) != _PRIVATE_FILE_MODE:
+                os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+        os.ftruncate(descriptor, 0)
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _private_key_mode_ok(path: Path) -> bool:
+    if os.name != "posix":
+        return True
+    info = path.lstat()
+    return (
+        stat.S_ISREG(info.st_mode)
+        and info.st_nlink == 1
+        and info.st_uid == os.geteuid()
+        and not info.st_mode & 0o077
+    )
+
+
 def _load_or_create_key(
     path: Path,
     token_factory: Callable[[], str],
 ) -> str:
     if path.exists():
+        # A key readable by group or others is already exposed: refuse it
+        # rather than re-copy it into the configs (fix-forward #464). The
+        # POSIX daemon reader refuses the same modes.
         try:
+            if not _private_key_mode_ok(path):
+                raise InstallerExecutionError("keyfile_permissions_unsafe")
             value = path.read_text(encoding="ascii").strip()
         except (OSError, UnicodeError) as error:
             raise InstallerExecutionError("keyfile_unreadable") from error
@@ -1223,10 +1290,9 @@ def _load_or_create_key(
             raise InstallerExecutionError("key_generation_failed")
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with path.open("x", encoding="ascii", newline="\n") as handle:
-                handle.write(value + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+            _write_private_file(
+                path, (value + "\n").encode("ascii"), exclusive=True
+            )
         except (OSError, UnicodeError) as error:
             raise InstallerExecutionError("keyfile_write_failed") from error
     if not value:
@@ -1247,9 +1313,12 @@ def config_payload(port: int, key: str) -> str:
 
 
 def _write_config(path: Path, payload: str) -> None:
+    # The payload carries the key: 0600 from the open, like the key itself.
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(payload + "\n", encoding="ascii", newline="\n")
+        _write_private_file(
+            path, (payload + "\n").encode("ascii"), exclusive=False
+        )
     except (OSError, UnicodeError) as error:
         raise InstallerExecutionError("config_write_failed") from error
 
@@ -1938,7 +2007,7 @@ def register_clients(
     codex_in_manifest = (
         not isinstance(manifest_entries, dict) or "CODEX" in manifest_entries
     )
-    if not codex_in_manifest and _codex_config_exists():
+    if not codex_in_manifest and _codex_present():
         raise InstallerContractError(
             "installer_cli_missing",
             f"pass --codex-exe PATH; {_PIN_RECIPE}",
