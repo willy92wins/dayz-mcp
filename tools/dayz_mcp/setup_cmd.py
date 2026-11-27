@@ -25,7 +25,7 @@ from dayz_mcp.server_cli import (
 )
 
 WORKSHOP_APP_ID = "221100"
-WORKSHOP_ITEM_ID = ""
+WORKSHOP_ITEM_ID = "3846741037"
 
 _TOKEN_RE = re.compile(r'"(?:[^"\\]|\\.)*"|[{}]')
 

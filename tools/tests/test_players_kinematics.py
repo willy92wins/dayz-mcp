@@ -79,7 +79,7 @@ CENSUS_FIXTURE = (
 )
 TRACE_ID = "0123456789abcdef0123456789abcdef"
 PREVIOUS_ACH = "3b800b7c7ee0674c"
-NEW_ACH = "c282097c3d1855ba"
+NEW_ACH = "49cc1290c4293fcb"
 WIRE_KEYS = {"mode", "trace_id", "cursor", "limit", "sample_hz", "max_samples", "uids"}
 
 PREVIOUS_49_SERVER_BITS: tuple[str, ...] = (
@@ -582,11 +582,11 @@ class CensusAndContractHashTest(unittest.TestCase):
 
         # Bit table append-only: prior 49 bits unchanged, bit 49 is players_kinematics.
         self.assertEqual(SERVER_CAPABILITY_BITS[:49], PREVIOUS_49_SERVER_BITS)
-        self.assertEqual(SERVER_CAPABILITY_BITS[49:], (COMMAND,))
+        self.assertEqual(SERVER_CAPABILITY_BITS[49:], (COMMAND, "players_los_cone", "loot_los_cone"))
 
         mask_matches = re.findall(r'SERVER_CAPABILITIES_MASK\s*=\s*"([^"]+)"', server_src)
-        self.assertEqual(mask_matches, ["1.3ffffffffffff"])
-        self.assertEqual(encode_capability_mask("server", census), "1.3ffffffffffff")
+        self.assertEqual(mask_matches, ["1.fffffffffffff"])
+        self.assertEqual(encode_capability_mask("server", census), "1.fffffffffffff")
         decoded, reason = parse_capability_mask("server", mask_matches[0])
         self.assertEqual(reason, "ok")
         self.assertEqual(set(decoded or ()), set(census))
@@ -1891,7 +1891,8 @@ class PlayersKinematicsToolTest(unittest.IsolatedAsyncioTestCase):
         for fragment in (
             "include_unverified",
             "server's heading for the player, not the client camera",
-            "mouse movement or free look",
+            "measured in game on 2026-11-27 through players_visibility",
+            "free look (holding Alt) does not move it",
             "PhysicsIsFalling(false)",
             "not grounded",
             "vanilla DayZ 1.30 has no parachute",

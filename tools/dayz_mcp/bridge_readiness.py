@@ -290,6 +290,7 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "loadout_apply": ("loadout_items", "object_id", "uid"),
     "loadout_clear": ("object_id", "uid"),
     "loadout_get": ("object_id", "uid"),
+    "loot_los_cone": ("half_yaw_deg", "radius", "uids"),
     "nav_path_query": ("from", "snap_radius", "to"),
     "object_resolve": ("pos", "radius", "type"),
     "object_set_health": ("health01", "object_id", "pos", "slot", "type", "zone"),
@@ -303,6 +304,7 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
         "trace_id",
         "uids",
     ),
+    "players_los_cone": ("half_yaw_deg", "radius", "uids"),
     "players_visibility": ("pos", "radius"),
     "scene_clear": ("scene_id",),
     "scene_entities": ("scene_id",),
@@ -483,6 +485,8 @@ SERVER_CAPABILITY_BITS: tuple[str, ...] = (
     "world_weather_set",
     "player_set_stance",
     "players_kinematics",
+    "players_los_cone",
+    "loot_los_cone",
 )
 CLIENT_CAPABILITY_BITS: tuple[str, ...] = (
     "action_cursor",
@@ -645,6 +649,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "loadout_apply": "loadout_apply",
         "loadout_clear": None,  # sent by loadout_apply for clear_first
         "loadout_get": "loadout_get",
+        "loot_los_cone": "loot_los_cone",
         "nav_path_query": "nav_path_query",
         "notify_players": "notify_players",
         "object_anim": "object_anim",
@@ -659,6 +664,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "player_set_stance": "player_set_stance",
         "player_teleport": "player_teleport",
         "players_kinematics": "players_kinematics",
+        "players_los_cone": "players_los_cone",
         "players_visibility": "players_visibility",
         "query_all_players": "query_all_players",
         "query_get_in_condition": "query_get_in_condition",

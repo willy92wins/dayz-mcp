@@ -252,6 +252,18 @@ def _minimal_args(cmd: str) -> dict:
             "max_samples": 100,
             "uids": [],
         }
+    if cmd == "players_los_cone":
+        return {
+            "uids": ["player-1"],
+            "radius": 50.0,
+            "half_yaw_deg": 10.0,
+        }
+    if cmd == "loot_los_cone":
+        return {
+            "uids": ["player-1"],
+            "radius": 8.0,
+            "half_yaw_deg": 10.0,
+        }
     if cmd == "bot_start":
         return {
             "object_id": 1,

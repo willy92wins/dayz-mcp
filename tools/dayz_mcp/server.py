@@ -186,9 +186,11 @@ from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 from dayz_mcp import anim_timeline as anim_timeline_contract
 from dayz_mcp import camera_path as camera_path_contract
 from dayz_mcp import loadout as loadout_contract
+from dayz_mcp import loot_los_cone as loot_los_cone_contract
 from dayz_mcp import player_move as player_move_contract
 from dayz_mcp import player_trace as player_trace_contract
 from dayz_mcp import players_kinematics as players_kinematics_contract
+from dayz_mcp import players_los_cone as players_los_cone_contract
 # Moved out of this module unchanged (backlog 71fc) and imported back, so
 # dayz_mcp.server.<name> is still the same object for every name it had.
 from dayz_mcp.action_cursor import execute_action_cursor
@@ -711,6 +713,8 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     # A mistyped uids key (e.g. uid=) must not be dropped and silently sample
     # every connected player: unknown keys are refused.
     "players_kinematics",
+    "players_los_cone",
+    "loot_los_cone",
     "bot_start",
     "bot_stop",
     # A mistyped scene_id key must not create a batch outside its scene, where
@@ -11311,12 +11315,20 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "hidden edit fails safe when it over-reports): horizontal only, "
             "true when any part of a sphere of radius around pos lies within "
             "60 degrees of the heading the server reads for the player "
-            "(GetHeadingAngle, not measured in game yet), that is when the "
+            "(GetHeadingAngle), that is when the "
             "bearing to pos is within 60 degrees plus asin(radius / the "
             "horizontal distance); also true when that horizontal distance is "
             "at most radius (pos straight above or below included) or the "
             "heading cannot be read. heading_deg is that heading in compass "
             "degrees (0 = +Z, 90 = +X, -180 to 180), 0 when it cannot be read. "
+            "Measured in game on 2026-11-27 with a person playing: heading_deg "
+            "is the heading of the client's input controller, the heading_deg "
+            "player_trace reads on the client (0 to 360 there); in a mouse turn "
+            "both moved by the same 102.4 degrees with no lag visible at 0.5 s "
+            "sampling, while the body (player_trace yaw_deg) stopped about 27 "
+            "degrees short. Free look (holding Alt) moved neither, so in_fov "
+            "does not follow a free-looking player's view and can miss what "
+            "that player sees. "
             "line_of_sight is scene_raycast's default "
             "ray (rvproxy, view geometry) from the head to pos only, ignoring "
             "the player's own entity (whether it also skips what the player "
@@ -12665,7 +12677,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "bridge acceptance; state_confirmed reports matching engine "
             "readback when available, otherwise null (accepted, not confirmed). "
             "The local player must drive a car this client owns: otherwise the "
-            "bridge returns not_seated (not seated in a car), not_driver "
+            "bridge returns not_seated (not seated in a vehicle), not_a_car "
+            "(seated in a vehicle that is not a car, such as a boat), not_driver "
             "(seated, but not in the driver seat) or not_owner (in the driver "
             "seat, but this client does not own the car). The reply confirms "
             "the command reached the car and is not telemetry: engine_on_server "
@@ -12703,7 +12716,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Requires a lease (session_acquire_wait). Set sustained "
             "owner-side driving control (held until released or deadman TTL). "
             "The local player must drive a car this client owns: otherwise the "
-            "bridge returns not_seated (not seated in a car), not_driver "
+            "bridge returns not_seated (not seated in a vehicle), not_a_car "
+            "(seated in a vehicle that is not a car, such as a boat), not_driver "
             "(seated, but not in the driver seat) or not_owner (in the driver "
             "seat, but this client does not own the car). The reply confirms "
             "the control reached the car and is not telemetry: engine_on_server "
@@ -13016,8 +13030,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "(Human.PhysicsGetVelocity, m/s; on foot only, unavailable in a "
             "vehicle), yaw_deg (HumanInputController.GetHeadingAngle converted to "
             "compass degrees, 0 north = +Z, 90 east = +X; this is the server's "
-            "heading for the player, not the client camera, and has not yet been "
-            "measured against a human player's mouse movement or free look), "
+            "heading for the player, not the client camera: measured in game on "
+            "2026-11-27 through players_visibility, which reads the same "
+            "heading, it follows the client's mouse turns with no lag visible "
+            "at 0.5 s, and free look (holding Alt) does not move it), "
             "pitch_deg (HumanCommandWeapons.GetBaseAimingAngleUD, deg; unverified "
             "against human mouse input on the server, masked as unavailable by "
             "default unless include_unverified=true), stance_idx "
@@ -13096,6 +13112,221 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         try:
             return players_kinematics_contract.normalize_bridge_result(
+                raw_result,
+                include_unverified=include_unverified,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} On-demand stateless server-side read on the server "
+            "peer that casts a narrow head-to-head view ray to living players "
+            "inside each named observer's yaw cone, with no world writes. Measures "
+            "raw quantities only: no verdicts, scores, thresholds, or visibility "
+            "booleans (visible, line_of_sight, in_fov, occluded are never "
+            "published). "
+            "Observers and candidates: living PlayerBase with an identity and "
+            "non-empty PlayerIdentity.GetPlainId(). An observer is never a "
+            "candidate of itself; an offline or dead observer uid yields a summary "
+            "with found=false and no rows rather than an error. "
+            "Cone rule: head-to-head distance_m strictly less than radius_m "
+            f"(default {players_los_cone_contract.RADIUS_DEFAULT_M} m, max "
+            f"{players_los_cone_contract.RADIUS_MAX_M} m) and abs(yaw_off_deg) <= "
+            f"half_yaw_deg (edge included; default "
+            f"{players_los_cone_contract.HALF_YAW_DEFAULT_DEG} deg, max "
+            f"{players_los_cone_contract.HALF_YAW_MAX_DEG} deg). yaw_off_deg is "
+            "the compass bearing from observer_head to target_head minus observer "
+            "yaw_deg, wrapped to (-180, 180] (positive when the candidate is to "
+            "the right). "
+            "Heading caveat: yaw_deg is HumanInputController.GetHeadingAngle "
+            "converted to compass degrees (0 north = +Z, 90 east = +X); this is "
+            "the server's heading for the player, not the client camera: measured "
+            "in game on 2026-11-27 through players_visibility, which reads the "
+            "same heading, it follows the client's mouse turns with no lag "
+            "visible at 0.5 s, and free look (holding Alt) does not move it, so "
+            "the cone does not follow a free-looking player's view. "
+            "Pitch caveat: no pitch filter is applied (pitch_filter_applied=false) "
+            "and no pitch_off_deg is published; pitch_deg "
+            "(HumanCommandWeapons.GetBaseAimingAngleUD) is unverified against "
+            "human input on the server and masked as unavailable by default unless "
+            "include_unverified=true. "
+            "Head positions: Head bone world position when present "
+            "(observer_head_bone / target_head_bone true), otherwise entity "
+            "position + 1.6 m fallback (false). "
+            "Raycast: one RaycastRVProxy (rvproxy, ObjIntersectView view geometry, "
+            "0.05 m radius) from observer_head to target_head ignoring the "
+            "observer entity; whether the ray also skips what the observer wears "
+            "or holds in hands has not been measured. "
+            "Published reply: players_los_cone holds the header (schema, tick_ms, "
+            "radius_m, half_yaw_deg, pitch_filter_applied, observers_max, "
+            "rays_per_observer_max, rows_per_observer_max, truncated, and per-"
+            "observer summaries in observers with uid, found, yaw_deg_available, "
+            "yaw_deg omitted when unavailable, in_radius, in_cone, rays, rows) "
+            "without raw wire rows, and evidence holds the dayz-mcp-evidence-v1 "
+            "envelope. "
+            "Row fields: target_uid, observer_head, target_head, "
+            "observer_head_bone, target_head_bone, distance_m, yaw_deg, "
+            "yaw_off_deg, pitch_deg (optional, masked unless include_unverified), "
+            "ray_hit (omitted with ray_budget_exceeded), and optional hit_pos, "
+            "hit_distance_m, clearance_m, hit_type, hit_class (present only when "
+            "a ray hit; hit_type and hit_class also omitted when empty, e.g. "
+            "terrain hits). "
+            f"Budget: up to {players_los_cone_contract.OBSERVERS_MAX} observers "
+            f"per call (uids: 1..{players_los_cone_contract.OBSERVERS_MAX} unique "
+            f"non-blank plain ids, each at most "
+            f"{players_los_cone_contract.UID_MAX_CHARS} chars); per observer, "
+            "cone candidates are ordered nearest-first, the first "
+            f"{players_los_cone_contract.RAYS_PER_OBSERVER_MAX} receive a raycast, "
+            "further candidates are published with gap_kind=ray_budget_exceeded "
+            "and no ray fields, up to "
+            f"{players_los_cone_contract.ROWS_PER_OBSERVER_MAX} rows per observer "
+            "are published, and truncated is true whenever any observer has "
+            "in_cone > rows. "
+            "Clock: single GetGame().GetTime() read in integer milliseconds "
+            "(tick_ms), the same clock as players_kinematics. "
+            "Errors: bad_uids, bad_radius_m, bad_half_yaw_deg (refused before the "
+            "bridge), bad_args, live_profile_refused, bad_bridge_los_cone_result, "
+            "bad_bridge_los_cone_boolean, bad_evidence_row, bad_evidence_result."
+        )
+    )
+    async def players_los_cone(
+        uids: list[StrictStr],
+        radius_m: StrictFloat = players_los_cone_contract.RADIUS_DEFAULT_M,
+        half_yaw_deg: StrictFloat = players_los_cone_contract.HALF_YAW_DEFAULT_DEG,
+        include_unverified: StrictBool = False,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        try:
+            args = players_los_cone_contract.normalize_request(
+                uids,
+                radius_m,
+                half_yaw_deg,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        if not isinstance(include_unverified, bool):
+            raise ToolError(_bad_args("include_unverified", include_unverified, "be a bool"))
+        async with runtime.tool_lock:
+            raw_result = await runtime.call_bridge(
+                "players_los_cone",
+                args,
+                "server",
+                _timeout(timeout_s),
+            )
+        try:
+            return players_los_cone_contract.normalize_bridge_result(
+                raw_result,
+                include_unverified=include_unverified,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} On-demand stateless server-side read on the server "
+            "peer that casts a short-range view ray from each named observer's "
+            "head to loose world items inside the observer's yaw cone, with no "
+            "world writes. Measures raw quantities only: no verdicts, scores, "
+            "thresholds, or visibility booleans (visible, line_of_sight, in_fov, "
+            "occluded are never published). "
+            "Observers: living PlayerBase with an identity; an offline or dead "
+            "observer uid yields a summary with found=false and no rows rather "
+            "than an error. "
+            "Candidates: one GetObjectsAtPosition3D sphere query around "
+            "observer_head (never a map-wide scan); an object is a candidate only "
+            "when it is an InventoryItem with null EntityAI.GetHierarchyParent() "
+            "(loose in the world — items worn, held in hands, in cargo, or "
+            "attached to another entity are excluded). No item-type filter is "
+            "applied: barrels, deployed kits, and any loose InventoryItem are "
+            "included with item_type and item_kind for the consumer to filter. "
+            "Cone rule: head-to-item distance_m strictly less than radius_m "
+            f"(default {loot_los_cone_contract.RADIUS_DEFAULT_M} m, max "
+            f"{loot_los_cone_contract.RADIUS_MAX_M} m) and abs(yaw_off_deg) <= "
+            f"half_yaw_deg (edge included; default "
+            f"{loot_los_cone_contract.HALF_YAW_DEFAULT_DEG} deg, max "
+            f"{loot_los_cone_contract.HALF_YAW_MAX_DEG} deg). yaw_off_deg is "
+            "the compass bearing from observer_head to item_pos minus observer "
+            "yaw_deg, wrapped to (-180, 180] (positive when the item is to the "
+            "right). "
+            "Heading caveat: yaw_deg is HumanInputController.GetHeadingAngle "
+            "converted to compass degrees (0 north = +Z, 90 east = +X); this is "
+            "the server's heading for the player, not the client camera: measured "
+            "in game on 2026-11-27 through players_visibility, which reads the "
+            "same heading, it follows the client's mouse turns with no lag "
+            "visible at 0.5 s, and free look (holding Alt) does not move it, so "
+            "the cone does not follow a free-looking player's view. "
+            "Pitch caveat: no pitch filter is applied (pitch_filter_applied=false) "
+            "and no pitch_off_deg is published; pitch_deg "
+            "(HumanCommandWeapons.GetBaseAimingAngleUD) is unverified against "
+            "human input on the server and masked as unavailable by default unless "
+            "include_unverified=true. "
+            "Item point and raycast: the target point is the item's GetPosition() "
+            "(item_pos), which on a dropped item sits near ground level; the "
+            "ObjIntersectView RaycastRVProxy ray (0.05 m radius, ignoring the "
+            "observer entity) may hit the item itself or the ground centimetres "
+            "before it, so clearance_m (distance from hit_pos to item_pos) and "
+            "hit_type are published instead of any visibility boolean. "
+            "Published reply: loot_los_cone holds the header (schema, tick_ms, "
+            "radius_m, half_yaw_deg, pitch_filter_applied, observers_max, "
+            "rays_per_observer_max, rows_per_observer_max, truncated, and per-"
+            "observer summaries in observers with uid, found, yaw_deg_available, "
+            "yaw_deg omitted when unavailable, scanned, in_radius, in_cone, rays, "
+            "rows) without raw wire rows, and evidence holds the "
+            "dayz-mcp-evidence-v1 envelope. "
+            "Row fields: net_low, net_high, item_type, item_kind (one of "
+            "weapon, ammo, magazine, clothing, or other; the first of "
+            "IsWeapon, IsAmmoPile, IsMagazine, and IsClothing that returns "
+            "true, else other), item_pos, observer_head, "
+            "observer_head_bone, distance_m, yaw_deg, yaw_off_deg, pitch_deg "
+            "(optional, masked unless include_unverified), ray_hit (omitted with "
+            "ray_budget_exceeded), and optional hit_pos, hit_distance_m, "
+            "clearance_m, hit_type, hit_class (present only when a ray hit; "
+            "hit_type and hit_class also omitted when empty, e.g. terrain hits). "
+            f"Budget: up to {loot_los_cone_contract.OBSERVERS_MAX} observers per "
+            f"call (uids: 1..{loot_los_cone_contract.OBSERVERS_MAX} unique "
+            f"non-blank plain ids, each at most "
+            f"{loot_los_cone_contract.UID_MAX_CHARS} chars); per observer, cone "
+            "candidates are ordered nearest-first, the first "
+            f"{loot_los_cone_contract.RAYS_PER_OBSERVER_MAX} receive a raycast, "
+            "further candidates are published with gap_kind=ray_budget_exceeded "
+            "and no ray fields, up to "
+            f"{loot_los_cone_contract.ROWS_PER_OBSERVER_MAX} rows per observer "
+            "are published, and truncated is true whenever any observer has "
+            "in_cone > rows. "
+            "Clock: single GetGame().GetTime() read in integer milliseconds "
+            "(tick_ms). "
+            "Errors: bad_uids, bad_radius_m, bad_half_yaw_deg (refused before the "
+            "bridge), bad_args, live_profile_refused, bad_bridge_loot_cone_result, "
+            "bad_bridge_loot_cone_boolean, bad_evidence_row, bad_evidence_result."
+        )
+    )
+    async def loot_los_cone(
+        uids: list[StrictStr],
+        radius_m: StrictFloat = loot_los_cone_contract.RADIUS_DEFAULT_M,
+        half_yaw_deg: StrictFloat = loot_los_cone_contract.HALF_YAW_DEFAULT_DEG,
+        include_unverified: StrictBool = False,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        try:
+            args = loot_los_cone_contract.normalize_request(
+                uids,
+                radius_m,
+                half_yaw_deg,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        if not isinstance(include_unverified, bool):
+            raise ToolError(_bad_args("include_unverified", include_unverified, "be a bool"))
+        async with runtime.tool_lock:
+            raw_result = await runtime.call_bridge(
+                "loot_los_cone",
+                args,
+                "server",
+                _timeout(timeout_s),
+            )
+        try:
+            return loot_los_cone_contract.normalize_bridge_result(
                 raw_result,
                 include_unverified=include_unverified,
             )

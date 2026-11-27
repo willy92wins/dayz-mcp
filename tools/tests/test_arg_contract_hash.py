@@ -481,11 +481,13 @@ class ArgContractHashTest(unittest.TestCase):
             "loadout_apply=loadout_items,object_id,uid\n"
             "loadout_clear=object_id,uid\n"
             "loadout_get=object_id,uid\n"
+            "loot_los_cone=half_yaw_deg,radius,uids\n"
             "nav_path_query=from,snap_radius,to\n"
             "object_resolve=pos,radius,type\n"
             "object_set_health=health01,object_id,pos,slot,type,zone\n"
             "player_kill=uid\n"
             "players_kinematics=cursor,limit,max_samples,mode,sample_hz,trace_id,uids\n"
+            "players_los_cone=half_yaw_deg,radius,uids\n"
             "players_visibility=pos,radius\n"
             "scene_clear=scene_id\n"
             "scene_entities=scene_id\n"
@@ -498,7 +500,7 @@ class ArgContractHashTest(unittest.TestCase):
             "world_spawn_batch=items,scene_id",
         )
         self.assertEqual(
-            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "c282097c3d1855ba"
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "49cc1290c4293fcb"
         )
         self.assertEqual(
             server_module.server_arg_contract_hash(),
