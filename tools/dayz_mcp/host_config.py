@@ -1486,7 +1486,16 @@ def _recover_if_needed(
     journal: Path,
     *,
     fault_injector: _FaultInjector | None = None,
+    release_conflict_roles: frozenset[str] = frozenset(),
 ) -> None:
+    """Recover or release a host-config journal left by an earlier run.
+
+    ``release_conflict_roles`` (fix-forward #465 round 4, Sol r3 P1-2): roles
+    of a terminal restore_conflict journal whose kept bytes the caller has
+    resolved by an explicit action elsewhere (the installer, when the
+    registration it preserved for that file is removed or put back). Nothing
+    is written for them; the journal no longer asks for the original bytes.
+    """
     if _release_unrecorded_journal(journal):
         return
     if not journal.exists():
@@ -1499,6 +1508,13 @@ def _recover_if_needed(
     decoded = {
         role: _decode_manifest_file(files[role]) for role in roles
     }
+    if manifest["status"] in {"restored", "restore_conflict"} and os.name != "nt":
+        # A terminal journal releases by bytes, without the recorded inode
+        # (round 3). A recorded path now swapped for a symlink would release
+        # it through the link's target: refuse (fix-forward #465 round 4, P3).
+        for role in roles:
+            if Path(files[role]["path"]).is_symlink():
+                raise HostConfigError("registration_recovery_conflict")
     expected_paths = {
         "claude": claude_path.resolve(strict=True),
     }
@@ -1544,7 +1560,12 @@ def _recover_if_needed(
             # A kept role is never written. It may be released only once it
             # is exactly the original again; anything else stays a conflict
             # with the journal kept (Sol P1-1/P1-2).
-            if any(currents[role] != decoded[role][2] for role in conflict_roles):
+            released = release_conflict_roles if status == "restore_conflict" else frozenset()
+            if any(
+                currents[role] != decoded[role][2]
+                for role in conflict_roles
+                if role not in released
+            ):
                 raise HostConfigError("registration_recovery_conflict")
             if status in {"restored", "restore_conflict"}:
                 if any(currents[role] != decoded[role][2] for role in restore_roles):
@@ -1591,6 +1612,23 @@ def _recover_if_needed(
         _cleanup_journal(journal)
     finally:
         _close_all(handles)
+
+
+def restore_conflict_roles(journal: Path) -> tuple[str, ...]:
+    """Kept roles of a published terminal restore_conflict journal, else ().
+
+    Such a journal writes nothing on recovery, so its host files hold no torn
+    write of ours and a provider may parse them (fix-forward #465 round 4).
+    """
+    if not journal.exists():
+        return ()
+    try:
+        manifest, only_next = _load_manifest_publication(journal)
+        if only_next or manifest["status"] != "restore_conflict":
+            return ()
+        return _restore_selection(manifest)[1]
+    except HostConfigError:
+        return ()
 
 
 def apply_host_timeouts(

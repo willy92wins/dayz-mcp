@@ -417,6 +417,23 @@ class RollbackRound3Test(RollbackRound2Test):
         self.assertEqual(self.claude.read_bytes(), foreign)
         self.assertTrue(self.journal.exists())
 
+    def test_p3_a_terminal_journal_refuses_a_path_swapped_for_a_symlink(self) -> None:
+        from dayz_mcp import host_config
+
+        kept = self._conflict()
+        moved = self.root / "original-moved.json"
+        other = self.root / "other.json"
+        other.write_bytes(self.original_claude)
+        self.claude.rename(moved)
+        self.claude.symlink_to(other)
+        with self.assertRaisesRegex(
+            host_config.HostConfigError, "^registration_recovery_conflict$"
+        ):
+            self._apply(None)
+        self.assertEqual(other.read_bytes(), self.original_claude)
+        self.assertEqual(moved.read_bytes(), kept)
+        self.assertTrue(self.journal.exists())
+
 
 @unittest.skipUnless(POSIX, "the POSIX host-config transaction")
 class InstallerOuterRollbackRound2Test(unittest.TestCase):
@@ -590,6 +607,86 @@ class InstallerOuterRollbackRound2Test(unittest.TestCase):
         self.assertEqual(self._command(), "/opt/new/bin/python")
         self.assertFalse((self.root / "reg-journal" / "dayz-mcp").exists())
 
+    # Round 4 (Sol r3 P1-2): an edit in after_write_claude leaves two journals,
+    # the timeouts one in restore_conflict and the registration one with
+    # preserved=["CLAUDE"]. The documented explicit actions must release both.
+
+    def _both_journals(self) -> dict[str, bytes]:
+        import install_mcp
+
+        captured: dict[str, bytes] = {"before": self.claude.read_bytes()}
+
+        def edit(phase: str) -> None:
+            if phase == "after_prepare":
+                captured["intermediate"] = self.claude.read_bytes()
+            if phase == "after_write_claude":
+                self._edit_command("/bin/edited-command")
+
+        with self.assertRaisesRegex(
+            install_mcp.InstallerExecutionError,
+            "^registration_rollback_preserved_foreign_edit$",
+        ):
+            self._register(fault_injector=edit)
+        self.assertEqual(self._command(), "/bin/edited-command")
+        self.assertTrue((self.root / "host-journal").exists())
+        self.assertTrue((self.root / "reg-journal" / "dayz-mcp").exists())
+        return captured
+
+    def _assert_registered_and_released(self) -> None:
+        entry = json.loads(self.claude.read_bytes())["mcpServers"]["dayz-mcp"]
+        self.assertEqual(entry["command"], "/opt/new/bin/python")
+        self.assertIn("timeout", entry)
+        self.assertFalse((self.root / "host-journal").exists())
+        self.assertFalse((self.root / "reg-journal" / "dayz-mcp").exists())
+
+    def test_p1_r4_both_journals_refuse_while_the_foreign_entry_is_live(self) -> None:
+        import install_mcp
+
+        self._both_journals()
+        for _attempt in range(2):
+            with self.assertRaisesRegex(
+                install_mcp.InstallerExecutionError, "^registration_preserved_foreign_edit$"
+            ) as raised:
+                self._register()
+            self.assertIn("remove", raised.exception.remedy)
+            self.assertEqual(self._command(), "/bin/edited-command")
+            self.assertTrue((self.root / "host-journal").exists())
+            self.assertTrue((self.root / "reg-journal" / "dayz-mcp").exists())
+
+    def test_p1_r4_removing_the_entry_after_after_write_claude_releases_both(self) -> None:
+        self._both_journals()
+        self._provider().remove("CLAUDE")
+        self._register()
+        self._assert_registered_and_released()
+
+    def test_p1_r4_putting_back_the_pre_install_file_releases_both(self) -> None:
+        captured = self._both_journals()
+        self.claude.write_bytes(captured["before"])
+        self._register()
+        self._assert_registered_and_released()
+
+    def test_p1_r4_putting_back_the_intermediate_state_still_releases(self) -> None:
+        captured = self._both_journals()
+        self.claude.write_bytes(captured["intermediate"])
+        self._register()
+        self._assert_registered_and_released()
+
+    def test_p1_r4_other_edits_in_the_file_survive_the_release(self) -> None:
+        import install_mcp
+
+        self._both_journals()
+        document = json.loads(self.claude.read_bytes())
+        document["mcpServers"].pop("dayz-mcp")
+        document["mcpServers"]["other"] = {"command": "/bin/other", "args": []}
+        self.claude.write_bytes((json.dumps(document, indent=2) + "\n").encode())
+        # The entry is gone, so the preserved registration is resolved, and
+        # the timeouts journal releases on it: the other server is kept.
+        self._register()
+        self._assert_registered_and_released()
+        self.assertEqual(
+            json.loads(self.claude.read_bytes())["mcpServers"]["other"]["command"], "/bin/other"
+        )
+
     def test_recovery_after_a_crash_still_restores_our_own_entry(self) -> None:
         import install_mcp
         from install_mcp import RegistrationCrash, RegistrationSpec
@@ -610,6 +707,47 @@ class InstallerOuterRollbackRound2Test(unittest.TestCase):
         )
         self.assertEqual(self._command(), "/opt/new/bin/python")
         self.assertFalse((self.root / "reg-journal" / "dayz-mcp").exists())
+
+
+class PreservedWayOutDocsTest(unittest.TestCase):
+    """Round 4 (Sol r3 P2): the CLI and QUICKSTART name the way out."""
+
+    def test_the_remedies_and_quickstart_name_the_explicit_actions(self) -> None:
+        import install_mcp
+
+        quickstart = (Path(__file__).resolve().parents[2] / "QUICKSTART.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("**Interrupted install.**", quickstart)
+        for code in (
+            "registration_rollback_preserved_foreign_edit",
+            "registration_preserved_foreign_edit",
+            "registration_recovery_conflict",
+        ):
+            self.assertIn(f"`{code}`", quickstart)
+        self.assertIn("claude mcp remove dayz-mcp", quickstart)
+        for remedy in (install_mcp._PRESERVED_REMEDY, install_mcp._RECOVERY_CONFLICT_REMEDY):
+            self.assertIn("'Interrupted install'", remedy)
+        self.assertIn("claude mcp remove dayz-mcp", install_mcp._PRESERVED_REMEDY)
+
+    def test_main_prints_the_remedy_of_a_preserved_registration(self) -> None:
+        import contextlib
+        import io
+
+        import install_mcp
+
+        error = install_mcp._with_remedy(
+            install_mcp.RegistrationTransactionError("registration_preserved_foreign_edit"),
+            install_mcp._PRESERVED_REMEDY,
+        )
+        stderr = io.StringIO()
+        with patch.object(install_mcp, "parse_args", side_effect=error), patch.object(
+            install_mcp, "_ensure_posix_localappdata"
+        ), contextlib.redirect_stderr(stderr):
+            self.assertEqual(install_mcp.main([]), 2)
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["error"], "registration_preserved_foreign_edit")
+        self.assertEqual(payload["remedy"], install_mcp._PRESERVED_REMEDY)
 
 
 @unittest.skipUnless(POSIX, "directory fsync is a POSIX barrier")

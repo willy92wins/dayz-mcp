@@ -85,6 +85,29 @@ class RegistrationRollbackError(InstallerExecutionError):
     pass
 
 
+# What to do about a registration the installer kept on purpose (fix-forward
+# #465 round 4, Sol r3 P2). main() prints it as "remedy" next to the code.
+_PRESERVED_REMEDY = (
+    "another writer changed the dayz-mcp registration while the last install "
+    "ran, and it was kept as it is. Decide explicitly: remove that entry "
+    "(claude mcp remove dayz-mcp / codex mcp remove dayz-mcp, or the instance "
+    "name), or put back the registration you had before; then run the install "
+    "again. See QUICKSTART.md, 'Interrupted install'."
+)
+_RECOVERY_CONFLICT_REMEDY = (
+    "an interrupted install left a journal, and a file or registration it "
+    "recorded now holds something it did not write; nothing was overwritten. "
+    "Put it back as it was before that install, or remove the dayz-mcp entry "
+    "if the change is in it; then run the install again. See QUICKSTART.md, "
+    "'Interrupted install'."
+)
+
+
+def _with_remedy(error: InstallerExecutionError, remedy: str) -> InstallerExecutionError:
+    error.remedy = remedy  # type: ignore[attr-defined]
+    return error
+
+
 class RegistrationCrash(BaseException):
     """Test-only abrupt stop. It skips the in-process rollback on purpose."""
 
@@ -1920,22 +1943,66 @@ def _restore_registered_roles(
             raise RegistrationRollbackError("registration_rollback_verify_failed")
 
 
+_HOST_ROLE = {"CLAUDE": "claude", "CODEX": "codex"}
+
+
 def _recover_pending_host_configs(
     host_configs: tuple[Path, ...] | None,
     host_journal_root: Path | None,
+    provider: RegistrationProvider | None = None,
+    loaded: tuple[object, ...] | None = None,
 ) -> None:
     if host_configs is None:
         return
-    from dayz_mcp.host_config import _default_journal_root, _recover_if_needed
+    from dayz_mcp.host_config import (
+        HostConfigError,
+        _default_journal_root,
+        _recover_if_needed,
+        restore_conflict_roles,
+    )
 
     host_journal = (
         Path(host_journal_root) if host_journal_root is not None else _default_journal_root()
     )
-    _recover_if_needed(
-        host_configs[0],
-        host_configs[1] if len(host_configs) > 1 else None,
-        host_journal,
-    )
+    claude, codex = host_configs[0], host_configs[1] if len(host_configs) > 1 else None
+    try:
+        _recover_if_needed(claude, codex, host_journal)
+        return
+    except HostConfigError as error:
+        if str(error) != "registration_recovery_conflict":
+            raise
+        conflict = error
+    # Fix-forward #465 round 4 (Sol r3 P1-2): a foreign edit after our timeouts
+    # write leaves this journal in restore_conflict and the registration
+    # journal with that role preserved. Both describe the same kept edit. Once
+    # the preserved registration is resolved (removed, or the previous or the
+    # desired spec put back), the timeouts journal stops asking for bytes the
+    # user cannot know. Any other conflict keeps refusing.
+    kept = set(restore_conflict_roles(host_journal))
+    preserved = loaded[6] if loaded is not None else frozenset()
+    if (
+        provider is None
+        or loaded is None
+        or not kept
+        or not kept <= {_HOST_ROLE[role] for role in preserved}
+    ):
+        raise _with_remedy(
+            RegistrationTransactionError("registration_recovery_conflict"),
+            _RECOVERY_CONFLICT_REMEDY,
+        ) from conflict
+    full_previous, desired = loaded[0], loaded[5]
+    _release_preserved_or_refuse(provider, full_previous, desired, preserved)
+    try:
+        _recover_if_needed(
+            claude, codex, host_journal, release_conflict_roles=frozenset(kept)
+        )
+    except HostConfigError as error:
+        if str(error) != "registration_recovery_conflict":
+            raise
+        raise _with_remedy(
+            RegistrationTransactionError("registration_recovery_conflict"),
+            _RECOVERY_CONFLICT_REMEDY,
+        ) from error
 
 
 def _recover_registration_journal(
@@ -1977,7 +2044,10 @@ def _recover_registration_journal(
         if _foreign_registration_roles(provider, tuple(previous), previous, ours):
             # Another writer's entry: keep it and keep the journal, so nothing
             # restores the previous spec over it (fix-forward #465 round 2).
-            raise RegistrationTransactionError("registration_recovery_conflict")
+            raise _with_remedy(
+                RegistrationTransactionError("registration_recovery_conflict"),
+                _RECOVERY_CONFLICT_REMEDY,
+            )
     _restore_registered_roles(provider, previous)
     _release_preserved_or_refuse(provider, full_previous, desired, preserved)
     _cleanup_registration_journal(journal)
@@ -2003,7 +2073,10 @@ def _release_preserved_or_refuse(
         if desired is not None:
             accepted.add(desired.get(role))
         if live not in accepted:
-            raise RegistrationTransactionError("registration_preserved_foreign_edit")
+            raise _with_remedy(
+                RegistrationTransactionError("registration_preserved_foreign_edit"),
+                _PRESERVED_REMEDY,
+            )
 
 
 def register_transaction(
@@ -2091,6 +2164,8 @@ def _register_transaction_locked(
     _recover_pending_host_configs(
         host_configs if host_configs is not None else recorded_hosts,
         host_journal_root if host_journal_root is not None else recorded_host_journal,
+        provider,
+        loaded,
     )
     if loaded is not None:
         _recover_registration_journal(provider, journal, loaded)
@@ -2194,8 +2269,9 @@ def _register_transaction_locked(
         except Exception as rollback_error:
             raise RegistrationRollbackError("registration_rollback_failed") from rollback_error
         if preserved:
-            raise RegistrationRollbackError(
-                "registration_rollback_preserved_foreign_edit"
+            raise _with_remedy(
+                RegistrationRollbackError("registration_rollback_preserved_foreign_edit"),
+                _PRESERVED_REMEDY,
             ) from error
         raise RegistrationTransactionError("registration_transaction_failed") from error
 

@@ -115,3 +115,13 @@ argument manually as a workaround: add
 `Bin\AddonBuilder\AddonBuilder.exe`) to the AddonBuilder invocation. Writing
 the `HKCU\Software\Bohemia Interactive\Dayz Tools` registry key does not fix
 this on its own.
+
+**Interrupted install.** If another program edits the `dayz-mcp` entry while
+`--register` runs, the installer keeps that edit and stops with
+`registration_rollback_preserved_foreign_edit`; later runs stop with
+`registration_preserved_foreign_edit` until you decide. Remove the entry
+(`claude mcp remove dayz-mcp`, `codex mcp remove dayz-mcp`) or put back the
+registration you had before, then run the install again: it releases its
+journals and registers. `registration_recovery_conflict` means an interrupted
+run left a file holding something it did not write: put that file back as it
+was, or remove the entry if the change is in it, and run again.
