@@ -203,6 +203,49 @@ class PosixInstallerSecretModesTest(unittest.TestCase):
         self.assertTrue(swapped["done"])
         self.assertEqual(value, "validated-key")
 
+    # --- round 3 (Sol) ----------------------------------------------------
+
+    def test_a_dotdot_after_a_linked_directory_resolves_like_main(self) -> None:
+        real_sub = self.root / "real" / "sub"
+        real_sub.mkdir(parents=True)
+        alias = self.root / "alias"
+        alias.symlink_to(real_sub)
+        options = self._options_for(Path(f"{alias}/../daemon.key"))
+        self.assertEqual(options.keyfile, self.root / "real" / "daemon.key")
+
+    def test_a_fifo_at_the_key_path_is_refused_without_hanging(self) -> None:
+        import signal
+
+        fifo = self.root / "daemon.key"
+        os.mkfifo(fifo, 0o600)
+
+        def timed_out(*_args):
+            raise TimeoutError("the key read hung on a FIFO")
+
+        previous = signal.signal(signal.SIGALRM, timed_out)
+        signal.alarm(3)
+        try:
+            with self.assertRaises(InstallerExecutionError) as raised:
+                installer._load_or_create_key(fifo, lambda: "unused")
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        self.assertEqual(str(raised.exception), "keyfile_permissions_unsafe")
+
+    def test_new_secrets_are_exactly_0600_even_under_umask_0400(self) -> None:
+        os.umask(0o400)
+        key = self.root / "k.key"
+        config = self.root / "dayz_mcp.json"
+        config.write_text("{}\n", encoding="ascii")
+        config.chmod(0o600)
+        installer._load_or_create_key(key, lambda: "k-umask")
+        installer._write_config(config, installer.config_payload(1, "k-umask"))
+        fresh = self.root / "fresh.json"
+        installer._write_config(fresh, installer.config_payload(1, "k-umask"))
+        for path in (key, config, fresh):
+            with self.subTest(path=path.name):
+                self.assertEqual(self._mode(path), 0o600)
+
     def test_install_runtime_under_umask_022_leaves_every_secret_0600(self) -> None:
         tools_root = self.root / "tools"
         tools_root.mkdir()

@@ -1008,10 +1008,12 @@ def _keyfile_path(value: str | None, canonical_tools: Path) -> Path:
     key is read or created. Windows keeps the full resolve() it always had.
     """
     raw = Path(value) if value else canonical_tools / ".dayz_mcp.key"
-    if os.name != "posix":
+    if os.name != "posix" or raw.name in ("", ".", ".."):
         return raw.resolve()
-    absolute = Path(os.path.abspath(raw))
-    return absolute.parent.resolve() / absolute.name
+    # Resolve the parent as written: a ".." after a linked directory is taken
+    # relative to the link's target, as Path.resolve() always did (no lexical
+    # abspath collapse, fix-forward #464 round 3). Only the leaf is kept.
+    return raw.parent.resolve() / raw.name
 
 
 def parse_args(
@@ -1286,6 +1288,9 @@ def _write_private_file(path: Path, data: bytes, *, exclusive: bool) -> None:
         try:
             if os.name == "posix":
                 _check_owned_regular(os.fstat(descriptor))
+                # The umask can only narrow the open mode; a umask such as
+                # 0400 would leave 0200. Set exactly 0600 on the new file.
+                os.fchmod(descriptor, _PRIVATE_FILE_MODE)
             _write_all(descriptor, data)
             os.fsync(descriptor)
         finally:
@@ -1317,6 +1322,7 @@ def _write_private_file(path: Path, data: bytes, *, exclusive: bool) -> None:
     try:
         try:
             _check_owned_regular(os.fstat(descriptor))
+            os.fchmod(descriptor, _PRIVATE_FILE_MODE)
             _write_all(descriptor, data)
             os.fsync(descriptor)
         finally:
@@ -1340,7 +1346,11 @@ def _read_private_key_posix(path: Path) -> str:
     read, so the file cannot be swapped between the check and the read.
     """
     try:
-        descriptor = os.open(path, os.O_RDONLY | _NOFOLLOW_FLAGS)
+        # O_NONBLOCK: a FIFO at the path must not hang the open; it is then
+        # refused by the fstat check below like any other non-regular file.
+        descriptor = os.open(
+            path, os.O_RDONLY | _NOFOLLOW_FLAGS | getattr(os, "O_NONBLOCK", 0)
+        )
     except OSError as error:
         if error.errno == errno.ELOOP:
             raise InstallerExecutionError("keyfile_permissions_unsafe") from None
