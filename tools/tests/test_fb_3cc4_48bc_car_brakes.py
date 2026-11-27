@@ -49,6 +49,8 @@ NOT_READY = (
 )
 CAR_GUARD = r"\bif\s*\(\s*s_Car\s*\)"
 SET = re.escape("static void Set(")
+# b95f: the motorbike twin of Set, which also lets go of a car it takes over.
+SET_MOTORBIKE = re.escape("static void SetMotorbike(")
 TAKEOVER_GUARD = r"\bif\s*\(\s*s_Car\s*&&\s*s_Car\s*!=\s*car\s*\)"
 
 BRAKE = "SetBrake(MCPCarDrive.s_Brake);"
@@ -278,9 +280,11 @@ class CarBrakesSourceContractTest(unittest.TestCase):
     ) -> None:
         code = _car_code()
         self.assertEqual(code.count(TURN_OFF), 1)
-        # Two restores since the 48bc review P3: Clear, and Set on a takeover.
-        self.assertEqual(code.count(RESTORE), 2)
-        self.assertEqual(code.count("SetBrakesActivateWithoutDriver("), 3)
+        # Three restores: Clear, Set on a takeover (48bc review P3), and SetMotorbike when a
+        # motorbike drive takes over a car (b95f).
+        self.assertEqual(code.count(RESTORE), 3)
+        self.assertEqual(code.count("SetBrakesActivateWithoutDriver("), 4)
+        self.assertEqual(_block(_block(code, DRIVE_CLASS), SET_MOTORBIKE).count(RESTORE), 1)
         self.assertEqual(_drive_clear().count(RESTORE), 1)
         self.assertEqual(_drive_set().count(RESTORE), 1)
         ready = _block(_block(_on_input(), APPLY_CONTROL), ENGINE_READY)

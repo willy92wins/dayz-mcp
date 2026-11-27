@@ -25,6 +25,7 @@ from tests.enforce_subset_helpers import EnforceString, method_body, translate
 
 CLIENT_BRIDGE = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
 CAR_SCRIPT = addon_root() / "scripts" / "4_World" / "MCP_CarScript.c"
+BIKE_SCRIPT = addon_root() / "scripts" / "4_World" / "MCP_MotorbikeScript.c"
 RESOLVE_CAR = "protected CarScript ResolveOwnedCar(out string error)"
 RESOLVE_BIKE = "protected MotorbikeScript ResolveOwnedMotorbike(out string error)"
 ENGINE_SET = "protected bool DispatchEngineSet(MCPCommand command, MCPResult result)"
@@ -418,7 +419,9 @@ class MotorbikeOnInputTest(unittest.TestCase):
     """The modded MotorbikeScript.OnInput applies the stored controls to its own bike only."""
 
     def test_on_input_drives_only_the_stored_motorbike_with_the_bike_setters(self) -> None:
-        source = CAR_SCRIPT.read_text(encoding="utf-8")
+        # Its own file, so MCP_CarScript.c keeps the one OnInput the car tests read by signature.
+        self.assertNotIn("modded class MotorbikeScript", CAR_SCRIPT.read_text(encoding="utf-8"))
+        source = BIKE_SCRIPT.read_text(encoding="utf-8")
         self.assertEqual(source.count("modded class MotorbikeScript"), 1)
         bike_class = source[source.index("modded class MotorbikeScript") :]
         body = method_body(bike_class, "override void OnInput(float dt)")
