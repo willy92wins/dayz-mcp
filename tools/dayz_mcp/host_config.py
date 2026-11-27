@@ -1558,9 +1558,9 @@ def _recover_if_needed(
             if all(value == "target" for value in classes.values()):
                 _cleanup_journal(journal)
                 return
-            restore_roles = tuple(
-                role for role in roles if classes[role] in {"target", "own_torn"}
-            )
+            # No file is external here (refused above): every role is the
+            # original, our target or a torn prefix of it, all ours to restore.
+            restore_roles = roles
             manifest["status"] = "restoring_original"
             manifest["restore_roles"] = list(restore_roles)
             manifest["conflict_roles"] = []
