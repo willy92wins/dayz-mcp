@@ -20,13 +20,16 @@ class PinnedKeyfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             keyfile = Path(directory) / "daemon.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             self.assertEqual(module.read_pinned_keyfile(str(keyfile)), "test-key")
 
             keyfile.write_bytes(b"k" * 4097)
+            keyfile.chmod(0o600)
             with self.assertRaisesRegex(ValueError, "invalid_daemon_keyfile"):
                 module.read_pinned_keyfile(str(keyfile))
 
             keyfile.write_bytes(b"k" * 1025)
+            keyfile.chmod(0o600)
             with self.assertRaisesRegex(ValueError, "invalid_daemon_keyfile"):
                 module.read_pinned_keyfile(str(keyfile))
 
@@ -70,6 +73,7 @@ class PinnedKeyfileTests(unittest.TestCase):
             folder.mkdir()
             keyfile = folder / "daemon.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             final = str(keyfile.resolve())
             parent, name = final.rsplit("\\", 1)
             head, leaf = parent.rsplit("\\", 1)
@@ -95,6 +99,7 @@ class PinnedKeyfileTests(unittest.TestCase):
             folder.mkdir()
             keyfile = folder / "daemon.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             final = str(keyfile.resolve())
             parent, name = final.rsplit("\\", 1)
             head, leaf = parent.rsplit("\\", 1)
@@ -123,6 +128,7 @@ class PinnedKeyfileTests(unittest.TestCase):
             folder.mkdir()
             keyfile = folder / "daemon-keyfile-name.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             short_dir = _short_path_or_skip(self, folder)
             short_leaf = Path(short_dir).name
             final = str(keyfile.resolve())
@@ -144,6 +150,7 @@ class PinnedKeyfileTests(unittest.TestCase):
             folder.mkdir()
             keyfile = folder / "daemon-keyfile-name.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             short = _short_path_or_skip(self, keyfile)
             with patch.object(
                 module._kernel32, "GetShortPathNameW", return_value=0
@@ -157,6 +164,7 @@ class PinnedKeyfileTests(unittest.TestCase):
             folder.mkdir()
             keyfile = folder / "daemon-keyfile-name.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             short = _short_path_or_skip(self, keyfile)
             self.assertEqual(module.read_pinned_keyfile(short), "test-key")
 
@@ -168,6 +176,7 @@ class PinnedKeyfileTests(unittest.TestCase):
             keyfile = folder / "daemon-keyfile-name.key"
             other = folder / "another-keyfile-name.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             other.write_bytes(b"other-key\n")
             short = _short_path_or_skip(self, keyfile)
             with patch.object(
@@ -183,6 +192,7 @@ class PinnedKeyfileTests(unittest.TestCase):
             keyfile = folder / "daemon-keyfile-name.key"
             link = folder / "hard-link-keyfile-name.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             try:
                 os.link(keyfile, link)
             except OSError as error:
@@ -196,6 +206,7 @@ class PinnedKeyfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             keyfile = Path(directory) / "daemon.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             with patch.object(
                 module._kernel32, "GetLongPathNameW", return_value=0
             ) as expanded:
@@ -211,6 +222,7 @@ class PinnedKeyfileTests(unittest.TestCase):
             folder.mkdir()
             keyfile = folder / "daemon-keyfile-name.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             short = _short_path_or_skip(self, keyfile)
             with patch.object(
                 module._kernel32, "GetLongPathNameW", return_value=0
@@ -230,6 +242,7 @@ class PinnedKeyfileTests(unittest.TestCase):
             parent.mkdir()
             keyfile = parent / "daemon.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             cli = parent / "claude.exe"
             write_fake_x64_pe(cli)
             account = os.environ["USERDOMAIN"] + "\\" + os.environ["USERNAME"]
@@ -292,6 +305,7 @@ class ShortPathProvenanceTests(unittest.TestCase):
             keyfile = folder / "daemon-keyfile-name.key"
             other = folder / "another-keyfile-name.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             other.write_bytes(b"other-key\n")
             short = _short_path_or_skip(self, keyfile)
             short_other = _short_path_or_skip(self, other)
@@ -312,6 +326,7 @@ class ShortPathProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             keyfile = Path(directory) / "daemon.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             spelling = str(keyfile.resolve())
             with patch.object(
                 pinned._kernel32, "GetLongPathNameW", return_value=0
@@ -332,6 +347,7 @@ class ShortPathProvenanceTests(unittest.TestCase):
             folder.mkdir()
             keyfile = folder / "daemon-keyfile-name.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             short = _short_path_or_skip(self, keyfile)
             expected = str(keyfile.resolve())
             with patch.object(

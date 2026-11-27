@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import math
@@ -82,6 +83,32 @@ class RegistrationTransactionError(InstallerExecutionError):
 
 class RegistrationRollbackError(InstallerExecutionError):
     pass
+
+
+# What to do about a registration the installer kept on purpose (fix-forward
+# #465 round 4, Sol r3 P2). main() prints it as "remedy" next to the code.
+_PRESERVED_REMEDY = (
+    "another writer changed the dayz-mcp registration while the last install "
+    "ran, and it was kept as it is. Decide explicitly: remove that entry "
+    "(claude mcp remove -s user dayz-mcp; codex mcp remove dayz-mcp; a named "
+    "instance uses its own name), or put back the registration you had "
+    "before; then run the install again. See QUICKSTART.md, 'Interrupted install'."
+)
+_RECOVERY_CONFLICT_REMEDY = (
+    "an interrupted install left a journal that no longer matches the config "
+    "files or the registration, so nothing was overwritten and the journal "
+    "was kept. If another writer changed the dayz-mcp entry during that "
+    "install, removing it (claude mcp remove -s user dayz-mcp; codex mcp "
+    "remove dayz-mcp) and running the install again releases it. If the "
+    "journal belongs to another server name or install on this host, resolve "
+    "that one first. In any other case the files must go back to what that "
+    "install recorded. See QUICKSTART.md, 'Interrupted install'."
+)
+
+
+def _with_remedy(error: InstallerExecutionError, remedy: str) -> InstallerExecutionError:
+    error.remedy = remedy  # type: ignore[attr-defined]
+    return error
 
 
 class RegistrationCrash(BaseException):
@@ -200,6 +227,16 @@ def _codex_config_exists() -> bool:
         return False
 
 
+def _codex_present() -> bool:
+    """Codex counts as present when its CLI is on PATH or its config exists.
+
+    --pin-clis and --register share this criterion (fix-forward #464): a
+    Claude-only manifest pinned before a codex CLI appeared must not register
+    Claude alone.
+    """
+    return shutil.which("codex") is not None or _codex_config_exists()
+
+
 def _native_regular_file(path: Path) -> os.stat_result:
     try:
         metadata = path.lstat()
@@ -242,13 +279,25 @@ def _validate_x64_pe(path: Path) -> None:
         raise InstallerContractError("installer_cli_not_native_x64_pe")
 
 
+_ELF64_HEADER_BYTES = 64
+
+
 def _validate_elf(path: Path) -> None:
+    # A whole ELF64 header, little-endian, version 1 (P2 of #465): the four
+    # magic bytes alone also admitted a 4-byte file and 32-bit or big-endian
+    # images. The architecture is left to the probe that runs the file.
     try:
         with path.open("rb") as handle:
-            magic = handle.read(4)
+            header = handle.read(_ELF64_HEADER_BYTES)
     except OSError as error:
         raise InstallerContractError("installer_cli_unreadable") from error
-    if magic != _ELF_MAGIC:
+    if (
+        len(header) < _ELF64_HEADER_BYTES
+        or header[:4] != _ELF_MAGIC
+        or header[4] != 2  # ELFCLASS64
+        or header[5] != 1  # ELFDATA2LSB
+        or header[6] != 1  # EV_CURRENT
+    ):
         raise InstallerContractError("installer_cli_not_elf")
 
 
@@ -553,11 +602,7 @@ def pin_installer_clis(
     resolved: dict[str, Path] = {
         "CLAUDE": _resolve_pin_cli("CLAUDE", claude_exe),
     }
-    include_codex = (
-        codex_exe is not None
-        or shutil.which("codex") is not None
-        or _codex_config_exists()
-    )
+    include_codex = codex_exe is not None or _codex_present()
     if include_codex:
         resolved["CODEX"] = _resolve_pin_cli("CODEX", codex_exe)
     entries: dict[str, object] = {
@@ -992,6 +1037,23 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _keyfile_path(value: str | None, canonical_tools: Path) -> Path:
+    """The keyfile path, absolute, without following a link at the leaf.
+
+    On POSIX the directories are resolved but the last component is kept as
+    given (fix-forward #464 round 2): Path.resolve() on the leaf would turn a
+    symbolic link into its target and defeat the O_NOFOLLOW refusal when the
+    key is read or created. Windows keeps the full resolve() it always had.
+    """
+    raw = Path(value) if value else canonical_tools / ".dayz_mcp.key"
+    if os.name != "posix" or raw.name in ("", ".", ".."):
+        return raw.resolve()
+    # Resolve the parent as written: a ".." after a linked directory is taken
+    # relative to the link's target, as Path.resolve() always did (no lexical
+    # abspath collapse, fix-forward #464 round 3). Only the leaf is kept.
+    return raw.parent.resolve() / raw.name
+
+
 def parse_args(
     argv: Sequence[str] | None = None,
     *,
@@ -1032,11 +1094,7 @@ def parse_args(
         parser.error(error.code)
 
     canonical_tools = Path(tools_root).resolve()
-    keyfile = (
-        Path(args.keyfile).resolve()
-        if args.keyfile
-        else (canonical_tools / ".dayz_mcp.key").resolve()
-    )
+    keyfile = _keyfile_path(args.keyfile, canonical_tools)
     return InstallerOptions(
         port=args.port,
         keyfile=keyfile,
@@ -1208,25 +1266,184 @@ def _run_required(
         raise InstallerExecutionError("required_command_failed")
 
 
+_PRIVATE_FILE_MODE = 0o600
+
+
+_NOFOLLOW_FLAGS = (
+    getattr(os, "O_BINARY", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NOCTTY", 0)
+)
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        view = view[written:]
+
+
+def _fsync_parent_posix(path: Path) -> None:
+    if os.name != "posix":
+        return
+    descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _check_owned_regular(info: os.stat_result) -> None:
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != os.geteuid()
+    ):
+        raise PermissionError("private_file_not_owned_regular")
+
+
+def _write_private_file(path: Path, data: bytes, *, exclusive: bool) -> None:
+    """Write a secret-bearing file that is 0600 from the open on POSIX.
+
+    The mode is passed to os.open with O_EXCL, so the umask can only narrow it
+    and no other inode ever holds the new bytes. A new key (exclusive) is
+    created in place; O_EXCL refuses any existing name, a dangling symbolic
+    link included. A rewrite (not exclusive) never reuses the existing inode
+    (fix-forward #464 round 2): a descriptor opened while the old file was
+    0644 would read the new secret through it. The bytes go to a fresh 0600
+    temporary file in the same directory, are fsynced, and os.replace
+    publishes it, followed by an fsync of the directory. An existing leaf that
+    is a symbolic link, not a regular file, hard-linked or not ours is refused
+    and left as it is. On Windows the mode bits carry no access control and
+    the file is rewritten in place as before.
+    """
+    if exclusive:
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW_FLAGS,
+            _PRIVATE_FILE_MODE,
+        )
+        try:
+            if os.name == "posix":
+                _check_owned_regular(os.fstat(descriptor))
+                # The umask can only narrow the open mode; a umask such as
+                # 0400 would leave 0200. Set exactly 0600 on the new file.
+                os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+            _write_all(descriptor, data)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _fsync_parent_posix(path)
+        return
+    if os.name != "posix":
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | _NOFOLLOW_FLAGS, _PRIVATE_FILE_MODE
+        )
+        try:
+            os.ftruncate(descriptor, 0)
+            _write_all(descriptor, data)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        _check_owned_regular(existing)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW_FLAGS,
+        _PRIVATE_FILE_MODE,
+    )
+    try:
+        try:
+            _check_owned_regular(os.fstat(descriptor))
+            os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+            _write_all(descriptor, data)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    _fsync_parent_posix(path)
+
+
+def _read_private_key_posix(path: Path) -> str:
+    """Read the key from the one descriptor that was validated.
+
+    O_NOFOLLOW refuses a symbolic link at the leaf (a dangling one included),
+    and fstat on that same descriptor checks it is a regular file with one
+    link, owned by us and not readable by group or others before any byte is
+    read, so the file cannot be swapped between the check and the read.
+    """
+    try:
+        # O_NONBLOCK: a FIFO at the path must not hang the open; it is then
+        # refused by the fstat check below like any other non-regular file.
+        descriptor = os.open(
+            path, os.O_RDONLY | _NOFOLLOW_FLAGS | getattr(os, "O_NONBLOCK", 0)
+        )
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise InstallerExecutionError("keyfile_permissions_unsafe") from None
+        raise
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+        ):
+            raise InstallerExecutionError("keyfile_permissions_unsafe")
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if sum(map(len, chunks)) > 65536:
+                raise InstallerExecutionError("keyfile_unreadable")
+    finally:
+        os.close(descriptor)
+    return b"".join(chunks).decode("ascii").strip()
+
+
 def _load_or_create_key(
     path: Path,
     token_factory: Callable[[], str],
 ) -> str:
-    if path.exists():
+    # A key readable by group or others is already exposed: refuse it rather
+    # than re-copy it into the configs (fix-forward #464). The POSIX daemon
+    # reader refuses the same modes.
+    value: str | None = None
+    if os.name == "posix":
+        try:
+            value = _read_private_key_posix(path)
+        except FileNotFoundError:
+            value = None
+        except (OSError, UnicodeError) as error:
+            raise InstallerExecutionError("keyfile_unreadable") from error
+    elif path.exists():
         try:
             value = path.read_text(encoding="ascii").strip()
         except (OSError, UnicodeError) as error:
             raise InstallerExecutionError("keyfile_unreadable") from error
-    else:
+    if value is None:
         value = token_factory()
         if not isinstance(value, str) or not value:
             raise InstallerExecutionError("key_generation_failed")
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with path.open("x", encoding="ascii", newline="\n") as handle:
-                handle.write(value + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+            _write_private_file(
+                path, (value + "\n").encode("ascii"), exclusive=True
+            )
         except (OSError, UnicodeError) as error:
             raise InstallerExecutionError("keyfile_write_failed") from error
     if not value:
@@ -1247,9 +1464,12 @@ def config_payload(port: int, key: str) -> str:
 
 
 def _write_config(path: Path, payload: str) -> None:
+    # The payload carries the key: 0600 from the open, like the key itself.
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(payload + "\n", encoding="ascii", newline="\n")
+        _write_private_file(
+            path, (payload + "\n").encode("ascii"), exclusive=False
+        )
     except (OSError, UnicodeError) as error:
         raise InstallerExecutionError("config_write_failed") from error
 
@@ -1337,22 +1557,53 @@ def install_runtime(
     }
 
 
+def _foreign_registration_roles(
+    provider: RegistrationProvider,
+    roles: Sequence[str],
+    previous: dict[str, RegistrationSpec | None],
+    ours: dict[str, set[RegistrationSpec | None]],
+) -> set[str]:
+    """Roles whose live entry is neither the previous one nor one we wrote.
+
+    Fix-forward #465 round 2 (Sol P1-3): an entry another writer changed while
+    the transaction ran (apply_host_timeouts keeps such an edit) is preserved,
+    never replaced by the previous registration. None counts as ours: the
+    transaction removed the entry before adding its own.
+    """
+    foreign: set[str] = set()
+    for role in roles:
+        current = provider.get(role)
+        if current is None or current == previous[role] or current in ours.get(role, set()):
+            continue
+        foreign.add(role)
+    return foreign
+
+
 def _rollback_registrations(
     provider: RegistrationProvider,
     previous: dict[str, RegistrationSpec | None],
     touched: set[str],
+    *,
+    ours: dict[str, set[RegistrationSpec | None]] | None = None,
+    preserved: set[str] | frozenset[str] = frozenset(),
 ) -> None:
     roles = tuple(role for role in ("CLAUDE", "CODEX") if role in previous)
     for role in roles:
-        if role not in touched:
+        if role not in touched or role in preserved:
             continue
         current = provider.get(role)
+        if current == previous[role]:
+            continue
+        if ours is not None and not (current is None or current in ours.get(role, set())):
+            raise RegistrationRollbackError("registration_rollback_conflict")
         if current is not None:
             provider.remove(role)
         original = previous[role]
         if original is not None:
             provider.add(role, original)
     for role in roles:
+        if role in preserved:
+            continue
         if provider.get(role) != previous[role]:
             raise RegistrationRollbackError("registration_rollback_verify_failed")
 
@@ -1483,7 +1734,9 @@ def _acquire_registration_lock(journal_root: Path, timeout_s: float) -> _HeldReg
     ):
         raise InstallerContractError("invalid_registration_lock_timeout")
     path = _registration_lock_path(journal_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    from dayz_mcp.host_config import _makedirs_durable
+
+    _makedirs_durable(path.parent)
     from dayz_mcp import byte_lock
 
     owner = _RegistrationLockToken()
@@ -1532,16 +1785,22 @@ def _registration_publication_paths(journal: Path) -> tuple[Path, Path, Path]:
 
 
 def _write_registration_manifest(journal: Path, manifest: dict[str, object]) -> None:
-    from dayz_mcp.host_config import _mkdir_restricted, _write_private
+    from dayz_mcp.host_config import _fsync_dir_posix, _mkdir_restricted, _write_private
 
     # The active names appear only after the bytes are complete. A kill during
     # the first write leaves manifest.staging, which is not a journal.
+    # Same durable publication as host_config._persist_manifest: a directory
+    # fsync after each rename, so the journal that holds the previous
+    # registration is on disk before the caller's first provider.remove()
+    # (fix-forward #465).
     _mkdir_restricted(journal)
     payload = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
     published, pending, staging = _registration_publication_paths(journal)
     _write_private(staging, payload)
     os.replace(staging, pending)
+    _fsync_dir_posix(journal)
     os.replace(pending, published)
+    _fsync_dir_posix(journal)
 
 
 def _cleanup_registration_journal(journal: Path) -> None:
@@ -1575,6 +1834,9 @@ def _load_registration_manifest(
     str,
     tuple[Path, ...] | None,
     Path | None,
+    dict[str, RegistrationSpec | None] | None,
+    frozenset[str],
+    str | None,
 ] | None:
     published, pending, _staging = _registration_publication_paths(journal)
     only_next = False
@@ -1595,9 +1857,19 @@ def _load_registration_manifest(
         or value.get("status") != "prepared"
         or value.get("server_name") in (None, "")
         or not isinstance(value.get("server_name"), str)
-        or set(value) != {
+        or not {
             "host_configs",
             "host_journal",
+            "previous",
+            "schema",
+            "server_name",
+            "status",
+        } <= set(value) <= {
+            "attempt",
+            "desired",
+            "host_configs",
+            "host_journal",
+            "preserved",
             "previous",
             "schema",
             "server_name",
@@ -1626,11 +1898,42 @@ def _load_registration_manifest(
         host_journal = Path(raw_host_journal)
     else:
         raise RegistrationTransactionError("registration_journal_invalid")
+    raw_preserved = value.get("preserved", [])
+    if (
+        not isinstance(raw_preserved, list)
+        or any(role not in roles for role in raw_preserved)
+        or len(set(raw_preserved)) != len(raw_preserved)
+    ):
+        raise RegistrationTransactionError("registration_journal_invalid")
+    raw_attempt = value.get("attempt")
+    if raw_attempt is not None and (
+        not isinstance(raw_attempt, str) or not re.fullmatch(r"[0-9a-f]{32}", raw_attempt)
+    ):
+        raise RegistrationTransactionError("registration_journal_invalid")
+    raw_desired = value.get("desired")
+    if raw_desired is not None and (
+        not isinstance(raw_desired, dict) or set(raw_desired) != set(roles)
+    ):
+        raise RegistrationTransactionError("registration_journal_invalid")
     previous = {
         role: _registration_spec_from_payload(value["previous"][role])
         for role in roles
     }
-    return previous, only_next, value["server_name"], host_configs, host_journal
+    desired: dict[str, RegistrationSpec | None] | None = None
+    if raw_desired is not None:
+        desired = {
+            role: _registration_spec_from_payload(raw_desired[role]) for role in roles
+        }
+    return (
+        previous,
+        only_next,
+        value["server_name"],
+        host_configs,
+        host_journal,
+        desired,
+        frozenset(raw_preserved),
+        raw_attempt,
+    )
 
 
 def _restore_registered_roles(
@@ -1651,22 +1954,87 @@ def _restore_registered_roles(
             raise RegistrationRollbackError("registration_rollback_verify_failed")
 
 
+_HOST_ROLE = {"CLAUDE": "claude", "CODEX": "codex"}
+
+
 def _recover_pending_host_configs(
     host_configs: tuple[Path, ...] | None,
     host_journal_root: Path | None,
+    provider: RegistrationProvider | None = None,
+    loaded: tuple[object, ...] | None = None,
 ) -> None:
     if host_configs is None:
         return
-    from dayz_mcp.host_config import _default_journal_root, _recover_if_needed
+    from dayz_mcp.host_config import (
+        HostConfigError,
+        _default_journal_root,
+        _recover_if_needed,
+        restore_conflict_state,
+    )
 
     host_journal = (
         Path(host_journal_root) if host_journal_root is not None else _default_journal_root()
     )
-    _recover_if_needed(
-        host_configs[0],
-        host_configs[1] if len(host_configs) > 1 else None,
-        host_journal,
-    )
+    claude, codex = host_configs[0], host_configs[1] if len(host_configs) > 1 else None
+    try:
+        _recover_if_needed(claude, codex, host_journal)
+        return
+    except HostConfigError as error:
+        if str(error) != "registration_recovery_conflict":
+            raise
+        conflict = error
+    # Fix-forward #465 rounds 4-5 (Sol r3 P1-2, r4 P1-1/P1-2): a foreign edit
+    # after our timeouts write leaves this journal in restore_conflict and the
+    # registration journal with that role preserved, both from one attempt.
+    # The timeouts journal is released, without writes, only when:
+    # - both journals carry the same attempt id (a journal of another server
+    #   name or install, or one without an id, is never released here);
+    # - every kept file belongs to a preserved registration role, and the
+    #   user resolved each preserved entry (removed, or previous/desired back);
+    # - every other client holds what that attempt's own outer rollback left
+    #   there: its previous registration, or the desired one if the rollback
+    #   was cut before reaching it.
+    # Anything else keeps refusing, with the journals kept.
+    def refuse(cause: BaseException) -> RegistrationTransactionError:
+        error = _with_remedy(
+            RegistrationTransactionError("registration_recovery_conflict"),
+            _RECOVERY_CONFLICT_REMEDY,
+        )
+        error.__cause__ = cause
+        return error
+
+    state = restore_conflict_state(host_journal)
+    if provider is None or loaded is None or state is None:
+        raise refuse(conflict)
+    host_attempt, restored, kept = state
+    full_previous, desired, preserved, attempt = loaded[0], loaded[5], loaded[6], loaded[7]
+    by_host_role = {host: role for role, host in _HOST_ROLE.items()}
+    if (
+        attempt is None
+        or host_attempt != attempt
+        or not kept
+        or any(by_host_role[host] not in preserved for host in kept)
+    ):
+        raise refuse(conflict)
+    _release_preserved_or_refuse(provider, full_previous, desired, preserved)
+    for host in restored:
+        role = by_host_role[host]
+        if role in preserved:
+            continue
+        accepted = {full_previous.get(role)}
+        if desired is not None:
+            accepted.add(desired.get(role))
+        if provider.get(role) not in accepted:
+            raise refuse(conflict)
+    try:
+        _recover_if_needed(claude, codex, host_journal, release_attempt=attempt)
+    except HostConfigError as error:
+        if str(error) != "registration_recovery_conflict":
+            raise
+        raise _with_remedy(
+            RegistrationTransactionError("registration_recovery_conflict"),
+            _RECOVERY_CONFLICT_REMEDY,
+        ) from error
 
 
 def _recover_registration_journal(
@@ -1678,14 +2046,79 @@ def _recover_registration_journal(
         str,
         tuple[Path, ...] | None,
         Path | None,
+        dict[str, RegistrationSpec | None] | None,
+        frozenset[str],
+        str | None,
     ],
 ) -> None:
-    previous, only_next, _owner, _hosts, _host_journal = loaded
-    if only_next and all(provider.get(role) == previous[role] for role in previous):
+    (
+        full_previous,
+        only_next,
+        _owner,
+        _hosts,
+        _host_journal,
+        desired,
+        preserved,
+        _attempt,
+    ) = loaded
+    # A role recorded as preserved holds another writer's entry that the
+    # rollback decided to keep: recovery never restores over it.
+    previous = {
+        role: spec for role, spec in full_previous.items() if role not in preserved
+    }
+    if (
+        only_next
+        and not preserved
+        and all(provider.get(role) == previous[role] for role in previous)
+    ):
         _cleanup_registration_journal(journal)
         return
+    if only_next:
+        # A first publication cut before its rename: make it the durable
+        # manifest before any provider mutation (fix-forward #465 round 2).
+        from dayz_mcp.host_config import _fsync_dir_posix
+
+        published, pending, _staging = _registration_publication_paths(journal)
+        os.replace(pending, published)
+        _fsync_dir_posix(journal)
+    if desired is not None:
+        ours = {role: {desired[role]} for role in previous if role in desired}
+        if _foreign_registration_roles(provider, tuple(previous), previous, ours):
+            # Another writer's entry: keep it and keep the journal, so nothing
+            # restores the previous spec over it (fix-forward #465 round 2).
+            raise _with_remedy(
+                RegistrationTransactionError("registration_recovery_conflict"),
+                _RECOVERY_CONFLICT_REMEDY,
+            )
     _restore_registered_roles(provider, previous)
+    _release_preserved_or_refuse(provider, full_previous, desired, preserved)
     _cleanup_registration_journal(journal)
+
+
+def _release_preserved_or_refuse(
+    provider: RegistrationProvider,
+    previous: dict[str, RegistrationSpec | None],
+    desired: dict[str, RegistrationSpec | None] | None,
+    preserved: frozenset[str] | set[str],
+) -> None:
+    """Keep refusing while a preserved foreign entry is still live.
+
+    Fix-forward #465 round 3 (Sol P1-6): a preserved entry stays protected
+    until an explicit action resolves it: the user removes it, or puts back
+    the previous or the desired registration. Until then every
+    register_transaction refuses with registration_preserved_foreign_edit and
+    keeps the journal, instead of registering over the other writer's entry.
+    """
+    for role in sorted(preserved):
+        live = provider.get(role)
+        accepted = {None, previous.get(role)}
+        if desired is not None:
+            accepted.add(desired.get(role))
+        if live not in accepted:
+            raise _with_remedy(
+                RegistrationTransactionError("registration_preserved_foreign_edit"),
+                _PRESERVED_REMEDY,
+            )
 
 
 def register_transaction(
@@ -1755,7 +2188,16 @@ def _register_transaction_locked(
     recorded_hosts: tuple[Path, ...] | None = None
     recorded_host_journal: Path | None = None
     if loaded is not None:
-        _previous, _only_next, owner, recorded_hosts, recorded_host_journal = loaded
+        (
+            _previous,
+            _only_next,
+            owner,
+            recorded_hosts,
+            recorded_host_journal,
+            _desired,
+            _preserved,
+            _attempt,
+        ) = loaded
         if owner != server_name:
             # Another instance owns this journal. Do not restore its specs here
             # and do not delete it.
@@ -1765,11 +2207,16 @@ def _register_transaction_locked(
     _recover_pending_host_configs(
         host_configs if host_configs is not None else recorded_hosts,
         host_journal_root if host_journal_root is not None else recorded_host_journal,
+        provider,
+        loaded,
     )
     if loaded is not None:
         _recover_registration_journal(provider, journal, loaded)
     previous: dict[str, RegistrationSpec | None] = {}
     touched: set[str] = set()
+    # What this transaction itself put in the provider: the desired spec and
+    # whatever the provider reported right after our add.
+    ours: dict[str, set[RegistrationSpec | None]] = {role: {desired[role]} for role in roles}
     try:
         for role in roles:
             previous[role] = provider.get(role)
@@ -1790,6 +2237,9 @@ def _register_transaction_locked(
             "registration_would_drop_options",
             f"{detail} (re-run with --allow-option-removal to drop them)",
         )
+    # Ties this registration journal to the timeouts journal it may leave
+    # (fix-forward #465 round 5, Sol r4 P1-2).
+    attempt = secrets.token_hex(16)
     try:
         _write_registration_manifest(
             journal,
@@ -1802,9 +2252,13 @@ def _register_transaction_locked(
                 "host_journal": (
                     None if host_journal_root is None else str(host_journal_root)
                 ),
+                "desired": {
+                    role: _registration_spec_payload(desired[role]) for role in roles
+                },
                 "previous": {
                     role: _registration_spec_payload(previous[role]) for role in roles
                 },
+                "attempt": attempt,
                 "schema": _REGISTRATION_JOURNAL_SCHEMA,
                 "server_name": server_name,
                 "status": "prepared",
@@ -1815,12 +2269,14 @@ def _register_transaction_locked(
                 provider.remove(role)
                 touched.add(role)
         for role in roles:
-            provider.add(role, desired[role])
             touched.add(role)
+            provider.add(role, desired[role])
             if fault_injector is not None:
                 fault_injector(f"after_add_{role}")
         for role in roles:
-            if provider.get(role) != desired[role]:
+            observed = provider.get(role)
+            ours[role].add(observed)
+            if observed != desired[role]:
                 raise RegistrationTransactionError("registration_verify_mismatch")
         if host_configs is not None:
             timeout_kwargs: dict[str, object] = {}
@@ -1830,6 +2286,7 @@ def _register_transaction_locked(
                 timeout_kwargs["journal_root"] = Path(host_journal_root)
             if fault_injector is not None:
                 timeout_kwargs["fault_injector"] = fault_injector
+            timeout_kwargs["attempt"] = attempt
             apply_host_timeouts(*host_configs, **timeout_kwargs)
             for role in roles:
                 if provider.get(role) != desired[role]:
@@ -1839,10 +2296,31 @@ def _register_transaction_locked(
         raise
     except Exception as error:
         try:
-            _rollback_registrations(provider, previous, touched)
-            _cleanup_registration_journal(journal)
+            preserved = _foreign_registration_roles(
+                provider, tuple(role for role in roles if role in touched), previous, ours
+            )
+            if preserved:
+                # Record the decision before acting on it, so a crash during
+                # this rollback is recovered the same way (Sol P1-3).
+                manifest = json.loads(
+                    _registration_publication_paths(journal)[0].read_bytes()
+                )
+                manifest["preserved"] = sorted(preserved)
+                _write_registration_manifest(journal, manifest)
+            _rollback_registrations(
+                provider, previous, touched, ours=ours, preserved=preserved
+            )
+            if not preserved:
+                # With a preserved role the journal stays: it is what keeps
+                # the next run from registering over that entry (Sol P1-6).
+                _cleanup_registration_journal(journal)
         except Exception as rollback_error:
             raise RegistrationRollbackError("registration_rollback_failed") from rollback_error
+        if preserved:
+            raise _with_remedy(
+                RegistrationRollbackError("registration_rollback_preserved_foreign_edit"),
+                _PRESERVED_REMEDY,
+            ) from error
         raise RegistrationTransactionError("registration_transaction_failed") from error
 
 
@@ -1938,7 +2416,7 @@ def register_clients(
     codex_in_manifest = (
         not isinstance(manifest_entries, dict) or "CODEX" in manifest_entries
     )
-    if not codex_in_manifest and _codex_config_exists():
+    if not codex_in_manifest and _codex_present():
         raise InstallerContractError(
             "installer_cli_missing",
             f"pass --codex-exe PATH; {_PIN_RECIPE}",

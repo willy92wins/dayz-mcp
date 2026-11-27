@@ -436,6 +436,7 @@ class ClientRuntimeControlCompositionTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             for public_method, side_effect, arguments in (
                 (
                     "session_acquire",
@@ -516,6 +517,7 @@ class ClientRuntimeControlCompositionTests(unittest.IsolatedAsyncioTestCase):
             root = Path(temporary)
             keyfile = root / "daemon.key"
             keyfile.write_text(first_key + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             launcher = str(Path(sys.executable).resolve())
             config = server.ServerConfig(
                 mode="client",
@@ -571,6 +573,7 @@ class ClientRuntimeControlCompositionTests(unittest.IsolatedAsyncioTestCase):
                     runtime._control._credential_provider,
                 )
                 keyfile.write_text(second_key + "\n", encoding="utf-8")
+                keyfile.chmod(0o600)
 
                 bridge_response = runtime._call("GET", "/status")
                 control_response = await runtime.session_status()
@@ -619,6 +622,7 @@ class ClientRuntimeControlCompositionTests(unittest.IsolatedAsyncioTestCase):
             root = Path(temporary)
             keyfile = root / "daemon.key"
             keyfile.write_text(first_key + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             launcher = str(Path(sys.executable).resolve())
             config = server.ServerConfig(
                 mode="client",
@@ -665,6 +669,7 @@ class ClientRuntimeControlCompositionTests(unittest.IsolatedAsyncioTestCase):
             ):
                 runtime = server.ClientRuntime(config)
                 keyfile.write_text(second_key + "\n", encoding="utf-8")
+                keyfile.chmod(0o600)
                 healthy = runtime._daemon_healthy(1234.5)
 
         self.assertTrue(healthy)
@@ -683,6 +688,7 @@ class ClientRuntimeControlCompositionTests(unittest.IsolatedAsyncioTestCase):
             root = Path(temporary)
             keyfile = root / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             native = root / "native-python.exe"
             native.write_bytes(b"fixture")
             launcher = str(Path(sys.executable).resolve())

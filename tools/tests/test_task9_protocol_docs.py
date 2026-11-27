@@ -240,6 +240,211 @@ class Task9ProtocolDocsTests(unittest.TestCase):
                     with self.subTest(pattern=pattern.pattern):
                         self.assertRegex(text, pattern)
 
+    def test_pocket_rule_classifies_reason_and_caps_requeue(self) -> None:
+        """Agents must not treat every active_run_exists as an unbounded re-queue.
+
+        port_in_use_foreign with queue_offer null is terminal, re-queue time is
+        capped, m1.espera never expires on its own, and the lease also covers
+        low-level lifecycle.
+        """
+        runbook = self.read_required(RUNBOOK)
+        agents = self.read_required(PROJECT_ROOT / "AGENTS.md")
+        claude = self.read_required(PROJECT_ROOT / "CLAUDE.md")
+        pocket_heading = "## La caja está ocupada: ponte en la cola (regla de bolsillo)"
+        self.assertIn(pocket_heading, runbook)
+        pocket = runbook.split(pocket_heading, 1)[1]
+        next_heading = re.search(r"^## ", pocket, re.MULTILINE)
+        if next_heading is not None:
+            pocket = pocket[: next_heading.start()]
+
+        self.assertRegex(
+            pocket,
+            r"reason.{0,80}queue_offer|queue_offer.{0,80}reason",
+            "the pocket rule must classify rejections by reason and queue_offer",
+        )
+        self.assertRegex(
+            pocket,
+            r"port_in_use_foreign.{0,120}queue_offer.{0,80}(null|nulo).{0,80}terminal"
+            r"|terminal.{0,80}port_in_use_foreign.{0,120}queue_offer.{0,80}(null|nulo)",
+            "port_in_use_foreign with a null queue_offer must be a terminal block",
+        )
+        self.assertIn(
+            "1800 s",
+            pocket,
+            "the pocket rule must cap total re-queue time at 1800 s",
+        )
+        self.assertRegex(
+            pocket,
+            r"m1\.espera.{0,120}(nunca caduca|never expires|no caduca)",
+            "the pocket rule must say m1.espera never expires on its own",
+        )
+        self.assertRegex(
+            pocket,
+            r"lease.{0,80}lifecycle|lifecycle.{0,80}lease",
+            "the pocket rule must say the lease also covers low-level lifecycle",
+        )
+        self.assertIsNotNone(
+            re.search(
+                r"^\|[^\n]*port_in_use_foreign[^\n]*\|",
+                pocket,
+                re.MULTILINE,
+            ),
+            "the pocket rule must include a rejection table that names port_in_use_foreign",
+        )
+        self.assertIn(
+            "wait_for_box_s=min(600, remaining)",
+            pocket,
+            "the 1800 s cap must be applied as wait_for_box_s=min(600, remaining)",
+        )
+        self.assertIn(
+            "wait_for_box_s=0",
+            pocket,
+            "the pocket rule must warn that wait_for_box_s=0 means 600 s, not stop",
+        )
+        self.assertIn(
+            'retry.on_busy="queue"',
+            pocket,
+            "contention must require an actionable FIFO offer (retry.on_busy=queue)",
+        )
+        self.assertIn("own_run", pocket)
+        self.assertRegex(
+            pocket,
+            r"box_reserved.{0,80}(null|nulo).{0,80}terminal"
+            r"|terminal.{0,80}box_reserved.{0,80}(null|nulo)",
+            "box_reserved with a null queue_offer must be a terminal block",
+        )
+        self.assertIsNotNone(
+            re.search(r"^\|\s*error_code\s*\|", pocket, re.MULTILINE),
+            "the rejection table must have an error_code column, not mix codes into reason",
+        )
+        self.assertIsNone(
+            re.search(
+                r"^\|[^\n]*reason[^\n]*active_run_exists",
+                pocket,
+                re.MULTILINE | re.IGNORECASE,
+            ),
+            "the table must not list error_code active_run_exists in the reason column",
+        )
+        self.assertIn(
+            "remaining <= 0",
+            pocket,
+            "the 1800 s deadline must stop when remaining <= 0, not only at 0",
+        )
+        self.assertRegex(
+            pocket,
+            r"(?i)plazo monot[oó]nico|monotonic",
+            "the 1800 s cap must be a monotonic deadline from the first call",
+        )
+        self.assertIn("build=false", pocket)
+        self.assertIn("clean=false", pocket)
+        self.assertIn("pack_only=false", pocket)
+        self.assertRegex(
+            pocket,
+            r"todos los (args|argumentos) de `queue_offer\.retry`",
+            "re-queue must apply every queue_offer.retry argument, not only on_busy",
+        )
+        step6 = re.search(r"^6\..+?(?=^Límites|^## |\Z)", pocket, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(step6, "pocket rule is missing step 6")
+        step6_text = step6.group(0)
+        self.assertIn("Suéltalo al acabar", step6_text)
+        self.assertRegex(
+            step6_text,
+            r"lifecycle guard.{0,80}run_id|run_id.{0,80}lifecycle guard",
+            "step 6 must say to stop via the lifecycle guard with the exact run_id",
+        )
+        self.assertIsNone(
+            re.search(r"\bkill\b", step6_text),
+            "step 6 must not list kill as a leased lifecycle op",
+        )
+        self.assertNotRegex(
+            pocket,
+            r"Contención[^\n]{0,500}venci[oó]",
+            "wait expiry without an actionable offer is not contention",
+        )
+
+
+        for text, source in (
+            (agents, PROJECT_ROOT / "AGENTS.md"),
+            (claude, PROJECT_ROOT / "CLAUDE.md"),
+        ):
+            with self.subTest(source=str(source)):
+                folded = text.casefold()
+                self.assertIn("queue_offer", folded)
+                self.assertIn("port_in_use_foreign", folded)
+                self.assertIn("1800 s", text)
+                self.assertIn("remaining <= 0", text)
+                self.assertIn("wait_for_box_s=min(600, remaining)", text)
+                self.assertRegex(
+                    text,
+                    r"(?i)plazo monot[oó]nico|monotonic",
+                    f"{source.name} must use a monotonic 1800 s deadline",
+                )
+                self.assertRegex(
+                    text,
+                    r"todos los args de `queue_offer.retry`|queue_offer.retry",
+                )
+                self.assertRegex(
+                    text,
+                    r"terminal",
+                    f"{source.name} must call port_in_use_foreign with a null offer terminal",
+                )
+
+
+
+    def _pocket_table_rows(self, pocket: str) -> list[tuple[str, str, str, str]]:
+        rows: list[tuple[str, str, str, str]] = []
+        for line in pocket.splitlines():
+            if not line.startswith("|"):
+                continue
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) != 4:
+                continue
+            header_or_rule = cells[0].lower().replace("`", "")
+            if header_or_rule in {"error_code", "---"} or set(header_or_rule) <= {"-"}:
+                continue
+            rows.append((cells[0], cells[1], cells[2], cells[3]))
+        return rows
+
+    def test_pocket_rule_table_rows_match_classification(self) -> None:
+        """Each rejection-table row must keep its terminal or contention action."""
+        runbook = self.read_required(RUNBOOK)
+        pocket_heading = "## La caja está ocupada: ponte en la cola (regla de bolsillo)"
+        pocket = runbook.split(pocket_heading, 1)[1]
+        next_heading = re.search(r"^## ", pocket, re.MULTILINE)
+        if next_heading is not None:
+            pocket = pocket[: next_heading.start()]
+        rows = self._pocket_table_rows(pocket)
+        self.assertGreaterEqual(len(rows), 4, "the rejection table is missing rows")
+
+        def row_for(token: str) -> tuple[str, str, str, str]:
+            matches = [row for row in rows if token in row[1] or token in row[2]]
+            self.assertEqual(len(matches), 1, f"expected one row mentioning {token!r}, got {matches!r}")
+            return matches[0]
+
+        for token in ("port_in_use_foreign", "box_reserved", "own_run"):
+            _error, _reason, offer, action = row_for(token)
+            with self.subTest(row=token):
+                self.assertRegex(offer, r"null|sin `retry.on_busy")
+                self.assertRegex(action, r"(?i)terminal")
+                self.assertRegex(action, r"(?i)no reencolar")
+                self.assertNotIn("wait_for_box_s=0", action)
+                self.assertNotRegex(action, r"(?i)contención")
+
+        fifo = [
+            row
+            for row in rows
+            if 'retry.on_busy="queue"' in row[2] and "oferta con" in row[2]
+        ]
+        self.assertEqual(len(fifo), 1, f"expected one FIFO contention row, got {fifo!r}")
+        _error, reason, offer, action = fifo[0]
+        self.assertIn("contención", action.casefold())
+        self.assertNotIn("terminal", action.casefold())
+        self.assertIn("wait_for_box_s=min(600, remaining)", action)
+        self.assertNotIn("wait_for_box_s=0", action)
+        self.assertIn("pack_only=false", action)
+        self.assertNotIn("active_run_exists", reason)
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -89,6 +89,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             provider_policy = _policy(keyfile)
             equal_but_distinct_policy = _policy(keyfile)
             self.assertEqual(
@@ -128,6 +129,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             with patch.object(
                 client,
@@ -152,6 +154,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
 
             def respond(status: int, document: dict[str, object]):
@@ -244,6 +247,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             with patch.object(
                 control.transport, "verified_daemon_http_request", side_effect=request
@@ -289,6 +293,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text(first_key + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(
                 policy=_policy(keyfile),
                 identity=identity,
@@ -304,6 +309,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
                 client.state,
             )
             keyfile.write_text(second_key + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             with (
                 patch.object(
                     control.transport,
@@ -375,6 +381,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(
                 policy=_policy(keyfile),
                 identity=identity,
@@ -429,6 +436,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             for stage, sent, expected_code in cases:
                 client = control.ControlClient(
                     policy=_policy(keyfile), identity=identity
@@ -473,6 +481,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             for failure, expected_code, expected_stage, expected_sent in cases:
                 calls = 0
 
@@ -538,6 +547,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", revalidate)
             client = control.ControlClient(policy=policy, identity=identity)
@@ -590,6 +600,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", revalidate)
             client = control.ControlClient(policy=policy, identity=identity)
@@ -645,6 +656,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", revalidate)
             client = control.ControlClient(policy=policy, identity=identity)
@@ -683,6 +695,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
 
             pre_policy = _policy(keyfile)
             pre_requests: list[dict[str, object]] = []
@@ -777,6 +790,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             with patch.object(
                 control.daemon_credential.pinned_keyfile,
                 "read_pinned_keyfile",
@@ -864,6 +878,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             with patch.object(client, "_request_once", side_effect=request):
                 acquired = await client.session_acquire("dayz-test")
@@ -924,6 +939,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             client.active_ticket = "ticket-one"
             client.active_operation_id = "operation-one"
@@ -975,6 +991,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             session_call = AsyncMock(
                 side_effect=(
@@ -1027,6 +1044,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             session_call = AsyncMock(
                 side_effect=(
@@ -1080,6 +1098,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             for method_name, arguments in (
                 ("session_acquire", ("dayz-test",)),
                 ("session_acquire_wait", ("dayz-test", None)),
@@ -1114,6 +1133,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             session_call = AsyncMock(
                 side_effect=(
@@ -1177,6 +1197,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             session_call = AsyncMock(side_effect=lambda *_args, **_kwargs: next(responses))
             with patch.object(client, "_session_call", session_call), patch.object(
@@ -1208,6 +1229,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
 
             client.active_ticket = "old-ticket"
@@ -1278,6 +1300,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             session_call_mock = AsyncMock(side_effect=session_call)
             with patch.object(client, "_session_call", session_call_mock):
@@ -1336,6 +1359,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             with patch.object(client, "_session_call", side_effect=session_call):
                 task = asyncio.create_task(client.session_acquire_wait("dayz-test"))
@@ -1367,6 +1391,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             client.active_lease_token = "lease-current"
             client.active_operation_id = "operation-current"
@@ -1412,6 +1437,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             for state, lease, ticket, response in cases:
                 with self.subTest(state=state):
                     client = control.ControlClient(
@@ -1482,6 +1508,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             for state, lease, ticket, response in cases:
                 with self.subTest(state=state, response=response):
                     client = control.ControlClient(
@@ -1533,6 +1560,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             client.state = "QUEUED"
             client.active_operation_id = "operation-current"
@@ -1573,6 +1601,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             client.state = "QUEUED"
             client.active_operation_id = "operation-current"
@@ -1617,6 +1646,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             client.state = "ACTIVE"
             client.active_operation_id = operation_id
@@ -1667,6 +1697,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             client.state = "ACTIVE"
             client.active_operation_id = operation_id
@@ -1720,6 +1751,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             for label, status in cases:
                 with self.subTest(label=label):
                     client = control.ControlClient(
@@ -1803,6 +1835,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             for label, scripted, expected_code in cases:
                 with self.subTest(label=label):
                     responses = iter(scripted)
@@ -1864,6 +1897,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             client.state = "ACTIVE"
             client.active_operation_id = stale_operation_id
@@ -1930,6 +1964,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             client.state = "NEW"
             client.active_operation_id = stale_operation_id
@@ -1992,6 +2027,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             client.state = "ACTIVE"
             client.active_operation_id = stale_operation_id
@@ -2046,6 +2082,7 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             client.state = "ACTIVE"
             client.active_operation_id = stale_operation_id

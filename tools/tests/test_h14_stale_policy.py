@@ -288,6 +288,7 @@ class H14ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", _fail_after(3))
             client = control.ControlClient(
@@ -318,6 +319,7 @@ class H14ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", _fail_after(3))
             client = control.ControlClient(
@@ -352,6 +354,7 @@ class H14ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", _fail_after(3))
             client = control.ControlClient(
@@ -385,6 +388,7 @@ class H14ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", _fail_after(3))
             client = control.ControlClient(
@@ -433,6 +437,7 @@ class H14ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", _fail_after(3))
             client = control.ControlClient(
@@ -472,6 +477,7 @@ class H14ControlClientTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", _fail_after(3))
             provider = control.daemon_credential.RefreshingDaemonCredential(
@@ -526,6 +532,7 @@ class H14DaemonCredentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text(issued + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", _fail_after(2))
             provider = credential_module.RefreshingDaemonCredential(
@@ -533,6 +540,7 @@ class H14DaemonCredentialTests(unittest.TestCase):
                 request_fn=request,
             )
             keyfile.write_text(rotated + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             real_reader = credential_module.pinned_keyfile.read_pinned_keyfile
 
             def counted_reader(path: str) -> str:
@@ -574,6 +582,7 @@ class H14DaemonCredentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-credential-a\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", _fail_after(2))
             provider = credential_module.RefreshingDaemonCredential(
@@ -611,6 +620,7 @@ class H14DaemonCredentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-credential\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", _fail_after(2))
             provider = credential_module.RefreshingDaemonCredential(
@@ -739,6 +749,7 @@ async def _mcp_untrusted_dayz_test_stop(run: dict[str, object]):
 
         keyfile = Path(temporary) / "daemon.key"
         keyfile.write_text("fixture-key\n", encoding="utf-8")
+        keyfile.chmod(0o600)
         http_policy = _policy(keyfile)
         client = control.ControlClient(
             policy=http_policy, identity=_identity(control, "h14-idle-untrusted")
@@ -1213,6 +1224,7 @@ class H14OwnedStopWiringTests(unittest.IsolatedAsyncioTestCase):
 
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             http_policy = _policy(keyfile)
             client = control.ControlClient(
                 policy=http_policy, identity=_identity(control, "h14-post-kill")

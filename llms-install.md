@@ -1,42 +1,37 @@
 # Install DayZ-MCP with an AI agent
 
-DayZ-MCP is an MCP server and in-game bridge mod that lets an AI agent inspect and control a local DayZ game. Everything stays on this machine: the daemon listens only on `127.0.0.1`, and `setup` generates a separate API key for each installation. This guide is for an AI agent (Claude Code or Codex) installing DayZ-MCP on Windows for a person.
+DayZ-MCP is an MCP server and in-game bridge mod that lets an AI agent inspect and control a local DayZ game. Everything stays on this machine: the daemon listens only on `127.0.0.1`, and the installer generates a separate API key for each installation. This guide is for an AI agent (Claude Code or Codex) installing DayZ-MCP on Windows for a person.
 
 ## What the person does
 
 You cannot do these steps from a shell, so ask the person to handle them:
 
 - Subscribe to the [DayZ-MCP Workshop item](https://steamcommunity.com/sharedfiles/filedetails/?id=3846741037) in Steam and wait for Steam to download it (no command can subscribe without their click).
-- Have Steam with DayZ installed, a DayZ server on this same machine that they may load mods on (retail `DayZServer` works), and Claude Code installed as a native Windows executable. Codex is optional: when neither a Codex CLI nor `~/.codex/config.toml` is present, `setup` registers Claude only.
-- Restart the MCP client when you ask, and start the game with the launch arguments `setup` prints.
-
-No repository clone and no pre-installed Python are needed.
+- Have Steam with DayZ installed, a DayZ server on this same machine that they may load mods on (retail `DayZServer` works), Python 3.11 or newer, and both Claude Code and Codex installed as native Windows executables. `.\install-mcp.ps1 -Register` requires both: it refuses with `registration check failed for Codex: command missing` (or the Claude equivalent) if either is absent, and it does not register Claude alone.
+- Give you the path of their server profiles folder and of their client profiles folder (`-ClientProfiles`), restart the MCP client when you ask, and start the game with the `-mod=` and `-profiles=` arguments you build below.
+- A git clone of this repository. The no-clone install from a GitHub release (the wheel and `dayz-mcp-requirements.txt`) is not published yet. Do not invent or use a `releases/download/...` URL for those files until a release includes them and a GET of the asset returns HTTP 200.
 
 ## Commands
 
 ```powershell
-winget install --id astral-sh.uv -e
-uv python install 3.14 --no-bin --no-registry
-& (uv python find --managed-python 3.14) -c "import os, subprocess, sys; subprocess.run([os.path.realpath(sys.executable), '-m', 'venv', '--without-pip', sys.argv[1]], check=True)" "$env:LOCALAPPDATA\DayZ_MCP\venv-1.6"
-uv pip install --python "$env:LOCALAPPDATA\DayZ_MCP\venv-1.6\Scripts\python.exe" --link-mode=copy --require-hashes -r https://github.com/willy92wins/dayz-mcp/releases/download/v1.6/dayz-mcp-requirements.txt
-& "$env:LOCALAPPDATA\DayZ_MCP\venv-1.6\Scripts\dayz-mcp.exe" setup --json
+git clone https://github.com/willy92wins/dayz-mcp.git
+cd dayz-mcp\tools
+.\install-mcp.ps1 -ServerProfiles "<the person's server profiles folder>" -ClientProfiles "<the person's client profiles folder>" -Register
 ```
 
-Run the first line only if `uv` is not already on `PATH`, and use a new shell afterwards because `winget` puts `uv` on the `PATH` of new shells.
-The virtual environment is created from the real path of uv's Python rather than with `uv venv`, because the `python.exe` that `uv venv` makes is a launcher that runs from another folder: while a daemon started through it runs, any other DayZ-MCP daemon on the machine waits 30 s and exits.
-The requirements file pins the wheel and every dependency by hash, so if even one byte changes, `uv` installs nothing.
-The venv folder carries the release version (`venv-1.6` for this release), so an upgrade runs the same commands with the new version into a new folder.
+The five-step clone path in [QUICKSTART.md](QUICKSTART.md) is the same install; this guide is the short form for an agent when the Workshop item is already subscribed, so packing the addon from `P:\` is not required. Without `-ClientProfiles` the installer does not write the client's `dayz_mcp.json`.
 
-## Reading the setup JSON
+## Reading the installer result
 
-When `dayz-mcp setup --json` exits `0` with `ok: true`, give the launch details to the person:
+`install-mcp.ps1` does not print `-mod=` or `-profiles=`. After a successful install, build those arguments yourself and give them to the person.
 
-- `mod_arg` is the `-mod=` argument for both the server and the client; if the path contains spaces (the default Steam library path does), quote the whole argument (`"-mod=..."`), never just the value.
-- `server_profiles_arg` and `client_profiles_arg` are the `-profiles=` arguments whose folders contain `dayz_mcp.json`.
-- `registered` lists which MCP clients now have the server (`server_name`) registered.
-- If the server verifies signatures (`verifySignatures = 2`, the default on retail `DayZServer`), have the person copy `Keys\DayZ_MCP.bikey` from the Workshop item folder into the server's `keys` folder.
+The Workshop item lands at `<Steam>\steamapps\workshop\content\221100\3846741037` (Steam's library folder is usually `C:\Program Files (x86)\Steam`). Confirm that folder contains `Addons\DayZ_MCP.pbo`. The launch argument is `-mod=<that folder>`. If the path contains spaces, quote the whole argument (`"-mod=C:\Program Files (x86)\Steam\steamapps\workshop\content\221100\3846741037"`), never just the value. Use the same `-mod=` on the server and on the client.
 
-When `setup --json` exits `2`, `missing` lists each problem with its `code` and `remedy`; follow the `remedy` and run `setup --json` again.
+`-profiles=` is the profiles folder you passed: `-profiles=<server profiles>` on the server and `-profiles=<client profiles>` on the client. Those folders are where the installer writes `dayz_mcp.json` when you pass `-ServerProfiles` and `-ClientProfiles`.
+
+If the server verifies signatures (`verifySignatures = 2`, the default on retail `DayZServer`), have the person copy `Keys\DayZ_MCP.bikey` from the Workshop item folder into the server's `keys` folder.
+
+If you later run `.\dayz-mcp.exe setup --json` from an installed wheel, do not treat every exit code 2 as a `missing` list. Exit 2 means `ok` is not true: when `missing` is a non-empty list, each entry has a `code` and a `remedy` to follow before running the command again; when `missing` is empty, read `error` (`code`, and `remedy` when present) instead.
 
 ## Finish and verify
 
@@ -44,4 +39,10 @@ Ask the person to restart the MCP client, because the newly registered server ap
 
 ## Checking the installation later
 
-Run `dayz-mcp doctor --json` from the same `Scripts` folder to check whether the Workshop item and the wheel still match; when they do not, each finding carries a `remedy` that says what to do.
+From the `tools` directory of the clone, run doctor with the venv that the installer created:
+
+```powershell
+.\.venv-mcp\Scripts\python.exe -m dayz_mcp.doctor --daemon-policy normal --json
+```
+
+If you are in a wheel install's `Scripts` folder instead, invoke doctor as `.\dayz-mcp.exe doctor --daemon-policy normal --json`. In a clean PowerShell the `.\` prefix is required; `dayz-mcp` or `dayz-mcp.exe` without it is not found. When the Workshop item and the package still match, doctor exits 0; otherwise each finding carries a `remedy`.

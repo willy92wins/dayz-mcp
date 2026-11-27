@@ -40,6 +40,7 @@ def _fixture_client_runtime(
     with tempfile.TemporaryDirectory() as directory:
         keyfile = Path(directory) / "daemon.key"
         keyfile.write_text(config.key or "fixture-key", encoding="utf-8")
+        keyfile.chmod(0o600)
         fixture_config = replace(config, keyfile=str(keyfile.resolve()))
         launcher = str(Path(sys.executable).resolve())
         provenance = host_config.DaemonProvenance(

@@ -9,41 +9,37 @@ La caja tiene **tres** recursos distintos, no uno. Confundirlos es la causa de l
 | Recurso | Qué protege | Cómo se obtiene | Estado 2026-07-26 |
 |---|---|---|---|
 | **Lease** | mutaciones y lifecycle low-level | cola FIFO, TTL 120 s, cap 64 (`session_coordination.py:15-17`) | funciona |
-| **Run** | la instancia de DayZ (el juego) | **no tiene cola: tiene rechazo** — 1 run activo global (`process_lifecycle.py:874`) | es el cuello de botella real |
+| **Caja** | la instancia de DayZ (el juego): una sola por máquina | cola FIFO de la caja con `dayz_test_run(..., on_busy="queue")`, hasta 600 s (`server.py:784`, `session_coordination.py` `_box_queue`); sin `on_busy="queue"`, rechazo | funciona dentro de cada daemon; las colas de daemons distintos no se ven entre sí |
 | **Lecturas** | nada — no esperan | libres, sin lease (`READ_ONLY_COMMANDS`, `session_coordination.py:18-27`) | funciona |
 
 Dos consecuencias que conviene interiorizar:
 
-1. **Tener el lease no te da derecho a lanzar un run.** `dayz_test_run` espera en el FIFO del lease todo lo que haga falta (`dayz_test_tool.py:426-434`) y, ya con el lease en la mano, puede chocar contra `active_run_exists`. Esperar tu turno y ser rechazado igual es el comportamiento esperado hoy, no una avería.
+1. **Tener el lease no te da derecho a lanzar un run.** El lease y la caja son colas distintas. Para lanzar, ponte en la cola de la caja con `on_busy="queue"`; sin ella, `active_run_exists` es la respuesta esperada con la caja ocupada, no una avería.
 2. **Compartir el juego ya funciona; lo que no se comparte es el lanzamiento.** El dispatch de comandos se autoriza por el lease, no por quién lanzó el run (`loopback.py:326-333`). Si ya hay un juego vivo con los mods que necesitas, **no lances otro**: adquiere lease y trabaja sobre el que hay.
 
 Mejora planificada (run compartido con stack unión, cola para el recurso run, zonas por agente): `DayZ_MCP_dev/plans/2026-07-26-multi-agent-run-sharing-plan.md`.
 
-## Cuando `dayz_test_run` falla por un run ajeno
+## La caja está ocupada: ponte en la cola (regla de bolsillo)
 
-Síntoma exacto observado dos veces (LFPowerGrid A1 2026-07-25, A2 2026-07-26):
+1. La caja de DayZ es una por máquina. Mira `session_status()` → `box.occupied` (y `box.foreign_holder`, que nombra la instancia, el titular y el propósito del otro). Un daemon o un arnés que solo escucha en otro puerto (por ejemplo el 8797) **no** ocupa la caja. Sin un DayZ vivo la caja **no** está libre si existe `C:\tmp\caja-dayz\m1.espera`: ese fichero nunca caduca solo, y ocupa la caja hasta que una persona lo quite a mano.
+2. Si está ocupada, llama a `dayz_test_run(..., on_busy="queue")` y espera tu turno. No sondees buscando un hueco: los relevos por la cola no dejan hueco libre.
+3. Nunca mates un DayZ, nunca cierres un arnés, una sesión o un daemon ajeno y nunca borres `C:\tmp\caja-dayz\m1.espera`. Tampoco preguntes a Guillermo si cerrar lo de otro: esperar en la cola es la respuesta, salvo que el rechazo sea terminal (paso 5).
+4. Si te para `run_protected` o `m1.espera`, espera en la cola solo cuando el rechazo sea contención (paso 5). Un run abandonado lo cierra el vigilante (`idle_warden`), que viene encendido por defecto. `m1.espera` no lo quita nadie automático: nunca caduca. Un `reason="box_reserved"` con `queue_offer` nulo (por ejemplo `m1.espera` y el puerto aún retenido) es terminal: no reencoles.
+5. Clasifica cada rechazo por `error_code`, `reason` y `queue_offer`. No trates `error_code="active_run_exists"` como contención por sí solo.
+   - Contención (puedes volver a encolar; no cuenta como intento fallido): el rechazo trae una oferta FIFO accionable (`queue_offer.retry.on_busy="queue"`). Al reencolar, aplica todos los argumentos de `queue_offer.retry`, no solo `on_busy`: si la oferta trae `build=false`, `clean=false` y `pack_only=false` (p. ej. tras `reason="box_taken_during_build"`, `box_occupancy.py:653,820`), pásalos tal cual, y recalcula `wait_for_box_s` como abajo.
+   - Bloqueo terminal (no reencoles): `reason="port_in_use_foreign"` con `queue_offer` nulo; también `reason="box_reserved"` u `own_run` con oferta nula, un rechazo sin `reason` y sin oferta, o una oferta que no lleve `retry.on_busy="queue"`. La caja libre con el puerto ocupado por otro no se arregla con `wait_for_box_s`.
+   - El tiempo total de reencolado está acotado a 1800 s. En la primera llamada `dayz_test_run(..., on_busy="queue")` fija un plazo monotónico (`deadline = monotonic() + 1800`). En cada llamada, `remaining = deadline - monotonic()`. Si `remaining <= 0`, para: es terminal. Si no, pasa `wait_for_box_s=min(600, remaining)`. No pases `wait_for_box_s=0` con `on_busy="queue"`: ese 0 se interpreta como 600 s (`server.py:7813`). El plazo cubre el tiempo entre llamadas y la duración de cada una.
 
-```text
-run_id: 970b4773-...        <- NO EXISTE
-worker_failed, fase executing, ~2.4 s
-cleanup_degraded: true
-stop(970b4773-...) -> run_not_found
-```
+| error_code | reason | queue_offer | Qué hacer |
+|---|---|---|---|
+| cualquiera | `port_in_use_foreign` | `null` | Terminal. No reencolar. |
+| cualquiera | `box_reserved` | `null` | Terminal. No reencolar. |
+| cualquiera | `own_run` u otro | `null`, o sin `retry.on_busy="queue"` | Terminal. No reencolar. |
+| cualquiera | cualquiera, p. ej. `box_taken_during_build` | oferta con `retry.on_busy="queue"` | Contención. Reencolar aplicando todos los args de `queue_offer.retry` (incluidos `build`/`clean`/`pack_only=false` si vienen) y `wait_for_box_s=min(600, remaining)` hasta el plazo monotónico de 1800 s. |
 
-Léelo así:
+6. El lease hace falta para mutar en el juego y para el lifecycle low-level (adopt/reap u otra operación no cubierta por `dayz_test_run` / `dayz_test_stop`). Para parar un run, parar vía lifecycle guard con el `run_id` exacto (`dayz_test_stop(run_id)` en un run gestionado). Suéltalo al acabar y no lo retengas sin partida.
 
-- **El `run_id` devuelto es fantasma.** Se genera en el cliente antes de pedir el start (`dayz_test_worker.py:373-378`) y se devuelve aunque el start fuera rechazado antes de admisión. No lo persigas, no lo pares, no lo anotes como evidencia.
-- **`cleanup_degraded=true` aquí no significa que dejaras basura.** Viene de intentar parar un run que nunca se registró (`:431-439`).
-- **`worker_failed` oculta el motivo.** El set de códigos es cerrado y no incluye `active_run_exists` (`dayz_test_worker.py:24-38`); el motivo real sólo aparece en el audit.
-- **Los ~2,4 s son 3 intentos ciegos** del mismo rechazo determinista (`:393-402`).
-
-Qué hacer:
-
-1. `session_status` + `bridge_status` para identificar el run ajeno y su mod.
-2. **No matar, no adoptar, no reintentar en bucle.** El run ajeno pertenece a otra sesión viva.
-3. Si tu trabajo tolera el juego que ya está vivo (mismo stack de mods): trabaja sobre él con lease, sin lanzar nada.
-4. Si necesitas un stack distinto: es un bloqueo legítimo. Regístralo y pide a la sesión propietaria que pare su run exacto por `run_id`.
-5. No consumas tu presupuesto de reintentos del plan experimental con filas que no contienen datos.
+Límites conocidos (2026-11-27, consultoría de la cola): la cola vive en la memoria de cada daemon, así que LIVE, experimental y los daemons de otros arneses no ven las colas de los demás; y lo que se lanza fuera del MCP (DayZDiag sueltos, bancos de otros proyectos) no puede pedir turno. Con un DayZ ajeno vivo, `on_busy="queue"` espera igual a que salga, pero sin orden respecto a la cola del otro daemon.
 
 ## `credential_source_untrusted` / `daemon_identity_unverified`: editar el MCP desarma a los demás
 

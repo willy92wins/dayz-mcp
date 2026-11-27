@@ -16,6 +16,71 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 
+# User-facing install guides only. plans/ and reviews/ are out of scope for
+# the release-asset GET, so a stray URL there cannot hide a missing one here.
+USER_GUIDE_DOCS = ("llms-install.md", "README.md", "QUICKSTART.md")
+RELEASE_ASSET_URL_RE = re.compile(
+    r"https://github.com/willy92wins/dayz-mcp/releases/download/"
+    r"v[0-9][^/\s\"'`)]+/[A-Za-z0-9._+-]+"
+)
+UNPUBLISHED_NO_CLONE_ASSET_RE = re.compile(
+    r"https://github.com/willy92wins/dayz-mcp/releases/download/"
+    r"v[0-9][^/\s\"'`)]+/(?:dayz-mcp-requirements\.txt|[^/\s\"'`)]+\.whl)"
+)
+
+
+def collect_documented_release_asset_urls(
+    doc_texts: dict[str, str],
+) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name in USER_GUIDE_DOCS:
+        body = doc_texts.get(name, "")
+        for url in RELEASE_ASSET_URL_RE.findall(body):
+            if url in seen:
+                continue
+            seen.add(url)
+            found.append((name, url))
+    return found
+
+
+def is_offline_get_error(error: BaseException) -> bool:
+    import urllib.error
+
+    if isinstance(error, urllib.error.HTTPError):
+        return False
+    return isinstance(error, (urllib.error.URLError, TimeoutError, OSError))
+
+
+def summarize_release_asset_gets(
+    outcomes: list[tuple[str, str, int | None, Exception | None]],
+) -> tuple[int, list[str], list[str]]:
+    """Classify GET outcomes.
+
+    HTTP 403/404 are failures. A mix of HTTP 200 and a timeout is a failure
+    (the timeouts join the failure list). Offline is only when every GET
+    failed with a network or timeout error.
+    """
+    successes = 0
+    failures: list[str] = []
+    offline: list[str] = []
+    for rel, url, status, error in outcomes:
+        if error is not None:
+            if is_offline_get_error(error):
+                offline.append(f"{rel}: GET {url} -> {error}")
+            else:
+                code = getattr(error, "code", error)
+                failures.append(f"{rel}: GET {url} -> {code}")
+        elif status == 200:
+            successes += 1
+        else:
+            failures.append(f"{rel}: GET {url} -> {status}")
+    if offline and (successes or failures):
+        failures.extend(offline)
+        offline = []
+    return successes, failures, offline
+
+
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _H2_RE = re.compile(r"^##[ \t]+")
 _WORKSHOP_LINK_RE = re.compile(
@@ -206,118 +271,144 @@ class LlmsInstallDocsTest(unittest.TestCase):
             f"{len(non_empty)} non-empty lines; expected between 1 and 6",
         )
 
-    def test_versions_match_pyproject_toml(self) -> None:
-        version = _project_version()
+    def test_commands_block_is_the_clone_path(self) -> None:
+        block_text = self._commands_block_text()
+        required_tokens = (
+            "git clone https://github.com/willy92wins/dayz-mcp.git",
+            "cd dayz-mcp\\tools",
+            ".\\install-mcp.ps1",
+            "-ServerProfiles",
+            "-ClientProfiles",
+            "-Register",
+        )
+        for token in required_tokens:
+            self.assertIn(
+                token,
+                block_text,
+                f"llms-install.md '## Commands' block omits required token "
+                f"{token!r} from the clone-path recipe",
+            )
+        self.assertIsNone(
+            re.search(
+                r"https://github.com/willy92wins/dayz-mcp/releases/download/",
+                block_text,
+            ),
+            "llms-install.md '## Commands' block must not advertise a "
+            "releases/download URL until a release publishes that asset",
+        )
+        self.assertIsNone(
+            re.search(r"\buv\s+venv\b", block_text),
+            "llms-install.md '## Commands' block uses forbidden 'uv venv'",
+        )
+
+    def test_guide_does_not_sell_an_unpublished_no_clone_path(self) -> None:
+        for doc_name in USER_GUIDE_DOCS:
+            body = _read(doc_name)
+            with self.subTest(doc=doc_name):
+                self.assertIsNone(
+                    UNPUBLISHED_NO_CLONE_ASSET_RE.search(body),
+                    f"{doc_name} still advertises an unpublished wheel or "
+                    "dayz-mcp-requirements.txt download URL",
+                )
+                lowered = body.casefold()
+                self.assertNotIn("no clone.", lowered)
+                self.assertNotIn("without a clone", lowered)
+                self.assertNotIn("sin clonar", lowered)
+
+    def test_register_requires_python_311_and_native_claude_and_codex(self) -> None:
+        body = _read("llms-install.md")
+        lowered = body.casefold()
+        self.assertNotIn("codex is optional", lowered)
+        self.assertIn("Python 3.11", body)
+        self.assertIn("-Register", body)
+        self.assertIn("Claude", body)
+        self.assertIn("Codex", body)
+        self.assertIn("native", lowered)
+        self.assertIn("registration check failed for Codex", body)
+        self.assertRegex(
+            body,
+            r"-Register.{0,160}(Claude.{0,80}Codex|Codex.{0,80}Claude)"
+            r"|(Claude.{0,80}Codex|Codex.{0,80}Claude).{0,160}-Register",
+            "llms-install.md must say -Register requires both Claude and Codex",
+        )
+
+    def test_guide_documents_workshop_mod_and_client_profiles(self) -> None:
+        body = _read("llms-install.md")
+        workshop_id = _module_string_constant(
+            "tools/dayz_mcp/setup_cmd.py", "WORKSHOP_ITEM_ID"
+        )
+        self.assertIn(
+            rf"steamapps\workshop\content\221100\{workshop_id}",
+            body,
+        )
+        self.assertIn("-mod=", body)
+        self.assertIn("-profiles=", body)
+        self.assertIn("-ClientProfiles", body)
+        self.assertIn("-ClientProfiles", self._commands_block_text())
+        self.assertRegex(
+            body,
+            r"does not print.{0,40}-mod=|-mod=.{0,40}does not print",
+        )
+        self.assertRegex(
+            body,
+            r"Without `-ClientProfiles`.{0,120}dayz_mcp\.json"
+            r"|without `-ClientProfiles`.{0,120}dayz_mcp\.json",
+        )
+
+    def test_doctor_check_uses_doctor_module_and_daemon_policy(self) -> None:
+        body = _read("llms-install.md")
+        self.assertIn(
+            "-m dayz_mcp.doctor --daemon-policy normal --json",
+            body,
+        )
+        self.assertIsNone(
+            re.search(r"-m dayz_mcp doctor\b", body),
+            "llms-install.md must not invoke `python -m dayz_mcp doctor` "
+            "(that hits server.run and requires --keyfile)",
+        )
+
+    def test_changelog_1_6_does_not_promise_no_clone_install(self) -> None:
+        changelog = _read("CHANGELOG.md")
+        start = changelog.index("## [1.6]")
+        end = changelog.index("## [1.5]")
+        section = changelog[start:end].casefold()
+        self.assertNotIn("without a clone", section)
+        self.assertNotIn("from the github release with uv", section)
+
+    def test_powershell_invokes_dayz_mcp_exe_with_dot_slash(self) -> None:
         text = _read("llms-install.md")
+        self.assertIn(
+            ".\\dayz-mcp.exe",
+            text,
+            "llms-install.md must tell a clean PowerShell to invoke "
+            ".\\dayz-mcp.exe, not a bare dayz-mcp or dayz-mcp.exe",
+        )
+        bare = re.compile(r"(?m)(?:^|[;&|]\s*)dayz-mcp(?:\.exe)?\b")
+        for opener, body in _extract_fenced_blocks(
+            text.splitlines(), context="llms-install.md"
+        ):
+            if not opener.endswith("powershell"):
+                continue
+            joined = "\n".join(body)
+            self.assertIsNone(
+                bare.search(joined),
+                "a PowerShell block invokes dayz-mcp without the .\\ prefix: "
+                f"{joined!r}",
+            )
 
-        venv_versions = [
-            value.rstrip(".")
-            for value in re.findall(r"\bvenv-([^\s\"'\\/`),;:]+)", text)
-        ]
-        self.assertGreaterEqual(
-            len(venv_versions),
-            1,
-            "llms-install.md has no venv-<version> references; expected at least "
-            f"one matching tools/pyproject.toml version {version!r}",
+    def test_exit_2_is_not_always_a_missing_list(self) -> None:
+        text = _read("llms-install.md")
+        self.assertRegex(
+            text,
+            r"exit(?:s| code)? 2.{0,160}missing",
         )
-        bad_venv = [value for value in venv_versions if value != version]
-        self.assertEqual(
-            bad_venv,
-            [],
-            f"llms-install.md venv-<version> references {bad_venv!r} differ from "
-            f"tools/pyproject.toml [project].version {version!r}",
-        )
-
-        expected_tag = f"v{version}"
-        download_tags = re.findall(r"/releases/download/([^/\s\"'`]+)/", text)
-        self.assertGreaterEqual(
-            len(download_tags),
-            1,
-            "llms-install.md has no /releases/download/v<version>/ URLs; expected "
-            f"at least one matching tools/pyproject.toml tag {expected_tag!r}",
-        )
-        bad_tags = [tag for tag in download_tags if tag != expected_tag]
-        self.assertEqual(
-            bad_tags,
-            [],
-            f"llms-install.md /releases/download/.../ tags {bad_tags!r} differ "
-            f"from tools/pyproject.toml tag {expected_tag!r}",
+        self.assertRegex(
+            text,
+            r"missing.{0,120}empty.{0,80}error|error.{0,80}missing.{0,80}empty",
+            "llms-install.md must say that exit 2 with an empty missing list "
+            "is read from error, not treated as missing",
         )
 
-    def test_requirements_url_matches_make_release(self) -> None:
-        release_download_url = _module_string_constant(
-            "tools/make_release.py", "RELEASE_DOWNLOAD_URL"
-        )
-        requirements_asset_name = _module_string_constant(
-            "tools/make_release.py", "REQUIREMENTS_ASSET_NAME"
-        )
-        version = _project_version()
-        expected_url = f"{release_download_url}/v{version}/{requirements_asset_name}"
-
-        block_text = self._commands_block_text()
-        targets = re.findall(r"(?<!\S)-r\s+(\S+)", block_text)
-        self.assertGreaterEqual(
-            len(targets),
-            1,
-            "llms-install.md '## Commands' block has no '-r <url>' argument; "
-            f"expected {expected_url!r} from tools/make_release.py and "
-            "tools/pyproject.toml",
-        )
-        bad_targets = [target for target in targets if target != expected_url]
-        self.assertEqual(
-            bad_targets,
-            [],
-            f"llms-install.md '## Commands' '-r' target(s) {bad_targets!r} differ "
-            f"from tools/make_release.py + tools/pyproject.toml {expected_url!r}",
-        )
-        self.assertIsNotNone(
-            re.search(rf"(?<!\S)-r {re.escape(expected_url)}(?!\S)", block_text),
-            "llms-install.md '## Commands' block does not contain exact "
-            f"'-r {expected_url}' from tools/make_release.py and "
-            "tools/pyproject.toml",
-        )
-
-    def test_python_version_matches_requirements_lock_header(self) -> None:
-        expected_py = _lock_python_version()
-        block_text = self._commands_block_text()
-
-        install_versions = re.findall(
-            r"\buv\s+python\s+install\s+([^\s\"'`)]+)", block_text
-        )
-        self.assertGreaterEqual(
-            len(install_versions),
-            1,
-            "llms-install.md '## Commands' block has no 'uv python install <ver>'; "
-            "expected at least one matching tools/release/requirements.lock.txt "
-            f"--python-version {expected_py!r}",
-        )
-        bad_install = [ver for ver in install_versions if ver != expected_py]
-        self.assertEqual(
-            bad_install,
-            [],
-            f"llms-install.md '## Commands' 'uv python install' version(s) "
-            f"{bad_install!r} differ from tools/release/requirements.lock.txt "
-            f"--python-version {expected_py!r}",
-        )
-
-        managed_versions = re.findall(
-            r"--managed-python\s+([^\s\"'`)]+)", block_text
-        )
-        self.assertGreaterEqual(
-            len(managed_versions),
-            1,
-            "llms-install.md '## Commands' block has no '--managed-python <ver>'; "
-            "expected at least one matching tools/release/requirements.lock.txt "
-            f"--python-version {expected_py!r}",
-        )
-        bad_managed = [ver for ver in managed_versions if ver != expected_py]
-        self.assertEqual(
-            bad_managed,
-            [],
-            f"llms-install.md '## Commands' '--managed-python' version(s) "
-            f"{bad_managed!r} differ from tools/release/requirements.lock.txt "
-            f"--python-version {expected_py!r}",
-        )
 
     def test_workshop_item_id_is_digits_and_matches_all_workshop_links(self) -> None:
         workshop_id = _module_string_constant(
@@ -345,31 +436,6 @@ class LlmsInstallDocsTest(unittest.TestCase):
                 f"{doc_name} Steam Workshop link id(s) {bad_ids!r} differ from "
                 f"tools/dayz_mcp/setup_cmd.py WORKSHOP_ITEM_ID {workshop_id!r}",
             )
-
-    def test_commands_block_required_flags_and_no_uv_venv(self) -> None:
-        block_text = self._commands_block_text()
-        required_tokens = (
-            "--no-bin",
-            "--no-registry",
-            "os.path.realpath",
-            "--without-pip",
-            "--link-mode=copy",
-            "--require-hashes",
-            "setup --json",
-        )
-        for token in required_tokens:
-            self.assertIn(
-                token,
-                block_text,
-                f"llms-install.md '## Commands' block omits required token "
-                f"{token!r} from the install recipe",
-            )
-        self.assertIsNone(
-            re.search(r"\buv\s+venv\b", block_text),
-            "llms-install.md '## Commands' block uses forbidden 'uv venv'; "
-            "the recipe must invoke 'os.path.realpath(sys.executable)' with "
-            "'-m venv --without-pip'",
-        )
 
     def test_readme_and_quickstart_link_to_llms_install(self) -> None:
         self.assertTrue(
@@ -416,6 +482,219 @@ class LlmsInstallDocsTest(unittest.TestCase):
             "docs/RELEASE.md step 1 ('## 1.' to '## 2.') does not name "
             "'llms-install.md' as a file to update with tools/pyproject.toml",
         )
+
+    def test_quickstart_does_not_prescribe_v15_addon_zip_for_current_clone(self) -> None:
+        body = _read("QUICKSTART.md")
+        self.assertNotIn(
+            "DayZ_MCP-v1.5-addon.zip",
+            body,
+            "QUICKSTART must not prescribe the v1.5 addon zip for a current clone",
+        )
+        self.assertIn(
+            "https://github.com/willy92wins/dayz-mcp/releases/download/v1.5/VERSION.json",
+            body,
+        )
+        self.assertIn("git checkout v1.5", body)
+        self.assertRegex(body, r"version_mismatch|bridge_version")
+        self.assertRegex(body, r"(?i)historical")
+
+    def test_quickstart_and_readme_register_require_claude_and_codex(self) -> None:
+        for doc_name in ("QUICKSTART.md", "README.md", "llms-install.md"):
+            body = _read(doc_name)
+            with self.subTest(doc=doc_name):
+                lowered = body.casefold()
+                self.assertNotIn("codex is optional", lowered)
+                self.assertNotIn("from claude alone", lowered)
+                self.assertIn("-Register", body)
+                self.assertIn("Claude", body)
+                self.assertIn("Codex", body)
+                self.assertIn("registration check failed for Codex", body)
+
+    def _assert_register_precheck_docs(self, body: str, doc_name: str) -> None:
+        lowered = body.casefold()
+        self.assertNotIn("for the add itself", lowered)
+        self.assertNotIn("shim is fine", lowered)
+        self.assertNotIn("the printed lines run automatically", lowered)
+        self.assertNotIn("claude.cmd", body)
+        self.assertIn("pre-check", lowered)
+        self.assertIn("codex.cmd", body)
+        self.assertIn("claude.exe", body)
+        self.assertIn("codex.exe", body)
+        self.assertIn("install_mcp.py", body)
+        self.assertIn("installer_cli_not_native_exe", body)
+        self.assertRegex(
+            body,
+            r"(?s)mcp add.{0,80}(by hand|a mano|manual)"
+            r"|(by hand|a mano|manual).{0,80}mcp add",
+            f"{doc_name} must say the printed mcp add lines are only "
+            "for doing the registration by hand",
+        )
+
+    def test_register_docs_distinguish_precheck_from_native_exe(self) -> None:
+        for doc_name in ("QUICKSTART.md", "README.md"):
+            body = _read(doc_name)
+            with self.subTest(doc=doc_name):
+                self._assert_register_precheck_docs(body, doc_name)
+
+    def test_register_docs_reject_claude_cmd_precheck_and_automatic_printed_lines(self) -> None:
+        """Mutations the looser wording test accepted must now fail."""
+        precheck = r"The pre-check uses\s+`claude`\s*/\s*`codex\.cmd`"
+        for doc_name in ("QUICKSTART.md", "README.md"):
+            body = _read(doc_name)
+            self.assertRegex(body, precheck, f"{doc_name} lost the pre-check sentence")
+            with self.subTest(doc=doc_name, mutation="claude.cmd"):
+                mutated, n = re.subn(
+                    precheck,
+                    "The pre-check uses `claude.cmd` / `codex.cmd`",
+                    body,
+                    count=1,
+                )
+                self.assertEqual(n, 1)
+                with self.assertRaises(AssertionError):
+                    self._assert_register_precheck_docs(mutated, doc_name)
+            with self.subTest(doc=doc_name, mutation="automatic"):
+                mutated = body + "\nThe printed lines run automatically.\n"
+                with self.assertRaises(AssertionError):
+                    self._assert_register_precheck_docs(mutated, doc_name)
+
+    def test_documented_release_assets_return_http_200(self) -> None:
+        """Every concrete GitHub release asset URL in the user guides must exist.
+
+        The no-clone install path advertised a requirements file that returned
+        404. The test fails if the guides name no asset to check. HTTP 403/404
+        are failures; only a network or timeout error is treated as offline.
+        """
+        import urllib.error
+        import urllib.request
+
+        doc_texts = {name: _read(name) for name in USER_GUIDE_DOCS}
+        found = collect_documented_release_asset_urls(doc_texts)
+        self.assertGreater(
+            len(found),
+            0,
+            "user guides document no release asset URL to verify; the GET "
+            "must fail when it finds 0 URLs",
+        )
+
+        outcomes: list[tuple[str, str, int | None, Exception | None]] = []
+        for rel, url in found:
+            request = urllib.request.Request(
+                url,
+                method="GET",
+                headers={"User-Agent": "dayz-mcp-docs-asset-check"},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    status = getattr(response, "status", None) or response.getcode()
+                    response.read(64)
+            except urllib.error.HTTPError as error:
+                outcomes.append((rel, url, None, error))
+                continue
+            except (urllib.error.URLError, TimeoutError, OSError) as error:
+                outcomes.append((rel, url, None, error))
+                continue
+            outcomes.append((rel, url, status, None))
+
+        successes, failures, offline = summarize_release_asset_gets(outcomes)
+        if failures:
+            self.fail(
+                "documented release asset URL(s) did not return HTTP 200:\n"
+                + "\n".join(failures)
+            )
+        if offline:
+            # Only when every GET failed with a network or timeout error.
+            self.skipTest(
+                "offline: cannot GET GitHub to verify release assets: "
+                + "; ".join(offline)
+            )
+
+
+class DocumentedReleaseAssetGetHelpersTest(unittest.TestCase):
+    def test_zero_urls_is_a_failure_not_a_pass(self) -> None:
+        found = collect_documented_release_asset_urls(
+            {name: "no asset URLs here" for name in USER_GUIDE_DOCS}
+        )
+        self.assertEqual(found, [])
+
+    def test_collects_urls_only_from_user_guides(self) -> None:
+        self.assertEqual(
+            USER_GUIDE_DOCS,
+            ("llms-install.md", "README.md", "QUICKSTART.md"),
+        )
+        self.assertNotIn("plans/", USER_GUIDE_DOCS)
+        self.assertNotIn("reviews/", USER_GUIDE_DOCS)
+        url = (
+            "https://github.com/willy92wins/dayz-mcp/releases/download/"
+            "v1.5/DayZ_MCP-v1.5-addon.zip"
+        )
+        found = collect_documented_release_asset_urls(
+            {
+                "QUICKSTART.md": f"see {url}",
+                "plans/secret.md": "https://github.com/willy92wins/dayz-mcp/"
+                "releases/download/v1.6/dayz-mcp-requirements.txt",
+                "reviews/note.md": "https://github.com/willy92wins/dayz-mcp/"
+                "releases/download/v0.0/ignored.whl",
+            }
+        )
+        self.assertEqual(found, [("QUICKSTART.md", url)])
+
+    def test_http_403_and_404_are_not_offline(self) -> None:
+        import urllib.error
+
+        for code in (403, 404):
+            error = urllib.error.HTTPError(
+                url="https://example.invalid/asset",
+                code=code,
+                msg="gone",
+                hdrs=None,
+                fp=None,
+            )
+            with self.subTest(code=code):
+                self.assertFalse(is_offline_get_error(error))
+                self.assertIsInstance(error, urllib.error.URLError)
+
+    def test_network_and_timeout_errors_are_offline(self) -> None:
+        import urllib.error
+
+        self.assertTrue(
+            is_offline_get_error(urllib.error.URLError("name or service not known"))
+        )
+        self.assertTrue(is_offline_get_error(TimeoutError("timed out")))
+
+    def test_mixed_200_and_timeout_is_a_failure(self) -> None:
+        successes, failures, offline = summarize_release_asset_gets(
+            [
+                ("QUICKSTART.md", "https://example.invalid/a", 200, None),
+                (
+                    "QUICKSTART.md",
+                    "https://example.invalid/b",
+                    None,
+                    TimeoutError("timed out"),
+                ),
+            ]
+        )
+        self.assertEqual(successes, 1)
+        self.assertTrue(
+            failures,
+            "a mix of HTTP 200 and a timeout must be a failure, not a pass or skip",
+        )
+        self.assertEqual(offline, [])
+
+    def test_all_timeouts_stay_offline(self) -> None:
+        successes, failures, offline = summarize_release_asset_gets(
+            [
+                (
+                    "QUICKSTART.md",
+                    "https://example.invalid/a",
+                    None,
+                    TimeoutError("timed out"),
+                )
+            ]
+        )
+        self.assertEqual(successes, 0)
+        self.assertEqual(failures, [])
+        self.assertEqual(len(offline), 1)
+
 
 
 if __name__ == "__main__":

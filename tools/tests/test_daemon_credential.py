@@ -106,6 +106,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text(first_key + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             provider = credential_module.RefreshingDaemonCredential(
                 policy=_policy(keyfile),
                 request_fn=request,
@@ -114,6 +115,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
                 self.assertNotIn(secret, repr(provider))
                 self.assertNotIn(secret, repr(provider._snapshot))
             keyfile.write_text(second_key + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
 
             status, body = provider.request_with_refresh(
                 method="POST",
@@ -168,11 +170,13 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text(first_key + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             provider = credential_module.RefreshingDaemonCredential(
                 policy=_policy(keyfile),
                 request_fn=request,
             )
             keyfile.write_text(second_key + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
 
             result = provider.request_with_refresh(
                 method="POST",
@@ -224,6 +228,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-credential\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             provider = credential_module.RefreshingDaemonCredential(
                 policy=_policy(keyfile),
                 request_fn=request,
@@ -286,6 +291,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-credential\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", revalidate)
             provider = credential_module.RefreshingDaemonCredential(
@@ -326,6 +332,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-credential\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             provider = credential_module.RefreshingDaemonCredential(
                 policy=_policy(keyfile),
                 request_fn=request,
@@ -366,6 +373,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-credential\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             provider = credential_module.RefreshingDaemonCredential(
                 policy=_policy(keyfile),
                 request_fn=request,
@@ -405,6 +413,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-credential\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             provider = credential_module.RefreshingDaemonCredential(
                 policy=_policy(keyfile),
                 request_fn=request,
@@ -441,10 +450,12 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
                 "fixture-credential-a\n",
                 encoding="utf-8",
             )
+            original_keyfile.chmod(0o600)
             unexpected_keyfile.write_text(
                 "fixture-credential-b\n",
                 encoding="utf-8",
             )
+            unexpected_keyfile.chmod(0o600)
             provider = credential_module.RefreshingDaemonCredential(
                 policy=_policy(original_keyfile),
                 request_fn=request,
@@ -487,6 +498,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
                 "fixture-credential\n",
                 encoding="utf-8",
             )
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             provider = credential_module.RefreshingDaemonCredential(
                 policy=policy,
@@ -548,6 +560,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
                         "fixture-credential-a\n",
                         encoding="utf-8",
                     )
+                    keyfile.chmod(0o600)
                     provider = credential_module.RefreshingDaemonCredential(
                         policy=_policy(keyfile),
                         request_fn=request,
@@ -557,6 +570,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
                             "fixture-credential-b\n",
                             encoding="utf-8",
                         )
+                        keyfile.chmod(0o600)
 
                     with self.assertRaises(
                         credential_module.CredentialRefreshError
@@ -596,6 +610,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
                 "fixture-credential-a\n",
                 encoding="utf-8",
             )
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", revalidate)
             provider = credential_module.RefreshingDaemonCredential(
@@ -646,6 +661,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
                 "fixture-credential-a\n",
                 encoding="utf-8",
             )
+            keyfile.chmod(0o600)
             provider = credential_module.RefreshingDaemonCredential(
                 policy=_policy(keyfile),
                 request_fn=request,
@@ -701,6 +717,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
                 "fixture-credential-a\n",
                 encoding="utf-8",
             )
+            keyfile.chmod(0o600)
             provider = credential_module.RefreshingDaemonCredential(
                 policy=_policy(keyfile),
                 request_fn=request,
@@ -709,6 +726,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
                 "fixture-credential-b\n",
                 encoding="utf-8",
             )
+            keyfile.chmod(0o600)
 
             try:
                 provider.request_with_refresh(
@@ -755,6 +773,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
                 "fixture-credential\n",
                 encoding="utf-8",
             )
+            keyfile.chmod(0o600)
             provider = credential_module.RefreshingDaemonCredential(
                 policy=_policy(keyfile),
                 request_fn=request,
@@ -812,6 +831,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
                         "fixture-credential-a\n",
                         encoding="utf-8",
                     )
+                    keyfile.chmod(0o600)
                     provider = credential_module.RefreshingDaemonCredential(
                         policy=_policy(keyfile),
                         request_fn=request,
@@ -821,6 +841,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
                             "fixture-credential-b\n",
                             encoding="utf-8",
                         )
+                        keyfile.chmod(0o600)
                     with self.assertRaises(
                         credential_module.CredentialRefreshError
                     ) as raised:
@@ -869,6 +890,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-credential\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", revalidate)
             provider = credential_module.RefreshingDaemonCredential(
@@ -917,11 +939,13 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text(first_key + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             provider = credential_module.RefreshingDaemonCredential(
                 policy=_policy(keyfile),
                 request_fn=request,
             )
             keyfile.write_text(second_key + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             real_reader = (
                 credential_module.pinned_keyfile.read_pinned_keyfile
             )
@@ -975,12 +999,14 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text(first_key + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
 
             def request(**kwargs: object) -> tuple[int, bytes]:
                 supplied = str(kwargs["key"])
                 calls.append(supplied)
                 if supplied == second_key and calls.count(second_key) == 1:
                     keyfile.write_text(third_key + "\n", encoding="utf-8")
+                    keyfile.chmod(0o600)
                 if supplied == third_key:
                     return 200, b'{"status":"ok"}'
                 return 401, b'{"error":"unauthorized"}'
@@ -990,6 +1016,7 @@ class RefreshingDaemonCredentialTests(unittest.TestCase):
                 request_fn=request,
             )
             keyfile.write_text(second_key + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
 
             with self.assertRaisesRegex(
                 credential_module.CredentialRefreshError,

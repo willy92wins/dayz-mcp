@@ -237,10 +237,15 @@ exception is driving: a PHYSICS car only moves from its owning client, so
 
 ## Install
 
-Without a clone: subscribe to the [DayZ-MCP Workshop item](https://steamcommunity.com/sharedfiles/filedetails/?id=3846741037) and follow [llms-install.md](llms-install.md), written for an AI agent. The rest of this section installs from a clone.
+An AI agent can follow [llms-install.md](llms-install.md), which installs from a clone until a GitHub release publishes the wheel and `dayz-mcp-requirements.txt`. The rest of this section is that clone path.
 
-The usual installer does not need a CLI pin. It registers by calling
-`claude mcp add` / `codex.cmd mcp add` directly, so an npm `.cmd` shim is fine:
+`.\install-mcp.ps1 -Register` requires both Claude Code and Codex (Python 3.11+ too). The pre-check uses
+`claude` / `codex.cmd` and refuses with `registration check failed for Codex:
+command missing` (or the Claude equivalent) if either is absent; it does not
+register Claude alone. Registration then calls `install_mcp.py` with native
+`claude.exe` / `codex.exe`; without those you get `installer_cli_not_native_exe`.
+The printed `claude mcp add` / `codex.cmd mcp add` lines are only for doing it
+by hand (`tools/install-mcp.ps1`).
 
 ```powershell
 cd tools
@@ -248,9 +253,7 @@ cd tools
 ```
 
 It creates `tools\.venv-mcp`, installs the pinned dependencies plus this package,
-generates an API key, and writes the client configuration. `-Register` also
-registers the server with your MCP client when `dayz-mcp` is not already
-registered.
+generates an API key, and writes the client configuration.
 
 The hardened Python path is different: `python install_mcp.py --register` talks
 only to native x64 `claude.exe` / `codex.exe` recorded on this machine. Pin those

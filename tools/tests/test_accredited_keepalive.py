@@ -409,6 +409,7 @@ class KeepaliveTransportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-credential\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             provider = RefreshingDaemonCredential(
                 policy=_policy(keyfile),
                 request_fn=None,
@@ -501,6 +502,7 @@ class KeepaliveTransportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-credential\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             calls: list[str] = []
 
             def reject_second(connection: _Connection) -> None:
@@ -537,6 +539,7 @@ class KeepaliveTransportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-credential\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             attempts = {"n": 0}
 
             def factory(_host: str, _port: int, _timeout: float) -> _Connection:

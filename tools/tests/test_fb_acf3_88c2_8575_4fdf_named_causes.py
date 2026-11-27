@@ -209,6 +209,7 @@ def _raised_refresh_error(
     with tempfile.TemporaryDirectory() as temporary:
         keyfile = Path(temporary) / "daemon.key"
         keyfile.write_text("fixture-credential\n", encoding="utf-8")
+        keyfile.chmod(0o600)
         provider = daemon_credential.RefreshingDaemonCredential(
             policy=_daemon_policy(keyfile), request_fn=request
         )
@@ -402,6 +403,7 @@ class ReaccreditationCarrierTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = _control(keyfile)
             with patch.object(
                 control_client.transport,
@@ -453,6 +455,7 @@ class ReaccreditationCarrierTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             runtime = object.__new__(server.ClientRuntime)
             runtime._control = _control(keyfile)
             runtime._ensure_daemon = lambda *_args: spawns.append("spawn") or True
@@ -472,6 +475,7 @@ class ReaccreditationCarrierTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             runtime = object.__new__(server.ClientRuntime)
             runtime._credential_provider = daemon_credential.RefreshingDaemonCredential(
                 policy=_daemon_policy(keyfile), request_fn=request
@@ -492,6 +496,7 @@ class ReaccreditationCarrierTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             runtime = object.__new__(server.ClientRuntime)
             runtime._probe = None
             runtime._credential_provider = daemon_credential.RefreshingDaemonCredential(
@@ -629,6 +634,7 @@ class DoctorFailedCheckTest(unittest.TestCase):
         )
         keyfile = self.root / "daemon.key"
         keyfile.write_text("fixture-key\n", encoding="utf-8")
+        keyfile.chmod(0o600)
         with patch.object(
             doctor, "default_sources", side_effect=RuntimeError(str(keyfile))
         ):
@@ -849,6 +855,7 @@ class DaemonPythonNotApprovedTest(unittest.TestCase):
             )
             keyfile = base / "fixture.key"
             keyfile.write_text("fixture-key", encoding="ascii")
+            keyfile.chmod(0o600)
             environment = os.environ.copy()
             environment["LOCALAPPDATA"] = str(base / "local")
             environment["PYTHONPATH"] = str(_DAEMON_FIXTURE_SITE)
