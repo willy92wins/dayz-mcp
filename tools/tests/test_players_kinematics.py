@@ -1891,7 +1891,8 @@ class PlayersKinematicsToolTest(unittest.IsolatedAsyncioTestCase):
         for fragment in (
             "include_unverified",
             "server's heading for the player, not the client camera",
-            "mouse movement or free look",
+            "measured in game on 2026-11-27 through players_visibility",
+            "free look (holding Alt) does not move it",
             "PhysicsIsFalling(false)",
             "not grounded",
             "vanilla DayZ 1.30 has no parachute",
