@@ -44,4 +44,4 @@ Ask the person to restart the MCP client, because the newly registered server ap
 
 ## Checking the installation later
 
-Run `dayz-mcp doctor --json` from the same `Scripts` folder to check whether the Workshop item and the wheel still match; if they do not, it prints the command that fixes it.
+Run `dayz-mcp doctor --json` from the same `Scripts` folder to check whether the Workshop item and the wheel still match; when they do not, each finding carries a `remedy` that says what to do.
