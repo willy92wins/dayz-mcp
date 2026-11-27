@@ -2057,7 +2057,18 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "classname": _is_non_empty_string,
                 "dest": _one_of("hands", "inventory"),
             },
-        )
+        ),
+        _schema_variant(
+            required=("classname", "dest", "ammo", "ammo_set"),
+            optional=("uid",),
+            validators={
+                "uid": _is_string,
+                "classname": _is_non_empty_string,
+                "dest": _one_of("hands", "inventory"),
+                "ammo": _integer_in_range(minimum=0),
+                "ammo_set": _is_true,
+            },
+        ),
     ),
     "inventory_attach": _command_schema(
         _schema_variant(

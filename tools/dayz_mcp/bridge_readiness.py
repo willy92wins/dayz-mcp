@@ -283,6 +283,10 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "bot_start": ("action", "bot_ttl_s", "object_id"),
     "bot_stop": ("object_id",),
     "hands_attach": ("object_id", "slot", "uid"),
+    # inventory_give joins for ammo (3b83): an older bridge reads the command
+    # without ammo and creates an empty magazine; only this hash tells it
+    # from this one.
+    "inventory_give": ("ammo", "ammo_set", "classname", "dest", "uid"),
     "loadout_apply": ("loadout_items", "object_id", "uid"),
     "loadout_clear": ("object_id", "uid"),
     "loadout_get": ("object_id", "uid"),

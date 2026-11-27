@@ -477,6 +477,7 @@ class ArgContractHashTest(unittest.TestCase):
             "bot_start=action,bot_ttl_s,object_id\n"
             "bot_stop=object_id\n"
             "hands_attach=object_id,slot,uid\n"
+            "inventory_give=ammo,ammo_set,classname,dest,uid\n"
             "loadout_apply=loadout_items,object_id,uid\n"
             "loadout_clear=object_id,uid\n"
             "loadout_get=object_id,uid\n"
@@ -498,7 +499,7 @@ class ArgContractHashTest(unittest.TestCase):
             "world_spawn_batch=items,scene_id",
         )
         self.assertEqual(
-            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "2ec297a794473200"
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "d8a199f4d30470f1"
         )
         self.assertEqual(
             server_module.server_arg_contract_hash(),

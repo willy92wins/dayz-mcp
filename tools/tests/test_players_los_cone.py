@@ -78,8 +78,8 @@ MESSAGES_PATH = SCRIPTS / "5_Mission" / "MCPMessages.c"
 CENSUS_FIXTURE = (
     Path(__file__).resolve().parent / "fixtures" / "bridge_capabilities_v1.json"
 )
-PREVIOUS_ACH = "3b7a1b143153de71"
-NEW_ACH = "2ec297a794473200"
+PREVIOUS_ACH = "c282097c3d1855ba"
+NEW_ACH = "d8a199f4d30470f1"
 WIRE_KEYS = {"uids", "radius", "half_yaw_deg"}
 
 PREVIOUS_50_SERVER_BITS: tuple[str, ...] = (

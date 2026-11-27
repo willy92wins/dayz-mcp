@@ -98,7 +98,7 @@ class MCPBridge : Managed
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "2ec297a794473200";
+	protected const string SERVER_ARG_CONTRACT_HASH = "d8a199f4d30470f1";
 
 	// Extension hooks (expansion-ai-adapter plan 2.1): no Expansion types and
 	// no ifdef here, so the base PBO compiles and polls byte-identically
@@ -1279,6 +1279,28 @@ class MCPBridge : Managed
 				return true;
 			}
 		}
+		InventoryLocation originLoc = new InventoryLocation;
+		bool originRead = false;
+		if (item.GetInventory())
+		{
+			originRead = item.GetInventory().GetCurrentInventoryLocation(originLoc);
+		}
+		if (originRead)
+		{
+			if (op == "to_cargo" || op == "to_attachment" || op == "to_hands" || op == "to_inventory")
+			{
+				MCPJob destinationJob = new MCPJob();
+				destinationJob.args = command.args;
+				destinationJob.actor = player;
+				destinationJob.move_target = target;
+				if (MCPInventoryMoveAtDestination(destinationJob, item, originLoc, op == "to_inventory"))
+				{
+					result.ok = false;
+					result.error = "already_at_destination";
+					return true;
+				}
+			}
+		}
 		string roomError = MCPInventoryMoveRoom(player, item, target, op, command.args.slot);
 		if (roomError != "")
 		{
@@ -1305,6 +1327,15 @@ class MCPBridge : Managed
 		job.tick_poll_sent = result.tick_poll_sent;
 		job.tick_poll_callback = result.tick_poll_callback;
 		job.tick_dispatch = result.tick_dispatch;
+		job.move_origin_type = -1;
+		job.move_origin_parent = null;
+		job.move_origin_slot = -1;
+		if (originRead)
+		{
+			job.move_origin_type = originLoc.GetType();
+			job.move_origin_parent = originLoc.GetParent();
+			job.move_origin_slot = originLoc.GetSlot();
+		}
 		string performError = "";
 		bool clientRpc = false;
 		if (authority == "server")
@@ -1746,6 +1777,103 @@ class MCPBridge : Managed
 		return "bad_args";
 	}
 
+	// The destination test shared by the dispatch refusal and the later
+	// confirmation. With stowedOnly, to_inventory does not count the hands:
+	// an item in the hands is not stowed yet, and the move takes it out of
+	// them. Without it, ANY includes HANDS, as the confirmation reads it.
+	protected bool MCPInventoryMoveAtDestination(MCPJob job, EntityAI item, InventoryLocation loc, bool stowedOnly)
+	{
+		if (!job || !job.args || !item || !loc)
+		{
+			return false;
+		}
+		string op = job.args.op;
+		int locType = loc.GetType();
+		EntityAI parent = loc.GetParent();
+		if (op == "to_cargo")
+		{
+			if (parent != EntityAI.Cast(job.move_target))
+			{
+				return false;
+			}
+			if (locType == InventoryLocationType.CARGO)
+			{
+				return true;
+			}
+			if (locType == InventoryLocationType.PROXYCARGO)
+			{
+				return true;
+			}
+			return false;
+		}
+		if (op == "to_attachment")
+		{
+			if (parent != EntityAI.Cast(job.move_target))
+			{
+				return false;
+			}
+			if (locType != InventoryLocationType.ATTACHMENT)
+			{
+				return false;
+			}
+			string slotName = InventorySlots.GetSlotName(loc.GetSlot());
+			if (slotName != job.args.slot)
+			{
+				return false;
+			}
+			return true;
+		}
+		if (op == "to_hands")
+		{
+			if (locType != InventoryLocationType.HANDS)
+			{
+				return false;
+			}
+			if (parent != job.actor)
+			{
+				return false;
+			}
+			return true;
+		}
+		if (op == "to_inventory")
+		{
+			if (stowedOnly && locType == InventoryLocationType.HANDS)
+			{
+				return false;
+			}
+			if (locType == InventoryLocationType.GROUND)
+			{
+				return false;
+			}
+			Man root = item.GetHierarchyRootPlayer();
+			if (root != job.actor)
+			{
+				return false;
+			}
+			return true;
+		}
+		return false;
+	}
+
+	// True when the current location differs from the origin kept at
+	// dispatch, in type, parent or slot.
+	protected bool MCPInventoryMoveOriginDiffers(MCPJob job, InventoryLocation loc)
+	{
+		if (loc.GetType() != job.move_origin_type)
+		{
+			return true;
+		}
+		if (loc.GetParent() != job.move_origin_parent)
+		{
+			return true;
+		}
+		if (loc.GetSlot() != job.move_origin_slot)
+		{
+			return true;
+		}
+		return false;
+	}
+
 	protected bool MCPInventoryMoveReady(MCPJob job)
 	{
 		if (!job || !job.args)
@@ -1795,76 +1923,45 @@ class MCPBridge : Managed
 		{
 			return false;
 		}
-		int locType = loc.GetType();
-		EntityAI parent = loc.GetParent();
 		// to_cargo, to_attachment and combine ignore job.actor. Resolving a
 		// player for a rooted item does not change these three verdicts.
+		// Confirmed needs the item at the destination and no longer where
+		// it was at dispatch: an item that stayed where it was, in the
+		// hands or anywhere, is not confirmed.
 		if (op == "to_cargo")
 		{
-			if (parent != job.move_target)
+			if (!MCPInventoryMoveAtDestination(job, item, loc, false))
 			{
 				return false;
 			}
-			if (locType == InventoryLocationType.CARGO)
-			{
-				return true;
-			}
-			if (locType == InventoryLocationType.PROXYCARGO)
-			{
-				return true;
-			}
-			return false;
+			return MCPInventoryMoveOriginDiffers(job, loc);
 		}
 		if (op == "to_attachment")
 		{
-			if (parent != job.move_target)
+			if (!MCPInventoryMoveAtDestination(job, item, loc, false))
 			{
 				return false;
 			}
-			if (locType != InventoryLocationType.ATTACHMENT)
-			{
-				return false;
-			}
-			string slotName = InventorySlots.GetSlotName(loc.GetSlot());
-			if (slotName != job.args.slot)
-			{
-				return false;
-			}
-			return true;
+			return MCPInventoryMoveOriginDiffers(job, loc);
 		}
 		if (op == "to_hands")
 		{
-			if (locType != InventoryLocationType.HANDS)
+			if (!MCPInventoryMoveAtDestination(job, item, loc, false))
 			{
 				return false;
 			}
-			if (parent != job.actor)
-			{
-				return false;
-			}
-			return true;
+			return MCPInventoryMoveOriginDiffers(job, loc);
 		}
 		if (op == "to_inventory")
 		{
-			// ANY includes HANDS, so a move into this player's hands is confirmed.
-			if (locType == InventoryLocationType.HANDS)
-			{
-				if (parent == job.actor)
-				{
-					return true;
-				}
-				return false;
-			}
-			if (locType == InventoryLocationType.GROUND)
+			// ANY includes HANDS, so a move from elsewhere into this
+			// player's hands is confirmed; an item that is still where
+			// it was, in the hands or anywhere, is not.
+			if (!MCPInventoryMoveAtDestination(job, item, loc, false))
 			{
 				return false;
 			}
-			Man root = item.GetHierarchyRootPlayer();
-			if (root != job.actor)
-			{
-				return false;
-			}
-			return true;
+			return MCPInventoryMoveOriginDiffers(job, loc);
 		}
 		return false;
 	}
@@ -4844,6 +4941,28 @@ class MCPBridge : Managed
 			return true;
 		}
 
+		if (command.args.ammo_set)
+		{
+			if (command.args.ammo < 0)
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+			if (!GetGame().ConfigIsExisting("CfgMagazines " + command.args.classname))
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+			if (command.args.ammo > GetGame().ConfigGetInt("CfgMagazines " + command.args.classname + " count"))
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+		}
+
 		string resolveError = "";
 		PlayerBase player = ResolvePlayer(command.args, resolveError);
 		if (!player)
@@ -4875,6 +4994,15 @@ class MCPBridge : Managed
 			result.ok = false;
 			result.error = "create_failed";
 			return true;
+		}
+
+		if (command.args.ammo_set)
+		{
+			Magazine mag = Magazine.Cast(spawned);
+			if (mag)
+			{
+				mag.ServerSetAmmoCount(command.args.ammo);
+			}
 		}
 
 		// Same map and key as world_spawn (command id). This id is the created
@@ -8095,9 +8223,7 @@ class MCPBridge : Managed
 			return validation;
 		}
 
-		string cfgPath = "CfgVehicles ";
-		cfgPath = cfgPath + args.type;
-		if (!GetGame().ConfigIsExisting(cfgPath))
+		if (!IsKnownInventoryClassname(args.type))
 		{
 			validation.error = "unknown_type";
 			return validation;
