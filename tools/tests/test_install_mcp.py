@@ -10,12 +10,13 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import unicodedata
 import unittest
 from ctypes import wintypes
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -3280,6 +3281,1201 @@ if ($Mode -eq 'replace') {
 }
 'PASS'
 '''
+
+
+class ClaudeOnlyAndPosixPythonTest(unittest.TestCase):
+    """Issue #422: POSIX venv python paths and Claude-only pinning/registration."""
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.security = self.root / "security"
+        self.security.mkdir()
+        self.local_appdata = self.root / "LocalAppData"
+        self.local_appdata.mkdir()
+        self.claude = self.root / "claude.exe"
+        write_fake_x64_pe(self.claude)
+        self.venv_python = self.root / "venv" / "Scripts" / "python.exe"
+        self.venv_python.parent.mkdir(parents=True)
+        write_fake_x64_pe(self.venv_python)
+        self.env = patch.dict(
+            os.environ,
+            {
+                "DAYZ_MCP_SECURITY_DIR": str(self.security),
+                "LOCALAPPDATA": str(self.local_appdata),
+                "USERPROFILE": str(self.home),
+                "HOME": str(self.home),
+            },
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def test_validate_python_executable_posix_accepts_venv_bin_python_and_python3(
+        self,
+    ) -> None:
+        bin_dir = self.root / "posix-venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        py = bin_dir / "python"
+        py3 = bin_dir / "python3"
+        py311 = bin_dir / "python3.11"
+        scripts_py = self.root / "posix-venv" / "Scripts" / "python"
+        scripts_py.parent.mkdir(parents=True)
+        for path in (py, py3, py311, scripts_py):
+            path.write_bytes(b"#!/bin/sh\n")
+
+        with patch.object(installer, "_is_windows_host", return_value=False):
+            self.assertEqual(installer._validate_python_executable(py), py)
+            self.assertEqual(installer._validate_python_executable(py3), py3)
+            # #422 Linux installer: python3.N is accepted on POSIX too (Debian's python3.13).
+            self.assertEqual(installer._validate_python_executable(py311), py311)
+            for bad in (scripts_py, Path("bin/python")):
+                with self.subTest(bad=str(bad)):
+                    with self.assertRaises(InstallerContractError) as raised:
+                        installer._validate_python_executable(bad)
+                    self.assertEqual(raised.exception.code, "python_path_not_exact")
+
+    def test_validate_python_executable_windows_rejects_bin_python(self) -> None:
+        bin_py = self.root / "win-venv" / "bin" / "python"
+        bin_py.parent.mkdir(parents=True)
+        bin_py.write_bytes(b"#!/bin/sh\n")
+        with patch.object(installer, "_is_windows_host", return_value=True):
+            with self.assertRaises(InstallerContractError) as raised:
+                installer._validate_python_executable(bin_py)
+        self.assertEqual(raised.exception.code, "python_path_not_exact")
+
+    def test_pin_and_register_claude_only_when_no_codex_cli_and_no_config(self) -> None:
+        with patch.object(installer.shutil, "which", return_value=None):
+            entries = pin_installer_clis(
+                claude_exe=self.claude,
+                runner=absent_probe_runner,
+            )
+        self.assertEqual([entry.role for entry in entries], ["CLAUDE"])
+        manifest_raw = json.loads(
+            installer_cli_manifest_path().read_text(encoding="utf-8")
+        )
+        self.assertIsNone(manifest_raw["entries"]["CODEX"])
+        manifest = load_installer_cli_manifest(installer_cli_manifest_path())
+        self.assertEqual(set(manifest.entries), {"CLAUDE"})
+        fixtures = load_installer_not_found_fixtures(
+            installer_not_found_fixtures_path(),
+            installer_cli_manifest_path(),
+        )
+        self.assertEqual(set(fixtures.entries), {"CLAUDE"})
+
+        options = parse_args(["--register"], tools_root=self.root)
+        captured: list[tuple[object, dict[str, RegistrationSpec], dict[str, object]]] = []
+
+        def fake_transaction(
+            provider: object, desired: dict[str, RegistrationSpec], **kwargs: object
+        ) -> None:
+            captured.append((provider, desired, kwargs))
+
+        with (
+            patch.object(installer, "run_runs_backup_gate", return_value={"status": "verified"}),
+            patch.object(installer, "register_transaction", side_effect=fake_transaction),
+        ):
+            installer.register_clients(
+                options, self.venv_python, runner=absent_probe_runner
+            )
+        self.assertEqual(len(captured), 1)
+        _provider, desired, kwargs = captured[0]
+        self.assertEqual(set(desired), {"CLAUDE"})
+        self.assertEqual(kwargs["host_configs"], (self.home / ".claude.json",))
+
+        # Transaction + host timeout write + crash recovery work for Claude alone.
+        claude_json = self.home / ".claude.json"
+        spec = desired["CLAUDE"]
+        claude_json.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "dayz-mcp": {
+                            "type": "stdio",
+                            "command": str(spec.command),
+                            "args": list(spec.arguments),
+                        }
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        class _ClaudeOnlyProvider:
+            def __init__(self) -> None:
+                self.current: RegistrationSpec | None = None
+
+            def get(self, role: str) -> RegistrationSpec | None:
+                if role != "CLAUDE":
+                    raise AssertionError(f"unexpected role {role}")
+                return self.current
+
+            def remove(self, role: str) -> None:
+                if role != "CLAUDE":
+                    raise AssertionError(f"unexpected role {role}")
+                self.current = None
+
+            def add(self, role: str, value: RegistrationSpec) -> None:
+                if role != "CLAUDE":
+                    raise AssertionError(f"unexpected role {role}")
+                self.current = value
+
+        provider = _ClaudeOnlyProvider()
+        journal_root = self.root / "reg-journal"
+        host_journal_root = self.root / "host-journal"
+        register_transaction(
+            provider,
+            {"CLAUDE": spec},
+            host_configs=(claude_json,),
+            journal_root=journal_root,
+            host_journal_root=host_journal_root,
+        )
+        self.assertEqual(provider.current, spec)
+        updated = json.loads(claude_json.read_text(encoding="utf-8"))
+        self.assertEqual(
+            updated["mcpServers"]["dayz-mcp"]["timeout"], installer.CLAUDE_TIMEOUT_MS
+        )
+        self.assertFalse((self.home / ".codex").exists())
+
+    def test_pin_and_register_error_when_no_codex_cli_but_config_toml_exists(
+        self,
+    ) -> None:
+        codex_config = self.home / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text("", encoding="utf-8")
+        with patch.object(installer.shutil, "which", return_value=None):
+            with self.assertRaises(InstallerContractError) as pin_raised:
+                pin_installer_clis(
+                    claude_exe=self.claude,
+                    runner=absent_probe_runner,
+                )
+        self.assertEqual(pin_raised.exception.code, "installer_cli_missing")
+
+        # If pinned Claude-only earlier and config.toml appears later, register errors.
+        codex_config.unlink()
+        with patch.object(installer.shutil, "which", return_value=None):
+            pin_installer_clis(
+                claude_exe=self.claude,
+                runner=absent_probe_runner,
+            )
+        codex_config.write_text("", encoding="utf-8")
+        options = parse_args(["--register"], tools_root=self.root)
+        with self.assertRaises(InstallerContractError) as reg_raised:
+            installer.register_clients(
+                options, self.venv_python, runner=absent_probe_runner
+            )
+        self.assertEqual(reg_raised.exception.code, "installer_cli_missing")
+
+
+class PosixInstallerRound3Test(unittest.TestCase):
+    """Issue #422 round 3: POSIX install_runtime and --pin-clis resolution."""
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+
+    def _make_tools_root(self, *, with_psutil_vendor: bool) -> Path:
+        tools_root = self.root / "tools"
+        tools_root.mkdir(exist_ok=True)
+        (tools_root / "requirements-mcp.txt").write_text(
+            "mcp==1.27.2\nPillow==12.2.0\npsutil==7.2.2\n",
+            encoding="utf-8",
+        )
+        (tools_root / "pyproject.toml").write_text(
+            "[build-system]\nrequires=[]\n",
+            encoding="utf-8",
+        )
+        if with_psutil_vendor:
+            vendor = tools_root / "vendor" / "psutil"
+            vendor.mkdir(parents=True, exist_ok=True)
+            wheel_name = "psutil-7.2.2-cp37-abi3-win_amd64.whl"
+            source_vendor = TOOLS_DIR / "vendor" / "psutil"
+            shutil.copyfile(source_vendor / wheel_name, vendor / wheel_name)
+            shutil.copyfile(
+                source_vendor / "SHA256SUMS.json",
+                vendor / "SHA256SUMS.json",
+            )
+        return tools_root
+
+    def test_install_runtime_posix_uses_venv_copies_and_skips_psutil_wheel(
+        self,
+    ) -> None:
+        tools_root = self._make_tools_root(with_psutil_vendor=False)
+        base_python = self.root / "base" / "bin" / "python3"
+        base_python.parent.mkdir(parents=True)
+        # The POSIX base interpreter must now be an executable ELF file.
+        _write_fake_elf(base_python)
+        base_python.chmod(0o755)
+        options = parse_args(["--port", "18765"], tools_root=tools_root)
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def runner(argv: list[str], **kwargs: object) -> object:
+            calls.append((list(argv), dict(kwargs)))
+            if argv[1:3] == ["-m", "venv"]:
+                venv_python = Path(argv[-1]) / "bin" / "python"
+                venv_python.parent.mkdir(parents=True)
+                venv_python.write_bytes(b"#!/bin/sh\n")
+            return type(
+                "Completed",
+                (),
+                {"returncode": 0, "stdout": "", "stderr": ""},
+            )()
+
+        with (
+            patch.object(installer, "_is_windows_host", return_value=False),
+            patch.object(
+                installer,
+                "_verified_psutil_wheel",
+                side_effect=AssertionError("must not verify Windows psutil wheel on POSIX"),
+            ),
+            PosixInstallerRound4Test._posix_mode_ctx(base_python, {base_python: 0o755}),
+        ):
+            summary = install_runtime(
+                options,
+                base_python=base_python,
+                runner=runner,
+                token_factory=lambda: "posix-fixture-token",
+            )
+
+        venv_root = tools_root / ".venv-mcp"
+        venv_python = venv_root / "bin" / "python"
+        expected_commands = [
+            [str(base_python), "-m", "venv", "--copies", str(venv_root)],
+            [
+                str(venv_python),
+                "-m",
+                "pip",
+                "install",
+                "-r",
+                str(tools_root / "requirements-mcp.txt"),
+            ],
+            [
+                str(venv_python),
+                "-m",
+                "pip",
+                "install",
+                "-e",
+                str(tools_root),
+            ],
+        ]
+        self.assertEqual([call[0] for call in calls], expected_commands)
+        self.assertFalse(
+            any("--no-index" in command or ".whl" in " ".join(command) for command, _ in calls)
+        )
+        self.assertEqual(summary["venv_python"], str(venv_python))
+
+    def test_install_runtime_windows_keeps_psutil_wheel_and_default_venv_argv(
+        self,
+    ) -> None:
+        tools_root = self._make_tools_root(with_psutil_vendor=True)
+        wheel = tools_root / "vendor" / "psutil" / "psutil-7.2.2-cp37-abi3-win_amd64.whl"
+        base_python = self.root / "base" / "python.exe"
+        base_python.parent.mkdir(parents=True)
+        write_fake_x64_pe(base_python)
+        options = parse_args(["--port", "18765"], tools_root=tools_root)
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def runner(argv: list[str], **kwargs: object) -> object:
+            calls.append((list(argv), dict(kwargs)))
+            if argv[1:3] == ["-m", "venv"]:
+                venv_python = Path(argv[3]) / "Scripts" / "python.exe"
+                venv_python.parent.mkdir(parents=True)
+                write_fake_x64_pe(venv_python)
+            return type(
+                "Completed",
+                (),
+                {"returncode": 0, "stdout": "", "stderr": ""},
+            )()
+
+        with patch.object(installer, "_is_windows_host", return_value=True):
+            summary = install_runtime(
+                options,
+                base_python=base_python,
+                runner=runner,
+                token_factory=lambda: "windows-fixture-token",
+            )
+
+        venv_root = tools_root / ".venv-mcp"
+        venv_python = venv_root / "Scripts" / "python.exe"
+        expected_commands = [
+            [str(base_python), "-m", "venv", str(venv_root)],
+            [
+                str(venv_python),
+                "-m",
+                "pip",
+                "install",
+                "--no-index",
+                "--no-deps",
+                str(wheel),
+            ],
+            [
+                str(venv_python),
+                "-m",
+                "pip",
+                "install",
+                "-r",
+                str(tools_root / "requirements-mcp.txt"),
+            ],
+            [
+                str(venv_python),
+                "-m",
+                "pip",
+                "install",
+                "-e",
+                str(tools_root),
+            ],
+        ]
+        self.assertEqual([call[0] for call in calls], expected_commands)
+        self.assertNotIn("--copies", calls[0][0])
+        self.assertEqual(summary["venv_python"], str(venv_python))
+
+    def test_resolve_pin_cli_posix_accepts_executable_regular_file_and_rejects_bad_targets(
+        self,
+    ) -> None:
+        claude = self.root / "claude"
+        codex = self.root / "codex"
+        for path in (claude, codex):
+            path.write_bytes(b"#!/bin/sh\n")
+            path.chmod(0o755)
+        no_exec = self.root / "noexec" / "claude"
+        no_exec.parent.mkdir()
+        no_exec.write_bytes(b"#!/bin/sh\n")
+        no_exec.chmod(0o644)
+        directory = self.root / "dir" / "claude"
+        directory.mkdir(parents=True)
+        missing = self.root / "missing" / "claude"
+
+        real_claude = Path(os.path.realpath(claude, strict=True))
+        real_codex = Path(os.path.realpath(codex, strict=True))
+        real_no_exec = Path(os.path.realpath(no_exec, strict=True))
+
+        # NTFS does not store POSIX execute bits on extensionless files. Only
+        # supply the chmod modes via lstat when the host filesystem drops them.
+        if bool(real_claude.lstat().st_mode & 0o111):
+            lstat_ctx = nullcontext()
+        else:
+            mode_overrides = {
+                real_claude: 0o755,
+                real_codex: 0o755,
+                real_no_exec: 0o644,
+            }
+            real_lstat = Path.lstat
+
+            def fake_lstat(path: Path) -> os.stat_result:
+                result = real_lstat(path)
+                mode = mode_overrides.get(path)
+                if mode is not None:
+                    return os.stat_result(
+                        (stat.S_IFMT(result.st_mode) | mode, *result[1:])
+                    )
+                return result
+
+            lstat_ctx = patch.object(Path, "lstat", fake_lstat)
+
+        with patch.object(installer, "_is_windows_host", return_value=False), lstat_ctx:
+            self.assertEqual(
+                installer._resolve_pin_cli("CLAUDE", claude), real_claude
+            )
+            self.assertEqual(
+                installer._resolve_pin_cli("CODEX", codex), real_codex
+            )
+
+            with self.assertRaises(InstallerContractError) as dir_err:
+                installer._resolve_pin_cli("CLAUDE", directory)
+            self.assertEqual(dir_err.exception.code, "installer_cli_is_directory")
+
+            with self.assertRaises(InstallerContractError) as nonexec_err:
+                installer._resolve_pin_cli("CLAUDE", no_exec)
+            self.assertEqual(
+                nonexec_err.exception.code, "installer_cli_not_executable"
+            )
+
+            with self.assertRaises(InstallerContractError) as missing_err:
+                installer._resolve_pin_cli("CLAUDE", missing)
+            self.assertEqual(missing_err.exception.code, "installer_cli_missing")
+
+            with self.assertRaises(InstallerContractError) as role_err:
+                installer._resolve_pin_cli("CLAUDE", codex)
+            self.assertEqual(
+                role_err.exception.code, "installer_cli_role_path_mismatch"
+            )
+
+            with self.assertRaises(InstallerContractError) as rel_err:
+                installer._resolve_pin_cli("CLAUDE", Path("claude"))
+            self.assertEqual(
+                rel_err.exception.code, "installer_cli_path_not_absolute"
+            )
+
+    def test_resolve_pin_cli_windows_still_rejects_path_without_exe_suffix(
+        self,
+    ) -> None:
+        claude_no_ext = self.root / "claude"
+        claude_no_ext.write_bytes(b"#!/bin/sh\n")
+        claude_no_ext.chmod(0o755)
+        claude_exe = self.root / "claude.exe"
+        write_fake_x64_pe(claude_exe)
+
+        with patch.object(installer, "_is_windows_host", return_value=True):
+            with self.assertRaises(InstallerContractError) as raised:
+                installer._resolve_pin_cli("CLAUDE", claude_no_ext)
+            self.assertEqual(raised.exception.code, "installer_cli_not_native_exe")
+            self.assertEqual(
+                installer._resolve_pin_cli("CLAUDE", claude_exe),
+                claude_exe.resolve(),
+            )
+
+
+def _write_fake_elf(path: Path) -> None:
+    payload = bytearray(64)
+    payload[0:4] = b"\x7fELF"
+    payload[4] = 2  # 64-bit
+    payload[5] = 1  # little-endian
+    payload[6] = 1  # ELF version 1
+    path.write_bytes(payload)
+
+
+class PosixInstallerRound4Test(unittest.TestCase):
+    """Issue #422 round 4: real Linux installer fixes and POSIX end-to-end flow."""
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+
+    @staticmethod
+    def _posix_mode_ctx(probe: Path, modes: dict[Path, int]):
+        # NTFS drops POSIX execute bits on extensionless files. Supply the
+        # expected modes via lstat only when the host filesystem drops them.
+        if bool(probe.lstat().st_mode & 0o111):
+            return nullcontext()
+        real_lstat = Path.lstat
+        normalized = {os.path.normcase(str(path)): mode for path, mode in modes.items()}
+
+        def fake_lstat(path: Path) -> os.stat_result:
+            result = real_lstat(path)
+            mode = normalized.get(os.path.normcase(str(path)))
+            if mode is not None:
+                return os.stat_result(
+                    (stat.S_IFMT(result.st_mode) | mode, *result[1:])
+                )
+            return result
+
+        return patch.object(Path, "lstat", fake_lstat)
+
+    @staticmethod
+    def _symlinks_ctx(mapping: dict[Path, Path]):
+        fallback: dict[Path, Path] = {}
+        for link, target in mapping.items():
+            try:
+                link.symlink_to(target)
+            except OSError:
+                link.write_bytes(b"")
+                fallback[link] = target
+        if not fallback:
+            return nullcontext()
+        real_resolve = Path.resolve
+
+        def fake_resolve(path: Path, strict: bool = False) -> Path:
+            target = fallback.get(path)
+            if target is not None:
+                return real_resolve(target, strict=strict)
+            return real_resolve(path, strict=strict)
+
+        return patch.object(Path, "resolve", fake_resolve)
+
+    def _make_tools_root(self) -> Path:
+        tools_root = self.root / "tools"
+        tools_root.mkdir(exist_ok=True)
+        (tools_root / "requirements-mcp.txt").write_text(
+            "mcp==1.27.2\nPillow==12.2.0\npsutil==7.2.2\n",
+            encoding="utf-8",
+        )
+        (tools_root / "pyproject.toml").write_text(
+            "[build-system]\nrequires=[]\n",
+            encoding="utf-8",
+        )
+        (tools_root / "p0s_gate.py").write_text("# fixture\n", encoding="utf-8")
+        return tools_root
+
+    def test_validate_python_executable_posix_accepts_versioned_names_and_rejects_bad(
+        self,
+    ) -> None:
+        bin_dir = self.root / "posix" / "bin"
+        bin_dir.mkdir(parents=True)
+        good_names = ("python", "python3", "python3.11", "python3.13", "python3.14")
+        good_paths = []
+        for name in good_names:
+            path = bin_dir / name
+            _write_fake_elf(path)
+            good_paths.append(path)
+
+        bad_names = (
+            "python2",
+            "python3.",
+            "python3.13.1",
+            "python3.13-config",
+            "python.exe",
+            "python3.exe",
+        )
+        bad_paths: list[Path] = []
+        for name in bad_names:
+            path = bin_dir / name
+            _write_fake_elf(path)
+            bad_paths.append(path)
+        scripts_py = self.root / "posix" / "Scripts" / "python3.13"
+        scripts_py.parent.mkdir(parents=True)
+        _write_fake_elf(scripts_py)
+        bad_paths.extend((scripts_py, Path("bin/python3.13")))
+
+        with patch.object(installer, "_is_windows_host", return_value=False):
+            for path in good_paths:
+                with self.subTest(good=path.name):
+                    self.assertEqual(
+                        installer._validate_python_executable(path), path
+                    )
+            for path in bad_paths:
+                with self.subTest(bad=str(path)):
+                    with self.assertRaises(InstallerContractError) as raised:
+                        installer._validate_python_executable(path)
+                    self.assertEqual(raised.exception.code, "python_path_not_exact")
+
+    def test_validate_python_executable_posix_base_symlink_and_venv_strictness(
+        self,
+    ) -> None:
+        bin_dir = self.root / "usr" / "bin"
+        bin_dir.mkdir(parents=True)
+        py313 = bin_dir / "python3.13"
+        _write_fake_elf(py313)
+        py313.chmod(0o755)
+        py3_link = bin_dir / "python3"
+
+        noexec_target = bin_dir / "python3.12"
+        _write_fake_elf(noexec_target)
+        noexec_target.chmod(0o644)
+        noexec_link = bin_dir / "python"
+
+        script_target = bin_dir / "python3.14"
+        script_target.write_bytes(b"#!/bin/sh\necho hi\n")
+        script_target.chmod(0o755)
+        script_dir = self.root / "script-link" / "bin"
+        script_dir.mkdir(parents=True)
+        script_link = script_dir / "python3"
+
+        sh_target = bin_dir / "sh"
+        _write_fake_elf(sh_target)
+        sh_target.chmod(0o755)
+        sh_dir = self.root / "bad-name" / "bin"
+        sh_dir.mkdir(parents=True)
+        sh_link = sh_dir / "python3"
+
+        outside_dir = self.root / "outside"
+        outside_dir.mkdir()
+        outside_target = outside_dir / "python3.13"
+        _write_fake_elf(outside_target)
+        outside_target.chmod(0o755)
+        outside_bin = self.root / "bad-parent" / "bin"
+        outside_bin.mkdir(parents=True)
+        outside_link = outside_bin / "python3"
+
+        modes = {
+            py313: 0o755,
+            noexec_target: 0o644,
+            script_target: 0o755,
+            sh_target: 0o755,
+            outside_target: 0o755,
+        }
+        with (
+            patch.object(installer, "_is_windows_host", return_value=False),
+            self._posix_mode_ctx(py313, modes),
+            self._symlinks_ctx(
+                {
+                    py3_link: py313,
+                    noexec_link: noexec_target,
+                    script_link: script_target,
+                    sh_link: sh_target,
+                    outside_link: outside_target,
+                }
+            ),
+        ):
+            # Base interpreter symlink and direct regular ELF both validate to python3.13.
+            self.assertEqual(
+                installer._validate_python_executable(py3_link, allow_symlink=True),
+                py313,
+            )
+            self.assertEqual(
+                installer._validate_python_executable(py313, allow_symlink=True),
+                py313,
+            )
+            # Venv python remains strict (symlinks rejected for sealed host_config).
+            with self.assertRaises(InstallerContractError) as venv_err:
+                installer._validate_python_executable(py3_link)
+            self.assertEqual(venv_err.exception.code, "python_path_not_canonical")
+
+            # Base target must be executable ELF, in bin/, and named python* (symlink or not).
+            for noexec_candidate in (noexec_link, noexec_target):
+                with self.subTest(noexec=str(noexec_candidate)):
+                    with self.assertRaises(InstallerContractError) as noexec_err:
+                        installer._validate_python_executable(
+                            noexec_candidate, allow_symlink=True
+                        )
+                    self.assertEqual(
+                        noexec_err.exception.code, "python_executable_not_executable"
+                    )
+            for script_candidate in (script_target, script_link):
+                with self.subTest(non_elf=str(script_candidate)):
+                    with self.assertRaises(InstallerContractError) as elf_err:
+                        installer._validate_python_executable(
+                            script_candidate, allow_symlink=True
+                        )
+                    self.assertEqual(elf_err.exception.code, "installer_cli_not_elf")
+            with self.assertRaises(InstallerContractError) as bad_target_err:
+                installer._validate_python_executable(sh_link, allow_symlink=True)
+            self.assertEqual(bad_target_err.exception.code, "python_path_not_exact")
+            with self.assertRaises(InstallerContractError) as bad_parent_err:
+                installer._validate_python_executable(outside_link, allow_symlink=True)
+            self.assertEqual(bad_parent_err.exception.code, "python_path_not_exact")
+
+            # Non-normalized path with '..' is still refused even for base.
+            dotted = self.root / "usr" / "local" / ".." / "bin" / "python3"
+            (self.root / "usr" / "local").mkdir()
+            with self.assertRaises(InstallerContractError) as dotted_err:
+                installer._validate_python_executable(dotted, allow_symlink=True)
+            self.assertEqual(dotted_err.exception.code, "python_path_not_canonical")
+
+            # install_runtime follows a POSIX base symlink and runs venv --copies.
+            tools_root = self._make_tools_root()
+            options = parse_args(["--port", "18765"], tools_root=tools_root)
+            calls: list[list[str]] = []
+
+            def runner(argv: list[str], **_kwargs: object) -> object:
+                calls.append(list(argv))
+                if argv[1:3] == ["-m", "venv"]:
+                    venv_py = Path(argv[-1]) / "bin" / "python"
+                    venv_py.parent.mkdir(parents=True)
+                    _write_fake_elf(venv_py)
+                    venv_py.chmod(0o755)
+                return _completed(0, "", "")
+
+            summary = install_runtime(
+                options,
+                base_python=py3_link,
+                runner=runner,
+                token_factory=lambda: "posix-symlink-token",
+            )
+            self.assertEqual(
+                calls[0],
+                [str(py313), "-m", "venv", "--copies", str(tools_root / ".venv-mcp")],
+            )
+            self.assertEqual(
+                summary["venv_python"],
+                str(tools_root / ".venv-mcp" / "bin" / "python"),
+            )
+
+    def test_validate_python_executable_windows_unchanged(self) -> None:
+        win_py = self.root / "win" / "python.exe"
+        win_py.parent.mkdir(parents=True)
+        write_fake_x64_pe(win_py)
+        win_link = self.root / "win-link" / "python.exe"
+        win_link.parent.mkdir(parents=True)
+        bad_pe = self.root / "win-bad" / "python.exe"
+        bad_pe.parent.mkdir(parents=True)
+        _write_fake_elf(bad_pe)
+        posix_py = self.root / "posix" / "bin" / "python3.13"
+        posix_py.parent.mkdir(parents=True)
+        _write_fake_elf(posix_py)
+
+        with (
+            patch.object(installer, "_is_windows_host", return_value=True),
+            self._symlinks_ctx({win_link: win_py}),
+        ):
+            self.assertEqual(
+                installer._validate_python_executable(win_py), win_py
+            )
+            self.assertEqual(
+                installer._validate_python_executable(win_py, allow_symlink=True),
+                win_py,
+            )
+            with self.assertRaises(InstallerContractError) as sym_err:
+                installer._validate_python_executable(win_link, allow_symlink=True)
+            self.assertEqual(sym_err.exception.code, "python_path_not_canonical")
+            with self.assertRaises(InstallerContractError) as posix_err:
+                installer._validate_python_executable(posix_py, allow_symlink=True)
+            self.assertEqual(posix_err.exception.code, "python_path_not_exact")
+            with self.assertRaises(InstallerContractError) as pe_err:
+                installer._validate_python_executable(bad_pe)
+            self.assertEqual(pe_err.exception.code, "installer_cli_not_pe")
+
+    def test_native_regular_file_posix_ignores_windows_stat_fields(self) -> None:
+        sample = self.root / "posix-regular"
+        _write_fake_elf(sample)
+        real = sample.lstat()
+        # A 10-tuple os.stat_result leaves st_file_attributes as None on Windows.
+        posix_only_stat = os.stat_result(
+            (stat.S_IFMT(real.st_mode) | 0o755, *real[1:])
+        )
+        with (
+            patch.object(installer, "_is_windows_host", return_value=False),
+            patch.object(Path, "lstat", return_value=posix_only_stat),
+        ):
+            metadata = installer._native_regular_file(sample)
+        self.assertTrue(stat.S_ISREG(metadata.st_mode))
+
+    def test_validate_cli_entry_posix_accepts_elf_and_rejects_bad_entries(
+        self,
+    ) -> None:
+        claude = self.root / "opt" / "claude-code" / "bin" / "claude"
+        codex = self.root / "opt" / "codex" / "bin" / "codex"
+        claude.parent.mkdir(parents=True)
+        codex.parent.mkdir(parents=True)
+        _write_fake_elf(claude)
+        _write_fake_elf(codex)
+        claude.chmod(0o755)
+        codex.chmod(0o755)
+
+        noexec_claude = self.root / "noexec" / "claude"
+        noexec_claude.parent.mkdir()
+        _write_fake_elf(noexec_claude)
+        noexec_claude.chmod(0o644)
+
+        script_claude = self.root / "script" / "claude"
+        script_claude.parent.mkdir()
+        script_claude.write_bytes(b"#!/bin/sh\necho hi\n")
+        script_claude.chmod(0o755)
+
+        pe_claude = self.root / "pe" / "claude"
+        pe_claude.parent.mkdir()
+        write_fake_x64_pe(pe_claude)
+        pe_claude.chmod(0o755)
+
+        short_claude = self.root / "short" / "claude"
+        short_claude.parent.mkdir()
+        short_claude.write_bytes(b"\x7fEL")
+        short_claude.chmod(0o755)
+
+        exe_claude = self.root / "exe" / "claude.exe"
+        exe_claude.parent.mkdir()
+        _write_fake_elf(exe_claude)
+        exe_claude.chmod(0o755)
+
+        modes = {
+            claude: 0o755,
+            codex: 0o755,
+            noexec_claude: 0o644,
+            script_claude: 0o755,
+            pe_claude: 0o755,
+            short_claude: 0o755,
+            exe_claude: 0o755,
+        }
+        with (
+            patch.object(installer, "_is_windows_host", return_value=False),
+            self._posix_mode_ctx(claude, modes),
+        ):
+            manifest_path = self.root / "installer-cli-manifest-v1.json"
+            payload = {
+                "schema_version": 1,
+                "kind": "dayz-mcp-installer-clis-v1",
+                "entries": {
+                    "CLAUDE": installer.build_installer_cli_entry_payload(
+                        "CLAUDE", claude
+                    ),
+                    "CODEX": installer.build_installer_cli_entry_payload(
+                        "CODEX", codex
+                    ),
+                },
+            }
+            manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+            loaded = load_installer_cli_manifest(manifest_path)
+            self.assertEqual(loaded.entries["CLAUDE"].path, claude)
+            self.assertEqual(loaded.entries["CODEX"].path, codex)
+
+            with self.assertRaises(InstallerContractError) as noexec_err:
+                installer.build_installer_cli_entry_payload("CLAUDE", noexec_claude)
+            self.assertEqual(
+                noexec_err.exception.code, "installer_cli_not_executable"
+            )
+
+            for non_elf in (script_claude, pe_claude, short_claude):
+                with self.subTest(non_elf=str(non_elf)):
+                    with self.assertRaises(InstallerContractError) as err:
+                        installer.build_installer_cli_entry_payload("CLAUDE", non_elf)
+                    self.assertEqual(err.exception.code, "installer_cli_not_elf")
+
+            for mismatch in (exe_claude, codex):
+                with self.subTest(mismatch=str(mismatch)):
+                    with self.assertRaises(InstallerContractError) as err:
+                        installer.build_installer_cli_entry_payload("CLAUDE", mismatch)
+                    self.assertEqual(
+                        err.exception.code, "installer_cli_role_path_mismatch"
+                    )
+
+            with self.assertRaises(InstallerContractError) as rel_err:
+                installer._validate_cli_entry(
+                    "CLAUDE",
+                    {"path": "claude", "bytes": 64, "sha256": "A" * 64},
+                )
+            self.assertEqual(rel_err.exception.code, "installer_cli_path_not_absolute")
+
+        # Removing the execute bit after pinning makes revalidate() refuse.
+        claude.chmod(0o644)
+        with (
+            patch.object(installer, "_is_windows_host", return_value=False),
+            self._posix_mode_ctx(codex, {claude: 0o644}),
+        ):
+            with self.assertRaises(InstallerContractError) as reval_err:
+                loaded.entries["CLAUDE"].revalidate()
+            self.assertEqual(reval_err.exception.code, "installer_cli_not_executable")
+
+    def test_validate_cli_entry_windows_unchanged(self) -> None:
+        claude_exe = self.root / "claude.exe"
+        write_fake_x64_pe(claude_exe)
+        elf_no_ext = self.root / "claude"
+        _write_fake_elf(elf_no_ext)
+        elf_as_exe = self.root / "bad" / "claude.exe"
+        elf_as_exe.parent.mkdir()
+        _write_fake_elf(elf_as_exe)
+
+        with patch.object(installer, "_is_windows_host", return_value=True):
+            entry = installer.build_installer_cli_entry_payload("CLAUDE", claude_exe)
+            self.assertEqual(entry["path"], str(claude_exe))
+            with self.assertRaises(InstallerContractError) as ext_err:
+                installer.build_installer_cli_entry_payload("CLAUDE", elf_no_ext)
+            self.assertEqual(
+                ext_err.exception.code, "installer_cli_path_not_absolute_exe"
+            )
+            with self.assertRaises(InstallerContractError) as pe_err:
+                installer.build_installer_cli_entry_payload("CLAUDE", elf_as_exe)
+            self.assertEqual(pe_err.exception.code, "installer_cli_not_pe")
+
+    def test_localappdata_default_posix_and_windows_unchanged(self) -> None:
+        home = self.root / "home"
+        home.mkdir()
+        xdg_state = self.root / "xdg-state"
+        preset = self.root / "preset-local"
+
+        base_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"LOCALAPPDATA", "XDG_STATE_HOME", "DAYZ_MCP_SECURITY_DIR"}
+        }
+        base_env["HOME"] = str(home)
+        base_env["USERPROFILE"] = str(home)
+
+        # POSIX: unset LOCALAPPDATA defaults to ~/.local/state.
+        with (
+            patch.dict(os.environ, base_env, clear=True),
+            patch.object(installer, "_is_windows_host", return_value=False),
+        ):
+            installer._ensure_posix_localappdata()
+            expected = os.path.join(str(home), ".local", "state")
+            self.assertEqual(os.environ["LOCALAPPDATA"], expected)
+            self.assertEqual(
+                installer.installer_security_dir(),
+                Path(expected) / "DayZ_MCP" / "security",
+            )
+
+        # POSIX: XDG_STATE_HOME wins when LOCALAPPDATA is blank.
+        xdg_env = dict(base_env, LOCALAPPDATA="   ", XDG_STATE_HOME=str(xdg_state))
+        with (
+            patch.dict(os.environ, xdg_env, clear=True),
+            patch.object(installer, "_is_windows_host", return_value=False),
+        ):
+            installer._ensure_posix_localappdata()
+            self.assertEqual(os.environ["LOCALAPPDATA"], str(xdg_state))
+
+        # POSIX: relative XDG_STATE_HOME is ignored per XDG spec; falls back to ~/.local/state.
+        for relative_xdg in ("relative/state", "./state", "../state"):
+            with self.subTest(relative_xdg=relative_xdg):
+                rel_env = dict(base_env, XDG_STATE_HOME=relative_xdg)
+                with (
+                    patch.dict(os.environ, rel_env, clear=True),
+                    patch.object(installer, "_is_windows_host", return_value=False),
+                ):
+                    installer._ensure_posix_localappdata()
+                    self.assertEqual(
+                        os.environ["LOCALAPPDATA"],
+                        os.path.join(str(home), ".local", "state"),
+                    )
+
+        # POSIX: existing non-empty LOCALAPPDATA is untouched.
+        preset_env = dict(base_env, LOCALAPPDATA=str(preset), XDG_STATE_HOME=str(xdg_state))
+        with (
+            patch.dict(os.environ, preset_env, clear=True),
+            patch.object(installer, "_is_windows_host", return_value=False),
+        ):
+            installer._ensure_posix_localappdata()
+            self.assertEqual(os.environ["LOCALAPPDATA"], str(preset))
+
+        # Windows: unset LOCALAPPDATA is not synthesized; set LOCALAPPDATA is untouched.
+        with (
+            patch.dict(os.environ, base_env, clear=True),
+            patch.object(installer, "_is_windows_host", return_value=True),
+        ):
+            installer._ensure_posix_localappdata()
+            self.assertNotIn("LOCALAPPDATA", os.environ)
+            with self.assertRaises(InstallerContractError) as missing_err:
+                installer.installer_security_dir()
+            self.assertEqual(
+                missing_err.exception.code, "installer_cli_manifest_missing"
+            )
+
+        with (
+            patch.dict(os.environ, preset_env, clear=True),
+            patch.object(installer, "_is_windows_host", return_value=True),
+        ):
+            installer._ensure_posix_localappdata()
+            self.assertEqual(os.environ["LOCALAPPDATA"], str(preset))
+
+    def test_registration_lock_uses_byte_lock_on_posix_and_windows(self) -> None:
+        from dayz_mcp import byte_lock
+
+        journal_root = self.root / "state" / "registration-transaction"
+
+        # Invalid timeout still fails closed before touching locks.
+        for bad_timeout in (-1.0, float("nan"), float("inf"), True):
+            with self.subTest(bad_timeout=bad_timeout):
+                with self.assertRaises(InstallerContractError) as err:
+                    installer._acquire_registration_lock(journal_root, bad_timeout)
+                self.assertEqual(err.exception.code, "invalid_registration_lock_timeout")
+
+        # POSIX path: open_lock_file + try_lock(fd, 0) + unlock(fd, 0) + contention.
+        with (
+            patch.object(installer, "_is_windows_host", return_value=False),
+            patch.object(byte_lock, "try_lock", wraps=byte_lock.try_lock) as spy_try,
+            patch.object(byte_lock, "unlock", wraps=byte_lock.unlock) as spy_unlock,
+        ):
+            held = installer._acquire_registration_lock(journal_root, 0.5)
+            try:
+                with self.assertRaises(RegistrationTransactionError) as busy_err:
+                    installer._acquire_registration_lock(journal_root, 0.05)
+                self.assertEqual(str(busy_err.exception), "registration_busy")
+            finally:
+                held.release()
+            reacquired = installer._acquire_registration_lock(journal_root, 0.5)
+            reacquired.release()
+
+        self.assertGreaterEqual(spy_try.call_count, 3)
+        self.assertTrue(all(call.args[1] == 0 for call in spy_try.call_args_list))
+        self.assertEqual(spy_unlock.call_count, 2)
+        self.assertTrue(all(call.args[1] == 0 for call in spy_unlock.call_args_list))
+
+        # POSIX open_lock_file failure maps to registration_lock_open_failed.
+        with (
+            patch.object(installer, "_is_windows_host", return_value=False),
+            patch.object(
+                byte_lock,
+                "open_lock_file",
+                side_effect=OSError(13, "permission denied"),
+            ) as mock_open,
+        ):
+            with self.assertRaises(OSError) as open_err:
+                installer._acquire_registration_lock(journal_root, 0.05)
+            mock_open.assert_called_once()
+            self.assertEqual(
+                installer._public_installer_error_code(open_err.exception),
+                "registration_lock_open_failed",
+            )
+
+        # Windows path: uses msvcrt through byte_lock and does not call POSIX open_lock_file.
+        if os.name == "nt":
+            with (
+                patch.object(installer, "_is_windows_host", return_value=True),
+                patch.object(
+                    byte_lock,
+                    "open_lock_file",
+                    side_effect=AssertionError("must not call POSIX open_lock_file on Windows"),
+                ),
+                patch.object(
+                    byte_lock.msvcrt, "locking", wraps=byte_lock.msvcrt.locking
+                ) as spy_locking,
+            ):
+                held_win = installer._acquire_registration_lock(journal_root, 0.5)
+                held_win.release()
+            self.assertEqual(spy_locking.call_count, 2)
+
+    def test_end_to_end_posix_pin_clis_then_register_returns_zero(self) -> None:
+        from dayz_mcp.server_cli import reset_instance_context_for_tests
+
+        self.addCleanup(reset_instance_context_for_tests)
+        tools_root = self._make_tools_root()
+        home = self.root / "home"
+        home.mkdir()
+        claude_cli = self.root / "opt" / "claude-code" / "bin" / "claude"
+        claude_cli.parent.mkdir(parents=True)
+        _write_fake_elf(claude_cli)
+        claude_cli.chmod(0o755)
+
+        base_dir = self.root / "usr" / "bin"
+        base_dir.mkdir(parents=True)
+        base_target = base_dir / "python3.13"
+        _write_fake_elf(base_target)
+        base_target.chmod(0o755)
+        base_symlink = base_dir / "python3"
+
+        expected_state = os.path.join(str(home), ".local", "state")
+        venv_root = tools_root / ".venv-mcp"
+        venv_python = venv_root / "bin" / "python"
+        claude_json = home / ".claude.json"
+
+        registered: dict[str, RegistrationSpec] = {}
+        seen_commands: list[list[str]] = []
+
+        def fake_runner(argv: list[str], **_kwargs: object) -> object:
+            seen_commands.append(list(argv))
+            if argv[0] == str(base_target) and argv[1:3] == ["-m", "venv"]:
+                self.assertIn("--copies", argv)
+                venv_python.parent.mkdir(parents=True, exist_ok=True)
+                _write_fake_elf(venv_python)
+                venv_python.chmod(0o755)
+                return _completed(0, "", "")
+            if argv[0] == str(venv_python) and argv[1:3] == ["-m", "pip"]:
+                return _completed(0, "", "")
+            if argv[0] == str(venv_python) and "backup-runs-v1" in argv:
+                self.assertEqual(os.environ.get("LOCALAPPDATA"), expected_state)
+                return _completed(
+                    0, '{"source_absent":true,"status":"verified"}\n', ""
+                )
+            if argv[0] == str(claude_cli):
+                verb, name = argv[2], argv[3]
+                if verb == "get":
+                    spec = registered.get(name)
+                    if spec is None:
+                        return _completed(
+                            1,
+                            "",
+                            f'No MCP server named "{name}". Run `claude mcp add` to add one.\n',
+                        )
+                    return _completed(
+                        0,
+                        (
+                            f"{name}:\n"
+                            "  Scope: User config (available in all your projects)\n"
+                            "  Status: connected\n"
+                            "  Type: stdio\n"
+                            f"  Command: {spec.command}\n"
+                            f"  Args: {' '.join(spec.arguments)}\n"
+                            "  Environment:\n"
+                        ),
+                        "",
+                    )
+                if verb == "add":
+                    separator = argv.index("--")
+                    spec = RegistrationSpec(
+                        Path(argv[separator + 1]), tuple(argv[separator + 2 :])
+                    )
+                    registered[name] = spec
+                    claude_json.write_text(
+                        json.dumps(
+                            {
+                                "mcpServers": {
+                                    name: {
+                                        "type": "stdio",
+                                        "command": str(spec.command),
+                                        "args": list(spec.arguments),
+                                    }
+                                }
+                            },
+                            indent=2,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    return _completed(0, f"Added stdio MCP server {name}\n", "")
+                if verb == "remove":
+                    registered.pop(name, None)
+                    return _completed(0, f"Removed MCP server {name}\n", "")
+            raise AssertionError(f"unexpected command: {argv}")
+
+        clean_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {
+                "LOCALAPPDATA",
+                "XDG_STATE_HOME",
+                "DAYZ_MCP_SECURITY_DIR",
+                "DAYZ_MCP_INSTANCE",
+                "DAYZ_MCP_PORT",
+                "DAYZ_MCP_GAME_PATH",
+            }
+        }
+        clean_env["HOME"] = str(home)
+        clean_env["USERPROFILE"] = str(home)
+
+        real_pin = installer.pin_installer_clis
+        real_run = installer.run_installer
+        real_parse = installer.parse_args
+
+        modes = {claude_cli: 0o755, base_target: 0o755}
+        with (
+            patch.dict(os.environ, clean_env, clear=True),
+            patch.object(installer, "_is_windows_host", return_value=False),
+            self._posix_mode_ctx(claude_cli, modes),
+            self._symlinks_ctx({base_symlink: base_target}),
+            patch.object(
+                installer.shutil,
+                "which",
+                side_effect=lambda name: str(claude_cli) if name == "claude" else None,
+            ),
+            patch.object(
+                installer,
+                "parse_args",
+                side_effect=lambda argv=None: real_parse(argv, tools_root=tools_root),
+            ),
+            patch.object(
+                installer,
+                "pin_installer_clis",
+                side_effect=lambda **kwargs: real_pin(**kwargs, runner=fake_runner),
+            ),
+            patch.object(
+                installer,
+                "run_installer",
+                side_effect=lambda options, **kwargs: real_run(
+                    options, base_python=base_symlink, runner=fake_runner
+                ),
+            ),
+        ):
+            pin_stdout = io.StringIO()
+            pin_stderr = io.StringIO()
+            with redirect_stdout(pin_stdout), redirect_stderr(pin_stderr):
+                pin_code = installer.main(["--pin-clis"])
+            self.assertEqual(pin_code, 0, pin_stderr.getvalue())
+            self.assertEqual(os.environ.get("LOCALAPPDATA"), expected_state)
+            self.assertTrue(pin_stdout.getvalue().startswith(f"CLAUDE {claude_cli} "))
+            security_dir = Path(expected_state) / "DayZ_MCP" / "security"
+            self.assertTrue((security_dir / "installer-cli-manifest-v1.json").is_file())
+            self.assertTrue(
+                (security_dir / "installer-not-found-fixtures-v1.json").is_file()
+            )
+
+            # Fresh invocation for --register with LOCALAPPDATA unset again.
+            os.environ.pop("LOCALAPPDATA", None)
+            reg_stdout = io.StringIO()
+            reg_stderr = io.StringIO()
+            with redirect_stdout(reg_stdout), redirect_stderr(reg_stderr):
+                reg_code = installer.main(["--register", "--skip-knowledge-pack"])
+            self.assertEqual(reg_code, 0, reg_stderr.getvalue())
+            self.assertEqual(os.environ.get("LOCALAPPDATA"), expected_state)
+
+        summary = json.loads(reg_stdout.getvalue())
+        self.assertEqual(summary["status"], "installed_and_registered")
+        self.assertTrue(summary["registered"])
+        self.assertEqual(summary["venv_python"], str(venv_python))
+        self.assertTrue(claude_json.is_file())
+        written = json.loads(claude_json.read_text(encoding="utf-8"))
+        entry = written["mcpServers"]["dayz-mcp"]
+        self.assertEqual(entry["command"], str(venv_python))
+        self.assertEqual(entry["timeout"], installer.CLAUDE_TIMEOUT_MS)
+        self.assertTrue(
+            (Path(expected_state) / "DayZ_MCP" / "registration-transaction.lock").is_file()
+        )
+        self.assertFalse(
+            (Path(expected_state) / "DayZ_MCP" / "registration-transaction" / "dayz-mcp").exists()
+        )
+        self.assertFalse((home / ".codex").exists())
 
 
 if __name__ == "__main__":

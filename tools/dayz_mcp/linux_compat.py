@@ -218,6 +218,19 @@ class _NtpathWithPosixIsabs:
         return getattr(ntpath, name)
 
 
+def ensure_localappdata() -> str:
+    """Default ``LOCALAPPDATA`` to ``$XDG_STATE_HOME`` (else ``~/.local/state``) when empty."""
+    current = os.environ.get("LOCALAPPDATA", "").strip()
+    if not current:
+        xdg_state = os.environ.get("XDG_STATE_HOME", "").strip()
+        if xdg_state and os.path.isabs(xdg_state):
+            current = xdg_state
+        else:
+            current = os.path.join(os.path.expanduser("~"), ".local", "state")
+        os.environ["LOCALAPPDATA"] = current
+    return current
+
+
 def install() -> None:
     """Put the Linux implementations in place. A no-op on Windows; idempotent."""
     global _installed
@@ -225,10 +238,7 @@ def install() -> None:
         return
     _installed = True
 
-    if not os.environ.get("LOCALAPPDATA", "").strip():
-        os.environ["LOCALAPPDATA"] = os.environ.get("XDG_STATE_HOME", "").strip() or os.path.join(
-            os.path.expanduser("~"), ".local", "state"
-        )
+    ensure_localappdata()
     if not hasattr(_stat, "IO_REPARSE_TAG_MOUNT_POINT"):
         _stat.IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
     if not hasattr(_stat, "IO_REPARSE_TAG_SYMLINK"):

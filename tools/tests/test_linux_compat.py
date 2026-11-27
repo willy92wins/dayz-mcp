@@ -171,5 +171,43 @@ class LoopbackRebindTest(unittest.TestCase):
         self.assertEqual(self.server(port).server_address[1], port)
 
 
+class EnsureLocalAppDataTest(unittest.TestCase):
+    def test_relative_xdg_state_home_is_ignored_and_falls_back_to_home(self) -> None:
+        from unittest.mock import patch
+
+        from dayz_mcp import linux_compat
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(os.path.realpath(directory))
+            home = root / "home"
+            home.mkdir()
+            abs_xdg = root / "xdg-state"
+            expected_default = os.path.join(str(home), ".local", "state")
+            base_env = {
+                key: value
+                for key, value in os.environ.items()
+                if key not in {"LOCALAPPDATA", "XDG_STATE_HOME"}
+            }
+            base_env["HOME"] = str(home)
+            base_env["USERPROFILE"] = str(home)
+
+            for relative in ("relative/state", "./state", "../state", "~/state", "state"):
+                with self.subTest(xdg_state_home=relative):
+                    env = dict(base_env, XDG_STATE_HOME=relative)
+                    with patch.dict(os.environ, env, clear=True):
+                        result = linux_compat.ensure_localappdata()
+                        self.assertEqual(result, expected_default)
+                        self.assertEqual(os.environ["LOCALAPPDATA"], expected_default)
+
+            with patch.dict(
+                os.environ,
+                dict(base_env, LOCALAPPDATA="   ", XDG_STATE_HOME=str(abs_xdg)),
+                clear=True,
+            ):
+                result = linux_compat.ensure_localappdata()
+                self.assertEqual(result, str(abs_xdg))
+                self.assertEqual(os.environ["LOCALAPPDATA"], str(abs_xdg))
+
+
 if __name__ == "__main__":
     unittest.main()

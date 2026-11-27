@@ -124,9 +124,10 @@ runs in the worker and its lifecycle children is sealed. The interpreter, its st
 - Daemon and client on Linux: create the venv with copied binaries, `python3 -m venv --copies tools/.venv-mcp`,
   then `pip install -r requirements-mcp.txt` and `pip install -e tools`. Sealed `host_config` refuses a
   registration whose `command` resolves elsewhere, and a default venv's `bin/python` is a symlink. The client
-  resolves the daemon policy from both registrations, `~/.claude.json` (`mcpServers.dayz-mcp`) and
-  `~/.codex/config.toml` (`[mcp_servers.dayz-mcp]`), which must agree, exactly as on Windows; on a host without
-  Codex that file has to exist anyway.
+  resolves the daemon policy from `~/.claude.json` (`mcpServers.dayz-mcp`) and `~/.codex/config.toml`
+  (`[mcp_servers.dayz-mcp]`), which must agree when both are present, exactly as on Windows; when only Claude
+  Code is registered and `~/.codex/config.toml` does not exist, it resolves from Claude alone (an existing
+  `~/.codex/config.toml` without the registration still refuses with `daemon_provenance_incomplete`).
 
 - `dayz_mcp/podman_server.py`: runs a DayZ dedicated server in rootless podman, the way dzo
   (dayz-server-operator) starts it: a minimal `debian:trixie-slim` runtime image
