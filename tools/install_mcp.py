@@ -97,13 +97,46 @@ _PRESERVED_REMEDY = (
 _RECOVERY_CONFLICT_REMEDY = (
     "an interrupted install left a journal that no longer matches the config "
     "files or the registration, so nothing was overwritten and the journal "
-    "was kept. If another writer changed the dayz-mcp entry during that "
-    "install, removing it (claude mcp remove -s user dayz-mcp; codex mcp "
-    "remove dayz-mcp) and running the install again releases it. If the "
-    "journal belongs to another server name or install on this host, resolve "
-    "that one first. In any other case the files must go back to what that "
-    "install recorded. See QUICKSTART.md, 'Interrupted install'."
+    "was kept. Put them back to what that install recorded: the previous "
+    "registration in each client, and the config files as they were; then run "
+    "the install again. See QUICKSTART.md, 'Interrupted install'."
 )
+# Same attempt, but a client is not what that attempt left (fix-forward #465
+# follow-up, Sol r5 P2): name both explicit actions.
+_RELEASE_REFUSED_REMEDY = (
+    "another program changed a dayz-mcp registration during the last install. "
+    "Remove the entry it changed (claude mcp remove -s user dayz-mcp; codex mcp "
+    "remove dayz-mcp; a named instance uses its own name) and put back the "
+    "previous registration in the other client; then run the install again. "
+    "See QUICKSTART.md, 'Interrupted install'."
+)
+# A timeouts journal of an older installer (no attempt id) or of another
+# attempt: removing an entry does not release it, so do not promise that.
+_OTHER_JOURNAL_REMEDY = (
+    "the config-file journal was written by an older installer or by another "
+    "install or server name on this host, and removing an entry does not "
+    "release it. Run that install again with its own server name and resolve "
+    "it, or put the config files back to what it recorded. See QUICKSTART.md, "
+    "'Interrupted install'."
+)
+# A registration that cannot be read while a journal is being recovered.
+_RETRY_PROBE_REMEDY = (
+    "an interrupted install left a journal, and a registration it has to read "
+    "cannot be read or is not one this installer understands. Put back the "
+    "previous registration in that client (or remove it: claude mcp remove -s "
+    "user dayz-mcp; codex mcp remove dayz-mcp); then run the install again. "
+    "See QUICKSTART.md, 'Interrupted install'."
+)
+
+
+_RETRY_PROBE_CODES = frozenset({"registration_probe_failed", "unsupported_codex_registration"})
+
+
+def _add_retry_probe_remedy(error: BaseException) -> None:
+    """Name the way out when a probe fails while a journal is recovered."""
+    code = getattr(error, "code", None) or str(error)
+    if code in _RETRY_PROBE_CODES and not getattr(error, "remedy", None):
+        error.remedy = _RETRY_PROBE_REMEDY  # type: ignore[attr-defined]
 
 
 def _with_remedy(error: InstallerExecutionError, remedy: str) -> InstallerExecutionError:
@@ -1046,8 +1079,12 @@ def _keyfile_path(value: str | None, canonical_tools: Path) -> Path:
     key is read or created. Windows keeps the full resolve() it always had.
     """
     raw = Path(value) if value else canonical_tools / ".dayz_mcp.key"
-    if os.name != "posix" or raw.name in ("", ".", ".."):
+    if os.name != "posix":
         return raw.resolve()
+    if raw.name in ("", ".", ".."):
+        # A keyfile path must name a file. Resolving "x/.." would silently turn
+        # it into a directory's parent (Auditor hardening after #474).
+        raise InstallerContractError("keyfile_path_invalid", "--keyfile must name a file")
     # Resolve the parent as written: a ".." after a linked directory is taken
     # relative to the link's target, as Path.resolve() always did (no lexical
     # abspath collapse, fix-forward #464 round 3). Only the leaf is kept.
@@ -1303,6 +1340,22 @@ def _check_owned_regular(info: os.stat_result) -> None:
         raise PermissionError("private_file_not_owned_regular")
 
 
+def _fchmod_private(descriptor: int) -> None:
+    """fchmod 0600 and check it took: VFAT and similar accept it and keep their own bits."""
+    os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+    if stat.S_IMODE(os.fstat(descriptor).st_mode) != _PRIVATE_FILE_MODE:
+        raise PermissionError("private_file_mode_not_applied")
+
+
+def _unlink_if_same_file(path: Path, created: os.stat_result) -> None:
+    try:
+        current = os.lstat(path)
+        if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+            os.unlink(path)
+    except OSError:
+        pass
+
+
 def _write_private_file(path: Path, data: bytes, *, exclusive: bool) -> None:
     """Write a secret-bearing file that is 0600 from the open on POSIX.
 
@@ -1323,17 +1376,25 @@ def _write_private_file(path: Path, data: bytes, *, exclusive: bool) -> None:
             path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW_FLAGS,
             _PRIVATE_FILE_MODE,
         )
+        created = os.fstat(descriptor)
         try:
-            if os.name == "posix":
-                _check_owned_regular(os.fstat(descriptor))
-                # The umask can only narrow the open mode; a umask such as
-                # 0400 would leave 0200. Set exactly 0600 on the new file.
-                os.fchmod(descriptor, _PRIVATE_FILE_MODE)
-            _write_all(descriptor, data)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        _fsync_parent_posix(path)
+            try:
+                if os.name == "posix":
+                    _check_owned_regular(created)
+                    # The umask can only narrow the open mode; a umask such as
+                    # 0400 would leave 0200. Set exactly 0600 on the new file.
+                    _fchmod_private(descriptor)
+                _write_all(descriptor, data)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            _fsync_parent_posix(path)
+        except BaseException:
+            # O_EXCL made this file ours. A partial or wrongly-moded key must
+            # not be left for the next run to read (Auditor hardening after
+            # #474); a file someone put at the path since is left alone.
+            _unlink_if_same_file(path, created)
+            raise
         return
     if os.name != "posix":
         descriptor = os.open(
@@ -1360,7 +1421,7 @@ def _write_private_file(path: Path, data: bytes, *, exclusive: bool) -> None:
     try:
         try:
             _check_owned_regular(os.fstat(descriptor))
-            os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+            _fchmod_private(descriptor)
             _write_all(descriptor, data)
             os.fsync(descriptor)
         finally:
@@ -1837,6 +1898,7 @@ def _load_registration_manifest(
     dict[str, RegistrationSpec | None] | None,
     frozenset[str],
     str | None,
+    frozenset[str],
 ] | None:
     published, pending, _staging = _registration_publication_paths(journal)
     only_next = False
@@ -1871,6 +1933,7 @@ def _load_registration_manifest(
             "host_journal",
             "preserved",
             "previous",
+            "rollback_removed",
             "schema",
             "server_name",
             "status",
@@ -1905,6 +1968,14 @@ def _load_registration_manifest(
         or len(set(raw_preserved)) != len(raw_preserved)
     ):
         raise RegistrationTransactionError("registration_journal_invalid")
+    raw_removed = value.get("rollback_removed", [])
+    if (
+        not isinstance(raw_removed, list)
+        or any(role not in roles for role in raw_removed)
+        or len(set(raw_removed)) != len(raw_removed)
+        or set(raw_removed) & set(raw_preserved)
+    ):
+        raise RegistrationTransactionError("registration_journal_invalid")
     raw_attempt = value.get("attempt")
     if raw_attempt is not None and (
         not isinstance(raw_attempt, str) or not re.fullmatch(r"[0-9a-f]{32}", raw_attempt)
@@ -1933,6 +2004,7 @@ def _load_registration_manifest(
         desired,
         frozenset(raw_preserved),
         raw_attempt,
+        frozenset(raw_removed),
     )
 
 
@@ -1995,27 +2067,24 @@ def _recover_pending_host_configs(
     #   there: its previous registration, or the desired one if the rollback
     #   was cut before reaching it.
     # Anything else keeps refusing, with the journals kept.
-    def refuse(cause: BaseException) -> RegistrationTransactionError:
+    def refuse(cause: BaseException, remedy: str) -> RegistrationTransactionError:
         error = _with_remedy(
-            RegistrationTransactionError("registration_recovery_conflict"),
-            _RECOVERY_CONFLICT_REMEDY,
+            RegistrationTransactionError("registration_recovery_conflict"), remedy
         )
         error.__cause__ = cause
         return error
 
     state = restore_conflict_state(host_journal)
     if provider is None or loaded is None or state is None:
-        raise refuse(conflict)
+        raise refuse(conflict, _RECOVERY_CONFLICT_REMEDY)
     host_attempt, restored, kept = state
     full_previous, desired, preserved, attempt = loaded[0], loaded[5], loaded[6], loaded[7]
+    rollback_removed = loaded[8]
     by_host_role = {host: role for role, host in _HOST_ROLE.items()}
-    if (
-        attempt is None
-        or host_attempt != attempt
-        or not kept
-        or any(by_host_role[host] not in preserved for host in kept)
-    ):
-        raise refuse(conflict)
+    if attempt is None or host_attempt != attempt:
+        raise refuse(conflict, _OTHER_JOURNAL_REMEDY)
+    if not kept or any(by_host_role[host] not in preserved for host in kept):
+        raise refuse(conflict, _RECOVERY_CONFLICT_REMEDY)
     _release_preserved_or_refuse(provider, full_previous, desired, preserved)
     for host in restored:
         role = by_host_role[host]
@@ -2024,8 +2093,13 @@ def _recover_pending_host_configs(
         accepted = {full_previous.get(role)}
         if desired is not None:
             accepted.add(desired.get(role))
+        if role in rollback_removed:
+            # The outer rollback recorded that it removes this entry before
+            # adding the previous one back: a cut in between leaves it empty
+            # (fix-forward #465 follow-up, Sol r5).
+            accepted.add(None)
         if provider.get(role) not in accepted:
-            raise refuse(conflict)
+            raise refuse(conflict, _RELEASE_REFUSED_REMEDY)
     try:
         _recover_if_needed(claude, codex, host_journal, release_attempt=attempt)
     except HostConfigError as error:
@@ -2049,6 +2123,7 @@ def _recover_registration_journal(
         dict[str, RegistrationSpec | None] | None,
         frozenset[str],
         str | None,
+        frozenset[str],
     ],
 ) -> None:
     (
@@ -2060,6 +2135,7 @@ def _recover_registration_journal(
         desired,
         preserved,
         _attempt,
+        _rollback_removed,
     ) = loaded
     # A role recorded as preserved holds another writer's entry that the
     # rollback decided to keep: recovery never restores over it.
@@ -2197,6 +2273,7 @@ def _register_transaction_locked(
             _desired,
             _preserved,
             _attempt,
+            _rollback_removed,
         ) = loaded
         if owner != server_name:
             # Another instance owns this journal. Do not restore its specs here
@@ -2204,14 +2281,18 @@ def _register_transaction_locked(
             raise RegistrationTransactionError("registration_journal_owner_mismatch")
     # A torn timeout write is repaired before any provider read. The provider
     # parses those same host files.
-    _recover_pending_host_configs(
-        host_configs if host_configs is not None else recorded_hosts,
-        host_journal_root if host_journal_root is not None else recorded_host_journal,
-        provider,
-        loaded,
-    )
-    if loaded is not None:
-        _recover_registration_journal(provider, journal, loaded)
+    try:
+        _recover_pending_host_configs(
+            host_configs if host_configs is not None else recorded_hosts,
+            host_journal_root if host_journal_root is not None else recorded_host_journal,
+            provider,
+            loaded,
+        )
+        if loaded is not None:
+            _recover_registration_journal(provider, journal, loaded)
+    except (InstallerContractError, InstallerExecutionError) as error:
+        _add_retry_probe_remedy(error)
+        raise
     previous: dict[str, RegistrationSpec | None] = {}
     touched: set[str] = set()
     # What this transaction itself put in the provider: the desired spec and
@@ -2221,7 +2302,11 @@ def _register_transaction_locked(
         for role in roles:
             previous[role] = provider.get(role)
     except Exception as error:
-        raise RegistrationTransactionError("registration_probe_failed") from error
+        probe_error = RegistrationTransactionError("registration_probe_failed")
+        if loaded is not None:
+            # A retry after an interrupted install (fix-forward #465 follow-up).
+            _with_remedy(probe_error, _RETRY_PROBE_REMEDY)
+        raise probe_error from error
     # Re-registering must not silently strip what someone added on purpose:
     # the live registrations carried --supervised that no installer emitted
     # (fb-20260927-210146-0f68). Nothing has been touched yet.
@@ -2306,6 +2391,11 @@ def _register_transaction_locked(
                     _registration_publication_paths(journal)[0].read_bytes()
                 )
                 manifest["preserved"] = sorted(preserved)
+                # Roles the rollback below may remove and add back: recorded
+                # before it acts, so a cut between the two is recognised.
+                manifest["rollback_removed"] = sorted(
+                    role for role in roles if role in touched and role not in preserved
+                )
                 _write_registration_manifest(journal, manifest)
             _rollback_registrations(
                 provider, previous, touched, ours=ours, preserved=preserved
