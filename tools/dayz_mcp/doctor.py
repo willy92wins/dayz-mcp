@@ -1184,12 +1184,15 @@ def _check_runs(
             )
         accounted.add(pid)
 
-    for item in observed:
-        pid = int(item["pid"])
-        if pid not in records and pid not in accounted:
-            findings.append(
-                _finding("PROCESS_UNREGISTERED", pid=pid, name=str(item["name"]))
-            )
+    # Installed mode has no dayz_test_run, so managed DayZ processes outside
+    # runs.json belong to the person rather than an unregistered test run.
+    if not sources.installed:
+        for item in observed:
+            pid = int(item["pid"])
+            if pid not in records and pid not in accounted:
+                findings.append(
+                    _finding("PROCESS_UNREGISTERED", pid=pid, name=str(item["name"]))
+                )
 
 
 def _check_manifest_backup_retention(
@@ -1698,7 +1701,9 @@ def _diagnose(
     crash_reporters = _safe_snapshot(
         sources.process_snapshot, ["CrashReporter.exe"], "crash_reporter", findings
     )
-    if retail:
+    # Installed mode has no dayz_test_run, so running retail DayZ processes
+    # belong to the person and do not require manual closing.
+    if retail and not sources.installed:
         findings.append(
             _finding(
                 "RETAIL_MANUAL_CLOSE_REQUIRED",

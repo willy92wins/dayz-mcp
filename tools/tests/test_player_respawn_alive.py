@@ -422,8 +422,8 @@ class ToolTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(phrase, description)
 
     def test_the_changelog_names_the_refusal_and_the_pbo(self) -> None:
-        unreleased = CHANGELOG.split("## [Unreleased]", 1)[1].split("## [", 1)[0]
-        fixed = unreleased.split("### Fixed", 1)[1].split("### ", 1)[0]
+        release = CHANGELOG[CHANGELOG.index("## [1.6]") : CHANGELOG.index("## [1.5]")]
+        fixed = release.split("### Fixed", 1)[1].split("### ", 1)[0]
         entry = [line for line in fixed.splitlines() if "`player_alive_conscious`" in line]
         self.assertEqual(len(entry), 1)
         for phrase in (

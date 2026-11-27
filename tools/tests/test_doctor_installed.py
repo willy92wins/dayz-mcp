@@ -918,6 +918,205 @@ class DoctorInstalledDiagnoseTest(unittest.TestCase):
             },
         )
 
+    @staticmethod
+    def _dayz_processes_snapshot(names: list[str]) -> dict[str, object]:
+        wanted = set(names)
+        running = [
+            {"pid": 9372, "name": "DayZServer_x64.exe"},
+            {"pid": 9373, "name": "DayZDiag_x64.exe"},
+            {"pid": 49040, "name": "DayZ_x64.exe"},
+            {"pid": 49041, "name": "DayZ_BE.exe"},
+        ]
+        return {
+            "known": True,
+            "processes": [item for item in running if item["name"] in wanted],
+        }
+
+    def test_installed_ignores_running_dayz_server_and_client(self) -> None:
+        payload, exit_code = self.execute(
+            process_snapshot=self._dayz_processes_snapshot
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            payload,
+            {
+                "ok": True,
+                "findings": [self.daemon_ok()],
+                "summary": {"fail": 0, "warn": 0},
+            },
+        )
+
+    def test_installed_with_require_clean_ignores_running_dayz_server_and_client(
+        self,
+    ) -> None:
+        payload, exit_code = doctor.execute(
+            self.sources(process_snapshot=self._dayz_processes_snapshot),
+            require_clean=True,
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            payload,
+            {
+                "ok": True,
+                "findings": [self.daemon_ok()],
+                "summary": {"fail": 0, "warn": 0},
+            },
+        )
+
+    def test_not_installed_reports_running_dayz_server_and_client(self) -> None:
+        payload, exit_code = self.execute(
+            installed=False,
+            process_snapshot=self._dayz_processes_snapshot,
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(
+            payload,
+            {
+                "ok": False,
+                "findings": [
+                    self.daemon_ok(),
+                    {
+                        "code": "PROCESS_UNREGISTERED",
+                        "severity": "FAIL",
+                        "pid": 9372,
+                        "name": "DayZServer_x64.exe",
+                    },
+                    {
+                        "code": "PROCESS_UNREGISTERED",
+                        "severity": "FAIL",
+                        "pid": 9373,
+                        "name": "DayZDiag_x64.exe",
+                    },
+                    {
+                        "code": "RETAIL_MANUAL_CLOSE_REQUIRED",
+                        "severity": "WARN",
+                        "processes": [
+                            {"pid": 49040, "name": "DayZ_x64.exe"},
+                            {"pid": 49041, "name": "DayZ_BE.exe"},
+                        ],
+                    },
+                ],
+                "summary": {"fail": 2, "warn": 1},
+            },
+        )
+
+    def test_not_installed_with_require_clean_marks_retail_as_fail(self) -> None:
+        payload, exit_code = doctor.execute(
+            self.sources(
+                installed=False,
+                process_snapshot=self._dayz_processes_snapshot,
+            ),
+            require_clean=True,
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(
+            payload,
+            {
+                "ok": False,
+                "findings": [
+                    self.daemon_ok(),
+                    {
+                        "code": "PROCESS_UNREGISTERED",
+                        "severity": "FAIL",
+                        "pid": 9372,
+                        "name": "DayZServer_x64.exe",
+                    },
+                    {
+                        "code": "PROCESS_UNREGISTERED",
+                        "severity": "FAIL",
+                        "pid": 9373,
+                        "name": "DayZDiag_x64.exe",
+                    },
+                    {
+                        "code": "RETAIL_MANUAL_CLOSE_REQUIRED",
+                        "severity": "FAIL",
+                        "processes": [
+                            {"pid": 49040, "name": "DayZ_x64.exe"},
+                            {"pid": 49041, "name": "DayZ_BE.exe"},
+                        ],
+                    },
+                ],
+                "summary": {"fail": 3, "warn": 0},
+            },
+        )
+
+    def test_installed_still_reports_stale_run_without_process_unregistered(
+        self,
+    ) -> None:
+        record = {
+            "pid": 900,
+            "creation_time_utc": "2026-07-15T00:00:00.0000000Z",
+            "executable_sha256": "a" * 64,
+            "command_line_sha256": "b" * 64,
+            "role": "client",
+            "identity_scheme": "psutil-argv-v2",
+        }
+        run = {
+            "run_id": "run-1",
+            "owner_session_id": None,
+            "owner_lease_id": None,
+            "state": "RUNNING_IDLE",
+            "label": "fixture",
+            "mod": "@Fixture",
+            "profiles": "profiles",
+            "mission": "mission",
+            "processes": [record],
+        }
+        (self.runtime / "runs.json").write_text(
+            json.dumps({"version": 1, "runs": [run]}), encoding="utf-8"
+        )
+        payload, exit_code = self.execute(
+            process_snapshot=self._dayz_processes_snapshot
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(
+            payload,
+            {
+                "ok": False,
+                "findings": [
+                    self.daemon_ok(),
+                    {
+                        "code": "RUN_STALE",
+                        "severity": "FAIL",
+                        "pid": 900,
+                        "run_id": "run-1",
+                    },
+                ],
+                "summary": {"fail": 1, "warn": 0},
+            },
+        )
+
+    def test_installed_still_reports_process_scan_failed(self) -> None:
+        payload, exit_code = self.execute(
+            process_snapshot=lambda names: {"known": False, "processes": []}
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(
+            payload,
+            {
+                "ok": False,
+                "findings": [
+                    self.daemon_ok(),
+                    {
+                        "code": "PROCESS_SCAN_FAILED",
+                        "severity": "FAIL",
+                        "scope": "retail",
+                    },
+                    {
+                        "code": "PROCESS_SCAN_FAILED",
+                        "severity": "FAIL",
+                        "scope": "managed",
+                    },
+                    {
+                        "code": "PROCESS_SCAN_FAILED",
+                        "severity": "FAIL",
+                        "scope": "crash_reporter",
+                    },
+                ],
+                "summary": {"fail": 3, "warn": 0},
+            },
+        )
+
 
 @unittest.skipUnless(sys.platform == "win32", "requires Windows")
 class DoctorInstalledMainTest(unittest.TestCase):
