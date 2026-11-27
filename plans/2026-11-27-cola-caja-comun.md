@@ -42,7 +42,40 @@ Criterios:
 - F2-race [S2]: una operación registrada con el lock del probe soltado hace que el latido no rehúse.
 - F2-reg: #391 (entrada humana), la suite de `start_run` y la de cancelación de `STARTING` siguen en verde. Se actualiza `test_lease_work_idle.py:718`.
 
-Va después de 3A, porque las dos tocan la admisión de `start_run`. Antes de implementar, Sol revisa esta sección sola (R22).
+Va después de 3A, porque las dos tocan la admisión de `start_run`.
+
+### R22 de Sol sobre la v3 (NC5, 27/11; CHANGES, 5 P1 y 1 P2, sin P0; `C:\temp\cola-f2\REVIEW-f2v3-sol.md`, sha256 e5169c3d…1d68ad3). Reglas y criterios añadidos, sin segunda ronda:
+
+- [T1] Ruta: `start_run` se parte por dentro y se reutiliza `POST /lifecycle/start`, sin endpoint nuevo.
+  - La admisión persiste el `STARTING` con dueño, lease y `run_id`, responde en cuanto lo persiste y suelta `box_admission()` y los demás locks.
+  - El daemon espera el build lock y continúa con el broker sellado y el payload acreditado.
+  - La continuación se liga a sesión, lease, generación, `run_id`, `launch_operation_id` y hash. Un reintento exacto observa el mismo intento y conserva su plazo; el launcher lo sigue por `/lifecycle/status` y confirma por `/lifecycle/ack`.
+  - El start directo conserva su contrato.
+  - Criterio: reintentar el mismo intento no da `launch_identity_conflict` ni `run_not_extensible` (`process_lifecycle.py:5311`, :5372).
+- [T2] Plazo: un vencimiento monotónico que se fija en el daemon al admitir. Es la espera acreditada del lock, más el build, más la preparación y el spawn, con un tope numérico de política, y F2-neg2 tiene que caber en él.
+  - Un temporizador del daemon liquida la reserva aunque el caller desaparezca.
+  - El último guard antes de `Popen` comprueba plazo, autoridad y cancelación.
+  - Antes de `Popen`, `starting_timeout` identifica el intento y acredita cero spawns. Después, se cierra por identidad y queda `UNRECONCILED` si hay un proceso sin confirmar.
+  - La espera UDP consume el remanente en `RUNNING` (`dayz_test_readiness.py:64`).
+- [T3] Cancelación: `_LaunchCancel` se registra antes de publicar la fila. El daemon liquida de forma idempotente el intento exacto ante el stop del titular, la cancelación MCP o CLI, la pérdida del lease y un fallo del build.
+  - Bloquea la continuación antes de soltar el claim.
+  - El build lock se mantiene hasta que acaba el builder.
+  - En la ventana `RUNNING` sin ack, el stop gana al ack.
+  - F2-cancel fuerza tres casos: la espera del lock, el build en curso y la carrera entre `Popen` y el ack (`process_lifecycle.py:5555`, :7421, :6382).
+- [T4] Persistir una fase que pruebe que el spawn aún era imposible.
+  - `admin_reconcile --empty` respeta una reserva viva o la cancela por la misma vía.
+  - Tras un reinicio, se retira la reserva demostrada y se conserva la recuperación por intent e identidad donde pudo haber spawn.
+  - Criterio: un reinicio a cada lado de esa frontera.
+  - El vigilante y el watchdog no liquidan `STARTING`: el plazo es solo de T2 (`process_lifecycle.py:11217`, :10088).
+- [T5] Con 3A, bajo `box_admission()` el claim exacto se liga a la fila, también en el start inmediato y en el CLI con la FIFO vacía.
+  - Antes del spawn se revalidan el claim, `m1.espera` y las sondas de proceso y puerto.
+  - Si se pierde el claim, no continúa aunque el build acabe.
+  - `takeover` sigue eligiendo solo `RUNNING` o `RUNNING_IDLE`, y mira la cola antes de desalojar.
+  - Criterios: la ocupación vista desde otro daemon, la pérdida del claim y el avance del siguiente ticket.
+- [T6] Ajustes de criterios:
+  - F2-pos usa el probe real y comprueba los dos bordes: rehúsa en t=1800 y el siguiente obtiene el lease en t=1880 con latidos cada 40 s.
+  - F2-neg2 observa desde otro cliente (el `session_status` del caller espera su `tool_lock`) y exige un solo lanzamiento con el mismo ID al soltar el build lock.
+  - F2-reg cubre el CLI sellado, `preflight` y las extensiones `client` y `offline` con `run_id`, que preservan el proceso previo si falla su preparación. Se mantienen los negativos de #391 (entrada humana, señal incierta, binding ausente).
 
 ## Fase 3: una sola cola para la caja física (P-a, P-b)
 
