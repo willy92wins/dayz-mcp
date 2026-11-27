@@ -26,18 +26,18 @@ Mejora planificada (run compartido con stack unión, cola para el recurso run, z
 3. Nunca mates un DayZ, nunca cierres un arnés, una sesión o un daemon ajeno y nunca borres `C:\tmp\caja-dayz\m1.espera`. Tampoco preguntes a Guillermo si cerrar lo de otro: esperar en la cola es la respuesta, salvo que el rechazo sea terminal (paso 5).
 4. Si te para `run_protected` o `m1.espera`, espera en la cola solo cuando el rechazo sea contención (paso 5). Un run abandonado lo cierra el vigilante (`idle_warden`), que viene encendido por defecto. `m1.espera` no lo quita nadie automático: nunca caduca. Un `reason="box_reserved"` con `queue_offer` nulo (por ejemplo `m1.espera` y el puerto aún retenido) es terminal: no reencoles.
 5. Clasifica cada rechazo por `error_code`, `reason` y `queue_offer`. No trates `error_code="active_run_exists"` como contención por sí solo.
-   - Contención (puedes volver a encolar; no cuenta como intento fallido): el rechazo trae una oferta FIFO accionable (`queue_offer.retry.on_busy="queue"`), o la llamada venció de verdad (esperó y terminó por el tope de esa espera) y el ocupante puede terminar.
+   - Contención (puedes volver a encolar; no cuenta como intento fallido): el rechazo trae una oferta FIFO accionable (`queue_offer.retry.on_busy="queue"`). Al reencolar, aplica todos los argumentos de `queue_offer.retry`, no solo `on_busy`: si la oferta trae `build=false`, `clean=false` y `pack_only=false` (p. ej. tras `reason="box_taken_during_build"`, `box_occupancy.py:653,820`), pásalos tal cual, y recalcula `wait_for_box_s` como abajo.
    - Bloqueo terminal (no reencoles): `reason="port_in_use_foreign"` con `queue_offer` nulo; también `reason="box_reserved"` u `own_run` con oferta nula, un rechazo sin `reason` y sin oferta, o una oferta que no lleve `retry.on_busy="queue"`. La caja libre con el puerto ocupado por otro no se arregla con `wait_for_box_s`.
-   - Si la espera vence y el rechazo sigue siendo contención, puedes volver a ponerte en la cola. El tiempo total de reencolado está acotado a 1800 s desde el primer `dayz_test_run(..., on_busy="queue")`. En cada llamada pasa `wait_for_box_s=min(600, remaining)`, donde `remaining` es 1800 menos lo ya esperado. Si `remaining` es 0, para: es terminal. No pases `wait_for_box_s=0` con `on_busy="queue"`: ese 0 se interpreta como 600 s (`server.py:7813`).
+   - El tiempo total de reencolado está acotado a 1800 s. En la primera llamada `dayz_test_run(..., on_busy="queue")` fija un plazo monotónico (`deadline = monotonic() + 1800`). En cada llamada, `remaining = deadline - monotonic()`. Si `remaining <= 0`, para: es terminal. Si no, pasa `wait_for_box_s=min(600, remaining)`. No pases `wait_for_box_s=0` con `on_busy="queue"`: ese 0 se interpreta como 600 s (`server.py:7813`). El plazo cubre el tiempo entre llamadas y la duración de cada una.
 
 | error_code | reason | queue_offer | Qué hacer |
 |---|---|---|---|
 | cualquiera | `port_in_use_foreign` | `null` | Terminal. No reencolar. |
 | cualquiera | `box_reserved` | `null` | Terminal. No reencolar. |
 | cualquiera | `own_run` u otro | `null`, o sin `retry.on_busy="queue"` | Terminal. No reencolar. |
-| cualquiera | cualquiera | oferta con `retry.on_busy="queue"` | Contención. Reencolar con `wait_for_box_s=min(600, remaining)` hasta el tope de 1800 s. |
+| cualquiera | cualquiera, p. ej. `box_taken_during_build` | oferta con `retry.on_busy="queue"` | Contención. Reencolar aplicando todos los args de `queue_offer.retry` (incluidos `build`/`clean`/`pack_only=false` si vienen) y `wait_for_box_s=min(600, remaining)` hasta el plazo monotónico de 1800 s. |
 
-6. El lease hace falta para mutar en el juego y para el lifecycle low-level (lock, start, stop, restart, kill). Pedirlo no es opcional cuando vas a cambiar el proceso.
+6. El lease hace falta para mutar en el juego y para el lifecycle low-level (adopt/reap u otra operación no cubierta por `dayz_test_run` / `dayz_test_stop`). Para parar un run, parar vía lifecycle guard con el `run_id` exacto (`dayz_test_stop(run_id)` en un run gestionado). Suéltalo al acabar y no lo retengas sin partida.
 
 Límites conocidos (2026-11-27, consultoría de la cola): la cola vive en la memoria de cada daemon, así que LIVE, experimental y los daemons de otros arneses no ven las colas de los demás; y lo que se lanza fuera del MCP (DayZDiag sueltos, bancos de otros proyectos) no puede pedir turno. Con un DayZ ajeno vivo, `on_busy="queue"` espera igual a que salga, pero sin orden respecto a la cola del otro daemon.
 

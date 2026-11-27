@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- The box-queue pocket rule classifies rejections by `error_code`, `reason` and `queue_offer`. Only an actionable FIFO offer (`queue_offer.retry.on_busy="queue"`) is contention; `port_in_use_foreign`, `box_reserved` or `own_run` with a null offer is terminal. Each re-queue passes `wait_for_box_s=min(600, remaining)` so the 1800 s cap is strict (do not pass 0: that means 600 s). `m1.espera` occupies the box even without DayZ and never expires on its own. The lease also covers low-level lifecycle.
+- The box-queue pocket rule classifies rejections by `error_code`, `reason` and `queue_offer`. Only an actionable FIFO offer (`queue_offer.retry.on_busy="queue"`) is contention; re-queue applies every `queue_offer.retry` argument (including `build`/`clean`/`pack_only=false` after `box_taken_during_build`). `port_in_use_foreign`, `box_reserved` or `own_run` with a null offer is terminal. A monotonic 1800 s deadline starts at the first `on_busy="queue"` call; each retry passes `wait_for_box_s=min(600, remaining)` and stops when `remaining <= 0` (do not pass 0: that means 600 s). `m1.espera` occupies the box even without DayZ and never expires on its own. The lease also covers low-level lifecycle (stop via the lifecycle guard with the exact `run_id`); release it when you are done.
 
 ## [1.6] - 2026-11-28
 
