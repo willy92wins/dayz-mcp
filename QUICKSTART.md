@@ -13,8 +13,11 @@ You also need **Claude Code** and **Codex CLI**, both installed as
 native Windows executables. `.\install-mcp.ps1 -Register` (step 2) requires both:
 it refuses with `registration check failed for Codex: command missing` (or the
 Claude equivalent) if either is absent, and it does not register Claude alone.
-A non-native CLI is refused with `installer_cli_not_native_exe`
-(`tools/install-mcp.ps1`). When both are present, they must hold an identical
+The pre-check uses `claude` / `codex.cmd`; registration then needs the native
+`claude.exe` / `codex.exe` (`install_mcp.py`). Without those you get
+`installer_cli_not_native_exe`. The `claude mcp add` / `codex.cmd mcp add`
+lines the installer prints are only for doing it by hand (`tools/install-mcp.ps1`).
+When both are present, they must hold an identical
 `dayz-mcp` registration (a Codex config file without the entry, or Codex
 registered without Claude, still refuses with `daemon_provenance_incomplete`
 in `tools/dayz_mcp/host_config.py`, `resolve_daemon_provenance`).
