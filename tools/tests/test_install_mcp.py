@@ -778,7 +778,12 @@ class InstallerRegistrationTransactionTest(unittest.TestCase):
         ):
             register_transaction(provider, self.desired, host_configs=paths)
 
-        apply_timeouts.assert_called_once_with(*paths)
+        apply_timeouts.assert_called_once()
+        self.assertEqual(apply_timeouts.call_args.args, paths)
+        # Fix-forward #465 round 5: the call carries this attempt's id, the one
+        # recorded in the registration journal.
+        self.assertEqual(set(apply_timeouts.call_args.kwargs), {"attempt"})
+        self.assertRegex(apply_timeouts.call_args.kwargs["attempt"], r"^[0-9a-f]{32}$")
         self.assertEqual(provider.states, self.old)
         self.assertEqual(str(raised.exception), "registration_transaction_failed")
         self.assertNotIn("private-config-content", repr(raised.exception))

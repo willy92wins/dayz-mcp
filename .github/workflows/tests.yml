@@ -131,6 +131,7 @@ jobs:
           tests.test_linux_windows
           tests.test_podman_server
           tests.test_posix_fileops
+          tests.test_ff_465_txn_ownership_and_journal_fsync
           tests.test_proton_client
           tests.test_security_runtime_audit
 
