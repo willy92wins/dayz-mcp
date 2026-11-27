@@ -5429,9 +5429,12 @@ class ProcessLifecycle:
                     )
             elif active:
                 return self._start_rejection(client, authority, "active_run_exists")
-            admit = getattr(self.coordinator, "box_admit_start", None)
-            if existing is None and callable(admit):
-                queue_reason = admit(client, parsed.get("box_ticket"))
+            if existing is None and callable(
+                getattr(self.coordinator, "box_admit_start", None)
+            ):
+                queue_reason = self.coordinator.box_admit_start(
+                    client, parsed.get("box_ticket")
+                )
                 if queue_reason:
                     return self._start_rejection(
                         client,
@@ -5872,9 +5875,12 @@ class ProcessLifecycle:
                     if not audited:
                         self._add_degradation(settled, "audit_failed")
                     return settled
-                bind = getattr(self.coordinator, "box_bind_run", None)
-                if existing is None and callable(bind):
-                    bind_reason = bind(client, parsed.get("box_ticket"), run_id)
+                if existing is None and callable(
+                    getattr(self.coordinator, "box_bind_run", None)
+                ):
+                    bind_reason = self.coordinator.box_bind_run(
+                        client, parsed.get("box_ticket"), run_id
+                    )
                     if bind_reason:
                         audited = self._audit(
                             "lifecycle_start_rejected",
