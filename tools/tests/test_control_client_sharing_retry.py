@@ -95,6 +95,7 @@ def _client_with_hook(hook):
     temporary = tempfile.TemporaryDirectory()
     keyfile = Path(temporary.name) / "daemon.key"
     keyfile.write_text("fixture-key\n", encoding="utf-8")
+    keyfile.chmod(0o600)
     policy = _policy(keyfile)
     ready = False
 
@@ -466,6 +467,7 @@ class SharingRetryWindowsTests(unittest.TestCase):
                       "codex": self.root / "config.toml"}
         self.keyfile = self.root / "fixture.key"
         self.keyfile.write_bytes(b"synthetic-fixture-only")
+        self.keyfile.chmod(0o600)
         for platform, path in self.paths.items():
             entry = {"command": str(Path(sys.executable).resolve()), "args": [
                 "-m", "dayz_mcp", "--client", "--port", "18765",

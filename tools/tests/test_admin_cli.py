@@ -136,6 +136,7 @@ class AuxiliaryVerifiedHttpRoutingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             keyfile = Path(directory) / "daemon.key"
             keyfile.write_text("api-key", encoding="utf-8")
+            keyfile.chmod(0o600)
             patches, calls = self._routing_patches(
                 admin_cli, (409, b'{"error":"session_granting"}'), str(keyfile.resolve())
             )
@@ -165,6 +166,7 @@ class AuxiliaryVerifiedHttpRoutingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             keyfile = Path(directory) / "daemon.key"
             keyfile.write_text("api-key", encoding="utf-8")
+            keyfile.chmod(0o600)
             patches, calls = self._routing_patches(
                 lifecycle_cli,
                 (202, b'{"status":"stopping"}'),
@@ -197,6 +199,7 @@ class AuxiliaryVerifiedHttpRoutingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             keyfile = Path(directory) / "daemon.key"
             keyfile.write_text("api-key", encoding="utf-8")
+            keyfile.chmod(0o600)
             patches, calls = self._routing_patches(
                 doctor,
                 (200, b'{"daemon_generation":"generation-public"}'),
@@ -432,6 +435,7 @@ class ExplicitDaemonPolicyRoutingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             keyfile = Path(directory) / "daemon.key"
             keyfile.write_text("api-key", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             cases = (
                 (
@@ -473,6 +477,7 @@ class ExplicitDaemonPolicyRoutingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             keyfile = Path(directory) / "daemon.key"
             keyfile.write_text("api-key", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
             calls: list[dict[str, object]] = []
 
@@ -536,6 +541,7 @@ class ExplicitDaemonPolicyRoutingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             keyfile = Path(directory) / "daemon.key"
             keyfile.write_text("api-key", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile, kind="bootstrap")
             observed: list[tuple[object, str, dict[str, object]]] = []
 
@@ -586,6 +592,7 @@ class ExplicitDaemonPolicyRoutingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             keyfile = Path(directory) / "daemon.key"
             keyfile.write_text("api-key", encoding="utf-8")
+            keyfile.chmod(0o600)
             policy = _policy(keyfile)
 
             def admin_request(

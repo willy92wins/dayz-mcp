@@ -2586,6 +2586,7 @@ class HttpCaptureToolsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = client_cls(
                 policy=_control_policy(policy_mod.AccreditedDaemonPolicy, keyfile),
                 identity=identity,

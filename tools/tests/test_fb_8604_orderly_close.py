@@ -647,6 +647,7 @@ class Client8604Test(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             client.active_lease_token = "lease-token"
             with patch.object(
@@ -681,6 +682,7 @@ class Client8604Test(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
             keyfile.write_text("test-key\n", encoding="utf-8")
+            keyfile.chmod(0o600)
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             client.active_lease_token = "lease-token"
             with patch.object(

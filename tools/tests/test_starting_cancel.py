@@ -546,6 +546,7 @@ class _LoopbackSurface:
         self.key = "surface-key"
         self.keyfile = fixture.root / "daemon.key"
         self.keyfile.write_text(self.key, encoding="utf-8")
+        self.keyfile.chmod(0o600)
         self.state = loopback.ServerState(self.key)
         self.state.coordination = fixture.coordinator
         self.state.lifecycle = fixture.lifecycle
