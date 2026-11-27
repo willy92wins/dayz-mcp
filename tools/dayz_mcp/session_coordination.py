@@ -11,6 +11,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
+# Loaded with the module so the production import closure is warm in a
+# fresh process (test_server_freshness); the box methods import it again.
+from dayz_mcp import shared_box_queue  # noqa: F401
 from dayz_mcp.runtime_state import bounded_text, valid_utc_timestamp
 
 
