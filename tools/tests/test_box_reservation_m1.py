@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, patch
 
 from dayz_mcp import box_occupancy, box_reservation, loopback, server
 from dayz_mcp.server import ServerConfig
-from dayz_mcp.session_coordination import SessionCoordinator
+from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from tests._tiers import slow_test
 from tests.client_helpers import _fixture_client_runtime
 from tests.dayz_test_tool_helpers import RUN_ID
@@ -405,10 +405,12 @@ class _DaemonBox:
         return occupancy
 
     def snapshot(self) -> dict[str, object]:
-        return {"box": loopback._box_payload(self.state)}
+        session_id = str(getattr(getattr(self, "caller", None), "session_id", "") or "")
+        return {"box": loopback._box_payload(self.state, session_id)}
 
     def bind(self, runtime: object) -> None:
         caller = runtime.identity  # type: ignore[attr-defined]
+        self.caller = caller
 
         async def session_status() -> dict[str, object]:
             await asyncio.sleep(0)
@@ -710,6 +712,24 @@ class DayzTestRunReservationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.launches, [])
         self.assertEqual(payload["error_code"], "active_run_exists")
         self.assertEqual(payload["reason"], "box_reserved")
+        self.assertNotIn("evicted_run_id", payload)
+
+    async def test_takeover_does_not_stop_while_someone_is_waiting(self) -> None:
+        self.box.runs = [dict(_OTHER_RUN)]
+        waiter = ClientIdentity(
+            "claude", 12, 1, "2026-07-15T00:00:00Z", "sess-waiter", "box"
+        )
+        self.box.coordinator.box_wait_touch(waiter, purpose="wait")
+        stop = AsyncMock(
+            return_value={"status": "succeeded", "run_id": _OTHER_RUN["run_id"]}
+        )
+
+        with patch.object(server.dayz_test_tool, "execute_dayz_test_stop", stop):
+            payload = await self._call(_launch_ok, takeover=True)
+
+        stop.assert_not_called()
+        self.assertEqual(self.launches, [])
+        self.assertEqual(payload["error_code"], "takeover_required")
         self.assertNotIn("evicted_run_id", payload)
 
 

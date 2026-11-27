@@ -1687,6 +1687,7 @@ class BoxWaitQueueTest(unittest.TestCase):
 
         self.coordinator = SessionCoordinator(
             time_fn=lambda: self.now,
+            wall_time_fn=lambda: self.now,
             id_fn=next_id,
             token_fn=lambda: "unused",
         )

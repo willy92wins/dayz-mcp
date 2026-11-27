@@ -5429,14 +5429,28 @@ class ProcessLifecycle:
                     )
             elif active:
                 return self._start_rejection(client, authority, "active_run_exists")
-            blocker = getattr(self.coordinator, "box_blocks_start", None)
-            if callable(blocker) and blocker(client):
-                return self._start_rejection(
-                    client,
-                    authority,
-                    "active_run_exists",
-                    audit_reason="box_claimed",
+            if existing is None and callable(
+                getattr(self.coordinator, "box_admit_start", None)
+            ):
+                queue_reason = self.coordinator.box_admit_start(
+                    client, parsed.get("box_ticket")
                 )
+                if queue_reason:
+                    return self._start_rejection(
+                        client,
+                        authority,
+                        "active_run_exists",
+                        audit_reason=str(queue_reason),
+                    )
+            elif existing is None:
+                blocker = getattr(self.coordinator, "box_blocks_start", None)
+                if callable(blocker) and blocker(client):
+                    return self._start_rejection(
+                        client,
+                        authority,
+                        "active_run_exists",
+                        audit_reason="box_claimed",
+                    )
             # The DayZ Studio (M1) reservation file (box_reservation.py). Read
             # again after the last socket-table read, before the storage
             # rotation, and once more right before the spawn.
@@ -5861,6 +5875,34 @@ class ProcessLifecycle:
                     if not audited:
                         self._add_degradation(settled, "audit_failed")
                     return settled
+                if existing is None and callable(
+                    getattr(self.coordinator, "box_bind_run", None)
+                ):
+                    bind_reason = self.coordinator.box_bind_run(
+                        client, parsed.get("box_ticket"), run_id
+                    )
+                    if bind_reason:
+                        audited = self._audit(
+                            "lifecycle_start_rejected",
+                            client,
+                            str(bind_reason),
+                            "rejected",
+                            run_id=run_id,
+                            stage="spawn",
+                        )
+                        self._retire_minted(run_id, launch_role, minted, "launch_failed")
+                        settled = self._settle_failed_launch(
+                            client=client,
+                            previous=previous,
+                            provisional=provisional,
+                            launched=None,
+                            record=None,
+                            confirmed_error="active_run_exists",
+                            attempt_started_at=attempt_started_at,
+                        )
+                        if not audited:
+                            self._add_degradation(settled, "audit_failed")
+                        return settled
                 launched_at = self._server_start_clock()
                 try:
                     launched = self.launcher(

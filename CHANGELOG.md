@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The DayZ box queue is one FIFO shared by every instance on the machine (LIVE, experimental, xai and harness daemons): `box-queue.json` under `server_cli.shared_root()`, changed only under `box-queue.lock` and written with `atomic_write_json` (`tools/dayz_mcp/shared_box_queue.py`). A daemon keeps only its own tickets in memory. Every new start is admitted under `box_admission()` with the exact ticket at the head in `claimed`; a start without that ticket is refused with `active_run_exists` (`box_queue_ahead` or `box_claimed`) while anyone else is ahead. A claim lasts 600 s, is refreshed by the existing heartbeat, and a lost claim never launches. Entries whose owner process exited (pid gone, or alive with another creation time) are purged; an unreadable or unknown queue file keeps the box occupied (`box_queue_unreadable`) and blocks `takeover`. Plan: `plans/2026-11-27-cola-caja-comun.md`, phase 3A.
+
 ### Fixed
 
 - `engine_set` and `vehicle_control` drive a vanilla motorbike (`MotorbikeScript`, such as `Motorbike_01_*`) as they drive a car: the driver is crew position 0, the refusal codes and their order are the car's, `brake` is the rear brake and `handbrake` the front brake, and the kickstand goes up while it drives; `vehicle_prepare_fixture` also prepares one (OnDebugSpawn, then the same wait; ready with every wheel on, fuel above 0 and its vital parts), so a `world_spawn` motorbike can start (inbox b95f). Needs a rebuilt PBO.
