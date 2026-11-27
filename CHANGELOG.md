@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- `vehicle_enter` no longer seats a player in a driver seat someone else holds (#473, a known issue of 1.6): when the server reads someone in that seat (`CrewMember`, the check vanilla's get-in makes), it answers `seat_occupied` before any `StartCommand_Vehicle`, seats nobody and queues no job, and a player already in a vehicle still gets `already_in_vehicle` first. Needs a rebuilt PBO.
+- `vehicle_enter` no longer seats a player in a driver seat someone else holds (#473, a known issue of 1.6): when the server reads someone in that seat (`CrewMember`, the check vanilla's get-in makes), it answers `seat_occupied` before any `StartCommand_Vehicle`, seats nobody and queues no job, and a player already in a vehicle still gets `already_in_vehicle` first. Tried in game on 2026-11-27 (DayZDiag 1.30.164289, one client, run `d93f87b9`): `vehicle_enter` seated the player in an empty `CivilianSedan` and answered `already_in_vehicle` when asked again; after `player_kill` at the wheel and `player_respawn`, with the dead body still in the driver seat, it answered `seat_occupied`, the new body stayed out, and no script error was logged before the shutdown. Needs a rebuilt PBO.
 
 ## [1.6] - 2026-11-28
 
