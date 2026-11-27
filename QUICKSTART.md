@@ -9,15 +9,15 @@ Everything else in this repo is optional until this works.
 and a DayZ server you may load mods on. The daemon binds `127.0.0.1` and drives a game on the same machine;
 there is no remote mode.
 
-You also need **Claude Code** (and **Codex CLI** if you use Codex), installed as
-native executables: the installer refuses a non-native CLI with
-`installer_cli_not_native_exe` (`tools/install-mcp.ps1`). When Codex is present,
-both clients must hold an identical `dayz-mcp` registration (a Codex config file
-without the entry, or Codex registered without Claude, still refuses with
-`daemon_provenance_incomplete` in `tools/dayz_mcp/host_config.py`,
-`resolve_daemon_provenance`); on a host with Claude Code only (no Codex CLI and
-no `~/.codex/config.toml`), registration and provenance resolve from Claude
-alone.
+You also need **Claude Code** and **Codex CLI**, both installed as
+native Windows executables. `.\install-mcp.ps1 -Register` (step 2) requires both:
+it refuses with `registration check failed for Codex: command missing` (or the
+Claude equivalent) if either is absent, and it does not register Claude alone.
+A non-native CLI is refused with `installer_cli_not_native_exe`
+(`tools/install-mcp.ps1`). When both are present, they must hold an identical
+`dayz-mcp` registration (a Codex config file without the entry, or Codex
+registered without Claude, still refuses with `daemon_provenance_incomplete`
+in `tools/dayz_mcp/host_config.py`, `resolve_daemon_provenance`).
 
 AddonBuilder also needs the **Visual C++ runtimes**. Without any of them it
 dies with `System.BadImageFormatException: Could not load file or assembly
@@ -27,15 +27,14 @@ anything. Steam ships the installers under
 but only runs them the first time a game is launched from its UI; on a clean
 machine, run those installers yourself first.
 
-**GitHub Release variant.** The published addon for v1.5 is
-[DayZ_MCP-v1.5-addon.zip](https://github.com/willy92wins/dayz-mcp/releases/download/v1.5/DayZ_MCP-v1.5-addon.zip).
-Verify it against [SHA256SUMS.txt](https://github.com/willy92wins/dayz-mcp/releases/download/v1.5/SHA256SUMS.txt)
-(the same release also publishes [VERSION.json](https://github.com/willy92wins/dayz-mcp/releases/download/v1.5/VERSION.json)),
-then extract the archive without changing its layout. It contains `@DayZ_MCP` with `Addons/DayZ_MCP.pbo`,
-its signature `Addons/DayZ_MCP.pbo.DayZ_MCP.bisign`, `Keys/DayZ_MCP.bikey`,
-`mod.cpp` and `VERSION.json`. The release asset replaces steps 1 and 3: skip the
-`P:\` mapping and `pack-addon.ps1`, but still complete steps 2, 4, and 5.
-The Python half is still the clone path: the wheel and `dayz-mcp-requirements.txt` are not in that release.
+**GitHub Release variant (historical).** Do not use the v1.5 addon zip on a current
+(1.6) clone: that zip ships `bridge_version` 12, and this tree expects 13, so
+`bridge_status` stays `ready: false` (`version_mismatch`). The v1.5 zip is only
+valid after `git checkout v1.5`, or pack the PBO from this clone (step 3).
+A labelled historical file from that release is
+[VERSION.json](https://github.com/willy92wins/dayz-mcp/releases/download/v1.5/VERSION.json)
+(v1.5; not an install recipe). The Python half is still the clone path: the wheel
+and `dayz-mcp-requirements.txt` are not in a published release.
 
 **1 — Map the work drive.** DayZ Tools resolve addon sources through `P:\`, and
 `$PBOPREFIX$` is read relative to it. Point it at the folder *containing* `addon`:

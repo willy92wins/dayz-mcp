@@ -52,6 +52,35 @@ def is_offline_get_error(error: BaseException) -> bool:
     return isinstance(error, (urllib.error.URLError, TimeoutError, OSError))
 
 
+def summarize_release_asset_gets(
+    outcomes: list[tuple[str, str, int | None, Exception | None]],
+) -> tuple[int, list[str], list[str]]:
+    """Classify GET outcomes.
+
+    HTTP 403/404 are failures. A mix of HTTP 200 and a timeout is a failure
+    (the timeouts join the failure list). Offline is only when every GET
+    failed with a network or timeout error.
+    """
+    successes = 0
+    failures: list[str] = []
+    offline: list[str] = []
+    for rel, url, status, error in outcomes:
+        if error is not None:
+            if is_offline_get_error(error):
+                offline.append(f"{rel}: GET {url} -> {error}")
+            else:
+                code = getattr(error, "code", error)
+                failures.append(f"{rel}: GET {url} -> {code}")
+        elif status == 200:
+            successes += 1
+        else:
+            failures.append(f"{rel}: GET {url} -> {status}")
+    if offline and (successes or failures):
+        failures.extend(offline)
+        offline = []
+    return successes, failures, offline
+
+
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _H2_RE = re.compile(r"^##[ \t]+")
 _WORKSHOP_LINK_RE = re.compile(
@@ -454,6 +483,33 @@ class LlmsInstallDocsTest(unittest.TestCase):
             "'llms-install.md' as a file to update with tools/pyproject.toml",
         )
 
+    def test_quickstart_does_not_prescribe_v15_addon_zip_for_current_clone(self) -> None:
+        body = _read("QUICKSTART.md")
+        self.assertNotIn(
+            "DayZ_MCP-v1.5-addon.zip",
+            body,
+            "QUICKSTART must not prescribe the v1.5 addon zip for a current clone",
+        )
+        self.assertIn(
+            "https://github.com/willy92wins/dayz-mcp/releases/download/v1.5/VERSION.json",
+            body,
+        )
+        self.assertIn("git checkout v1.5", body)
+        self.assertRegex(body, r"version_mismatch|bridge_version")
+        self.assertRegex(body, r"(?i)historical")
+
+    def test_quickstart_and_readme_register_require_claude_and_codex(self) -> None:
+        for doc_name in ("QUICKSTART.md", "README.md", "llms-install.md"):
+            body = _read(doc_name)
+            with self.subTest(doc=doc_name):
+                lowered = body.casefold()
+                self.assertNotIn("codex is optional", lowered)
+                self.assertNotIn("from claude alone", lowered)
+                self.assertIn("-Register", body)
+                self.assertIn("Claude", body)
+                self.assertIn("Codex", body)
+                self.assertIn("registration check failed for Codex", body)
+
     def test_documented_release_assets_return_http_200(self) -> None:
         """Every concrete GitHub release asset URL in the user guides must exist.
 
@@ -473,9 +529,7 @@ class LlmsInstallDocsTest(unittest.TestCase):
             "must fail when it finds 0 URLs",
         )
 
-        failures: list[str] = []
-        offline: list[str] = []
-        successes = 0
+        outcomes: list[tuple[str, str, int | None, Exception | None]] = []
         for rel, url in found:
             request = urllib.request.Request(
                 url,
@@ -486,30 +540,26 @@ class LlmsInstallDocsTest(unittest.TestCase):
                 with urllib.request.urlopen(request, timeout=30) as response:
                     status = getattr(response, "status", None) or response.getcode()
                     response.read(64)
-            except BaseException as error:
-                if is_offline_get_error(error):
-                    offline.append(f"{rel}: GET {url} -> {error}")
-                    continue
-                code = getattr(error, "code", error)
-                failures.append(f"{rel}: GET {url} -> {code}")
+            except urllib.error.HTTPError as error:
+                outcomes.append((rel, url, None, error))
                 continue
-            if status != 200:
-                failures.append(f"{rel}: GET {url} -> {status}")
-            else:
-                successes += 1
+            except (urllib.error.URLError, TimeoutError, OSError) as error:
+                outcomes.append((rel, url, None, error))
+                continue
+            outcomes.append((rel, url, status, None))
 
+        successes, failures, offline = summarize_release_asset_gets(outcomes)
         if failures:
             self.fail(
                 "documented release asset URL(s) did not return HTTP 200:\n"
                 + "\n".join(failures)
             )
-        if offline and successes == 0:
-            # Only a network or timeout error is offline; HTTP 403/404 fail above.
+        if offline:
+            # Only when every GET failed with a network or timeout error.
             self.skipTest(
                 "offline: cannot GET GitHub to verify release assets: "
                 + "; ".join(offline)
             )
-
 
 
 class DocumentedReleaseAssetGetHelpersTest(unittest.TestCase):
@@ -563,6 +613,40 @@ class DocumentedReleaseAssetGetHelpersTest(unittest.TestCase):
             is_offline_get_error(urllib.error.URLError("name or service not known"))
         )
         self.assertTrue(is_offline_get_error(TimeoutError("timed out")))
+
+    def test_mixed_200_and_timeout_is_a_failure(self) -> None:
+        successes, failures, offline = summarize_release_asset_gets(
+            [
+                ("QUICKSTART.md", "https://example.invalid/a", 200, None),
+                (
+                    "QUICKSTART.md",
+                    "https://example.invalid/b",
+                    None,
+                    TimeoutError("timed out"),
+                ),
+            ]
+        )
+        self.assertEqual(successes, 1)
+        self.assertTrue(
+            failures,
+            "a mix of HTTP 200 and a timeout must be a failure, not a pass or skip",
+        )
+        self.assertEqual(offline, [])
+
+    def test_all_timeouts_stay_offline(self) -> None:
+        successes, failures, offline = summarize_release_asset_gets(
+            [
+                (
+                    "QUICKSTART.md",
+                    "https://example.invalid/a",
+                    None,
+                    TimeoutError("timed out"),
+                )
+            ]
+        )
+        self.assertEqual(successes, 0)
+        self.assertEqual(failures, [])
+        self.assertEqual(len(offline), 1)
 
 
 
