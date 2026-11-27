@@ -88,6 +88,7 @@ SERVER_CONTRACT = {
     "bot_start": ("action", "bot_ttl_s", "object_id"),
     "bot_stop": ("object_id",),
     "hands_attach": ("object_id", "slot", "uid"),
+    "inventory_give": ("ammo", "ammo_set", "classname", "dest", "uid"),
     "loadout_apply": ("loadout_items", "object_id", "uid"),
     "loadout_clear": ("object_id", "uid"),
     "loadout_get": ("object_id", "uid"),
@@ -355,10 +356,10 @@ class EnforceSourceTest(unittest.TestCase):
         self.assertEqual(SERVER_CAPABILITY_BITS[:48], SERVER_BITS)
         self.assertEqual(SERVER_CAPABILITY_BITS[48:], ("player_set_stance", "players_kinematics"))
         self.assertEqual(SERVER_ARG_CONTRACT, SERVER_CONTRACT)
-        self.assertEqual(server_arg_contract_hash(), "3b7a1b143153de71")
-        self.assertEqual(bridge_readiness.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b7a1b143153de71")
+        self.assertEqual(server_arg_contract_hash(), "c282097c3d1855ba")
+        self.assertEqual(bridge_readiness.EXPECTED_SERVER_ARG_CONTRACT_HASH, "c282097c3d1855ba")
         self.assertIn(
-            'SERVER_ARG_CONTRACT_HASH = "3b7a1b143153de71"',
+            'SERVER_ARG_CONTRACT_HASH = "c282097c3d1855ba"',
             SERVER_BRIDGE_PATH.read_text(encoding="utf-8"),
         )
         self.assertIsNone(_BRIDGE_COMMAND_TOOLS["client"][COMMAND])
@@ -392,7 +393,7 @@ class CompatibilityTest(unittest.TestCase):
         state = _state()
         status, body = state.record_poll(
             "server", VERSION, instance=INST_SERVER, source_pid=PID_SERVER,
-            cm="1.ffffffffffff", ach="3b7a1b143153de71",
+            cm="1.ffffffffffff", ach="c282097c3d1855ba",
         )
         self.assertEqual(status, 200, body)
         _poll_client(state, without_pinned)
