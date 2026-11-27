@@ -16,6 +16,42 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 
+# User-facing install guides only. plans/ and reviews/ are out of scope for
+# the release-asset GET, so a stray URL there cannot hide a missing one here.
+USER_GUIDE_DOCS = ("llms-install.md", "README.md", "QUICKSTART.md")
+RELEASE_ASSET_URL_RE = re.compile(
+    r"https://github.com/willy92wins/dayz-mcp/releases/download/"
+    r"v[0-9][^/\s\"'`)]+/[A-Za-z0-9._+-]+"
+)
+UNPUBLISHED_NO_CLONE_ASSET_RE = re.compile(
+    r"https://github.com/willy92wins/dayz-mcp/releases/download/"
+    r"v[0-9][^/\s\"'`)]+/(?:dayz-mcp-requirements\.txt|[^/\s\"'`)]+\.whl)"
+)
+
+
+def collect_documented_release_asset_urls(
+    doc_texts: dict[str, str],
+) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name in USER_GUIDE_DOCS:
+        body = doc_texts.get(name, "")
+        for url in RELEASE_ASSET_URL_RE.findall(body):
+            if url in seen:
+                continue
+            seen.add(url)
+            found.append((name, url))
+    return found
+
+
+def is_offline_get_error(error: BaseException) -> bool:
+    import urllib.error
+
+    if isinstance(error, urllib.error.HTTPError):
+        return False
+    return isinstance(error, (urllib.error.URLError, TimeoutError, OSError))
+
+
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _H2_RE = re.compile(r"^##[ \t]+")
 _WORKSHOP_LINK_RE = re.compile(
@@ -213,6 +249,7 @@ class LlmsInstallDocsTest(unittest.TestCase):
             "cd dayz-mcp\\tools",
             ".\\install-mcp.ps1",
             "-ServerProfiles",
+            "-ClientProfiles",
             "-Register",
         )
         for token in required_tokens:
@@ -236,22 +273,78 @@ class LlmsInstallDocsTest(unittest.TestCase):
         )
 
     def test_guide_does_not_sell_an_unpublished_no_clone_path(self) -> None:
-        concrete_asset = re.compile(
-            r"https://github.com/willy92wins/dayz-mcp/releases/download/"
-            r"v[0-9][^\s/\"'`)]+/[A-Za-z0-9._+-]+"
-        )
-        for doc_name in ("llms-install.md", "README.md", "QUICKSTART.md"):
-            text = _read(doc_name)
+        for doc_name in USER_GUIDE_DOCS:
+            body = _read(doc_name)
             with self.subTest(doc=doc_name):
                 self.assertIsNone(
-                    concrete_asset.search(text),
-                    f"{doc_name} still contains a concrete releases/download "
-                    "asset URL; the no-clone path is not published yet",
+                    UNPUBLISHED_NO_CLONE_ASSET_RE.search(body),
+                    f"{doc_name} still advertises an unpublished wheel or "
+                    "dayz-mcp-requirements.txt download URL",
                 )
-                lowered = text.casefold()
+                lowered = body.casefold()
                 self.assertNotIn("no clone.", lowered)
                 self.assertNotIn("without a clone", lowered)
                 self.assertNotIn("sin clonar", lowered)
+
+    def test_register_requires_python_311_and_native_claude_and_codex(self) -> None:
+        body = _read("llms-install.md")
+        lowered = body.casefold()
+        self.assertNotIn("codex is optional", lowered)
+        self.assertIn("Python 3.11", body)
+        self.assertIn("-Register", body)
+        self.assertIn("Claude", body)
+        self.assertIn("Codex", body)
+        self.assertIn("native", lowered)
+        self.assertIn("registration check failed for Codex", body)
+        self.assertRegex(
+            body,
+            r"-Register.{0,160}(Claude.{0,80}Codex|Codex.{0,80}Claude)"
+            r"|(Claude.{0,80}Codex|Codex.{0,80}Claude).{0,160}-Register",
+            "llms-install.md must say -Register requires both Claude and Codex",
+        )
+
+    def test_guide_documents_workshop_mod_and_client_profiles(self) -> None:
+        body = _read("llms-install.md")
+        workshop_id = _module_string_constant(
+            "tools/dayz_mcp/setup_cmd.py", "WORKSHOP_ITEM_ID"
+        )
+        self.assertIn(
+            rf"steamapps\workshop\content\221100\{workshop_id}",
+            body,
+        )
+        self.assertIn("-mod=", body)
+        self.assertIn("-profiles=", body)
+        self.assertIn("-ClientProfiles", body)
+        self.assertIn("-ClientProfiles", self._commands_block_text())
+        self.assertRegex(
+            body,
+            r"does not print.{0,40}-mod=|-mod=.{0,40}does not print",
+        )
+        self.assertRegex(
+            body,
+            r"Without `-ClientProfiles`.{0,120}dayz_mcp\.json"
+            r"|without `-ClientProfiles`.{0,120}dayz_mcp\.json",
+        )
+
+    def test_doctor_check_uses_doctor_module_and_daemon_policy(self) -> None:
+        body = _read("llms-install.md")
+        self.assertIn(
+            "-m dayz_mcp.doctor --daemon-policy normal --json",
+            body,
+        )
+        self.assertIsNone(
+            re.search(r"-m dayz_mcp doctor\b", body),
+            "llms-install.md must not invoke `python -m dayz_mcp doctor` "
+            "(that hits server.run and requires --keyfile)",
+        )
+
+    def test_changelog_1_6_does_not_promise_no_clone_install(self) -> None:
+        changelog = _read("CHANGELOG.md")
+        start = changelog.index("## [1.6]")
+        end = changelog.index("## [1.5]")
+        section = changelog[start:end].casefold()
+        self.assertNotIn("without a clone", section)
+        self.assertNotIn("from the github release with uv", section)
 
     def test_powershell_invokes_dayz_mcp_exe_with_dot_slash(self) -> None:
         text = _read("llms-install.md")
@@ -362,50 +455,27 @@ class LlmsInstallDocsTest(unittest.TestCase):
         )
 
     def test_documented_release_assets_return_http_200(self) -> None:
-        """Every concrete GitHub release asset URL in the docs must exist.
+        """Every concrete GitHub release asset URL in the user guides must exist.
 
         The no-clone install path advertised a requirements file that returned
-        404. This GET is skipped only when GitHub cannot be reached.
+        404. The test fails if the guides name no asset to check. HTTP 403/404
+        are failures; only a network or timeout error is treated as offline.
         """
         import urllib.error
         import urllib.request
 
-        doc_paths = [
-            path
-            for path in REPO.rglob("*.md")
-            if ".git" not in path.parts and "tools/tests" not in path.as_posix()
-        ]
-        url_re = re.compile(
-            r"https://github.com/willy92wins/dayz-mcp/releases/download/"
-            r"v[0-9][^/\s\"'`)]+/[A-Za-z0-9._+-]+"
+        doc_texts = {name: _read(name) for name in USER_GUIDE_DOCS}
+        found = collect_documented_release_asset_urls(doc_texts)
+        self.assertGreater(
+            len(found),
+            0,
+            "user guides document no release asset URL to verify; the GET "
+            "must fail when it finds 0 URLs",
         )
-        found: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        for path in sorted(doc_paths):
-            rel = path.relative_to(REPO).as_posix()
-            try:
-                text = path.read_text(encoding="utf-8")
-            except UnicodeError:
-                continue
-            for url in url_re.findall(text):
-                if url in seen:
-                    continue
-                seen.add(url)
-                found.append((rel, url))
-
-        probe = "https://github.com/willy92wins/dayz-mcp/releases"
-        try:
-            request = urllib.request.Request(
-                probe,
-                method="GET",
-                headers={"User-Agent": "dayz-mcp-docs-asset-check"},
-            )
-            with urllib.request.urlopen(request, timeout=20) as response:
-                response.read(64)
-        except (urllib.error.URLError, TimeoutError, OSError):
-            self.skipTest("offline: cannot GET GitHub to verify release assets")
 
         failures: list[str] = []
+        offline: list[str] = []
+        successes = 0
         for rel, url in found:
             request = urllib.request.Request(
                 url,
@@ -416,21 +486,83 @@ class LlmsInstallDocsTest(unittest.TestCase):
                 with urllib.request.urlopen(request, timeout=30) as response:
                     status = getattr(response, "status", None) or response.getcode()
                     response.read(64)
-            except urllib.error.HTTPError as error:
-                failures.append(f"{rel}: GET {url} -> {error.code}")
-                continue
-            except (urllib.error.URLError, TimeoutError, OSError) as error:
-                failures.append(f"{rel}: GET {url} -> {error}")
+            except BaseException as error:
+                if is_offline_get_error(error):
+                    offline.append(f"{rel}: GET {url} -> {error}")
+                    continue
+                code = getattr(error, "code", error)
+                failures.append(f"{rel}: GET {url} -> {code}")
                 continue
             if status != 200:
                 failures.append(f"{rel}: GET {url} -> {status}")
-        self.assertEqual(
-            failures,
-            [],
-            "documented release asset URL(s) did not return HTTP 200:\n"
-            + "\n".join(failures),
-        )
+            else:
+                successes += 1
 
+        if failures:
+            self.fail(
+                "documented release asset URL(s) did not return HTTP 200:\n"
+                + "\n".join(failures)
+            )
+        if offline and successes == 0:
+            # Only a network or timeout error is offline; HTTP 403/404 fail above.
+            self.skipTest(
+                "offline: cannot GET GitHub to verify release assets: "
+                + "; ".join(offline)
+            )
+
+
+
+class DocumentedReleaseAssetGetHelpersTest(unittest.TestCase):
+    def test_zero_urls_is_a_failure_not_a_pass(self) -> None:
+        found = collect_documented_release_asset_urls(
+            {name: "no asset URLs here" for name in USER_GUIDE_DOCS}
+        )
+        self.assertEqual(found, [])
+
+    def test_collects_urls_only_from_user_guides(self) -> None:
+        self.assertEqual(
+            USER_GUIDE_DOCS,
+            ("llms-install.md", "README.md", "QUICKSTART.md"),
+        )
+        self.assertNotIn("plans/", USER_GUIDE_DOCS)
+        self.assertNotIn("reviews/", USER_GUIDE_DOCS)
+        url = (
+            "https://github.com/willy92wins/dayz-mcp/releases/download/"
+            "v1.5/DayZ_MCP-v1.5-addon.zip"
+        )
+        found = collect_documented_release_asset_urls(
+            {
+                "QUICKSTART.md": f"see {url}",
+                "plans/secret.md": "https://github.com/willy92wins/dayz-mcp/"
+                "releases/download/v1.6/dayz-mcp-requirements.txt",
+                "reviews/note.md": "https://github.com/willy92wins/dayz-mcp/"
+                "releases/download/v0.0/ignored.whl",
+            }
+        )
+        self.assertEqual(found, [("QUICKSTART.md", url)])
+
+    def test_http_403_and_404_are_not_offline(self) -> None:
+        import urllib.error
+
+        for code in (403, 404):
+            error = urllib.error.HTTPError(
+                url="https://example.invalid/asset",
+                code=code,
+                msg="gone",
+                hdrs=None,
+                fp=None,
+            )
+            with self.subTest(code=code):
+                self.assertFalse(is_offline_get_error(error))
+                self.assertIsInstance(error, urllib.error.URLError)
+
+    def test_network_and_timeout_errors_are_offline(self) -> None:
+        import urllib.error
+
+        self.assertTrue(
+            is_offline_get_error(urllib.error.URLError("name or service not known"))
+        )
+        self.assertTrue(is_offline_get_error(TimeoutError("timed out")))
 
 
 

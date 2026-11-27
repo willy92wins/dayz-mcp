@@ -27,12 +27,15 @@ anything. Steam ships the installers under
 but only runs them the first time a game is launched from its UI; on a clean
 machine, run those installers yourself first.
 
-**GitHub Release variant.** If you downloaded `DayZ_MCP-v<version>-addon.zip`,
-verify it against the `SHA256SUMS.txt` published beside it, then extract the archive
-without changing its layout. It contains `@DayZ_MCP` with `Addons/DayZ_MCP.pbo`,
+**GitHub Release variant.** The published addon for v1.5 is
+[DayZ_MCP-v1.5-addon.zip](https://github.com/willy92wins/dayz-mcp/releases/download/v1.5/DayZ_MCP-v1.5-addon.zip).
+Verify it against [SHA256SUMS.txt](https://github.com/willy92wins/dayz-mcp/releases/download/v1.5/SHA256SUMS.txt)
+(the same release also publishes [VERSION.json](https://github.com/willy92wins/dayz-mcp/releases/download/v1.5/VERSION.json)),
+then extract the archive without changing its layout. It contains `@DayZ_MCP` with `Addons/DayZ_MCP.pbo`,
 its signature `Addons/DayZ_MCP.pbo.DayZ_MCP.bisign`, `Keys/DayZ_MCP.bikey`,
 `mod.cpp` and `VERSION.json`. The release asset replaces steps 1 and 3: skip the
 `P:\` mapping and `pack-addon.ps1`, but still complete steps 2, 4, and 5.
+The Python half is still the clone path: the wheel and `dayz-mcp-requirements.txt` are not in that release.
 
 **1 — Map the work drive.** DayZ Tools resolve addon sources through `P:\`, and
 `$PBOPREFIX$` is read relative to it. Point it at the folder *containing* `addon`:
