@@ -1048,6 +1048,9 @@ def _one_of(*accepted: object) -> _FieldValidator:
     return validate
 
 
+_ENFORCE_INT_MAX = 2147483647
+
+
 def _integer_in_range(
     *,
     minimum: int | None = None,
@@ -1685,9 +1688,19 @@ def _requires_capability_admission(cmd: str, args: object) -> bool:
     # A world_spawn that names a scene is admitted like a new verb (165a): an
     # older PBO would create the object and never register it, and only the
     # arg-contract hash tells the two world_spawn bridges apart.
+    # The same holds for an inventory_give that sets ammo (fix-forward of
+    # #455): an older PBO reads the command without ammo/ammo_set, creates the
+    # item and never applies the count. A plain inventory_give stays
+    # compatible with an older PBO.
     if cmd in _CAPABILITY_ADMISSION_COMMANDS:
         return True
-    return cmd == "world_spawn" and isinstance(args, Mapping) and "scene_id" in args
+    if not isinstance(args, Mapping):
+        return False
+    if cmd == "world_spawn":
+        return "scene_id" in args
+    if cmd == "inventory_give":
+        return "ammo" in args or "ammo_set" in args
+    return False
 
 
 # Owner cleanup may deliver these without a live lease. Nothing else internal
@@ -2068,7 +2081,9 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "uid": _is_string,
                 "classname": _is_non_empty_string,
                 "dest": _one_of("hands", "inventory"),
-                "ammo": _integer_in_range(minimum=0),
+                # Enforce int is 32-bit signed: a larger count never reaches
+                # the deserializer.
+                "ammo": _integer_in_range(minimum=0, maximum=_ENFORCE_INT_MAX),
                 "ammo_set": _is_true,
             },
         ),
@@ -5841,8 +5856,8 @@ class ServerState:
         A missing, stale, aged or foreign-binding census is
         bridge_capability_missing. An announced census with a missing or
         different arg-contract hash is arg_contract_mismatch, and that wins
-        over a missing command name. args matter only to world_spawn
-        (_requires_capability_admission).
+        over a missing command name. args matter only to world_spawn and
+        inventory_give (_requires_capability_admission).
         """
         if not _requires_capability_admission(cmd, args):
             return None
