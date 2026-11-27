@@ -68,6 +68,12 @@ class PinnedKeyfilePosixTest(unittest.TestCase):
         os.link(linked, self.root / "second-name")
         self.assert_refused(str(linked))
 
+    def test_group_or_world_readable_files_are_refused(self) -> None:
+        # Fix-forward #464 P1-2: the key is a secret, not only a trust anchor.
+        self.assert_refused(str(self.keyfile("group-read", mode=0o640)))
+        self.assert_refused(str(self.keyfile("world-read", mode=0o604)))
+        self.assert_refused(str(self.keyfile("default-umask", mode=0o644)))
+
     def test_content_is_refused_like_the_win32_reader(self) -> None:
         cases = {
             "empty": b"",

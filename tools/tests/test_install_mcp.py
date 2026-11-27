@@ -3373,7 +3373,10 @@ class ClaudeOnlyAndPosixPythonTest(unittest.TestCase):
         ) -> None:
             captured.append((provider, desired, kwargs))
 
+        # Still no codex CLI on PATH at registration time (fix-forward #464:
+        # --register rechecks it like --pin-clis).
         with (
+            patch.object(installer.shutil, "which", return_value=None),
             patch.object(installer, "run_runs_backup_gate", return_value={"status": "verified"}),
             patch.object(installer, "register_transaction", side_effect=fake_transaction),
         ):
@@ -3469,6 +3472,43 @@ class ClaudeOnlyAndPosixPythonTest(unittest.TestCase):
             )
         self.assertEqual(reg_raised.exception.code, "installer_cli_missing")
 
+
+    def test_register_rechecks_a_codex_cli_that_appeared_after_a_claude_only_pin(
+        self,
+    ) -> None:
+        # Fix-forward #464 P1-1: a Claude-only manifest plus a codex CLI that
+        # appeared on PATH later (no config.toml yet) must not register Claude
+        # alone; --register applies the same Codex criterion as --pin-clis.
+        # The fixture CLIs are Windows PE images, so the pin runs the Windows
+        # resolver on any host.
+        windows = patch.object(installer, "_is_windows_host", return_value=True)
+        windows.start()
+        self.addCleanup(windows.stop)
+        with patch.object(installer.shutil, "which", return_value=None):
+            pin_installer_clis(claude_exe=self.claude, runner=absent_probe_runner)
+        self.assertFalse((self.home / ".codex" / "config.toml").exists())
+        options = parse_args(["--register"], tools_root=self.root)
+        transaction = patch.object(
+            installer,
+            "register_transaction",
+            side_effect=AssertionError("registered Claude alone with Codex on PATH"),
+        )
+        codex_on_path = str(self.root / "bin" / "codex")
+        with (
+            patch.object(
+                installer.shutil,
+                "which",
+                side_effect=lambda name: codex_on_path if name == "codex" else None,
+            ),
+            patch.object(installer, "run_runs_backup_gate", return_value={"status": "verified"}),
+            transaction,
+        ):
+            with self.assertRaises(InstallerContractError) as raised:
+                installer.register_clients(
+                    options, self.venv_python, runner=absent_probe_runner
+                )
+        self.assertEqual(raised.exception.code, "installer_cli_missing")
+        self.assertIn("--codex-exe", str(raised.exception))
 
 class PosixInstallerRound3Test(unittest.TestCase):
     """Issue #422 round 3: POSIX install_runtime and --pin-clis resolution."""

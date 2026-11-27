@@ -60,6 +60,20 @@ install_mcp.py --register` (it refuses to drop options the registration already
 carries unless `--allow-option-removal` is passed), or pass
 `-ReplaceExistingRegistration` to remove and replace it with the script.
 
+`-Register` resolves **both** native CLIs and stops with
+`installer_cli_not_native_exe` when either is missing. On a host with Claude
+Code only (no `codex` on `PATH` and no `~/.codex/config.toml`), register from
+this directory instead:
+```powershell
+python install_mcp.py --pin-clis --claude-exe "C:\path\to\claude.exe"
+python install_mcp.py --server-profiles "C:\path\to\your\server\profiles" --register
+```
+If a `codex` CLI or a Codex config appears later, `--register` refuses with
+`installer_cli_missing` until you pin again with `--codex-exe`. An installed
+(wheel) `dayz-mcp doctor` then reports Codex as `CLI_NOT_PINNED`; from this
+editable checkout `doctor` does not use the pinned CLIs: it checks the Codex
+registration through the `codex` on `PATH`.
+
 **3 — Pack the addon** into `<DayZ>\!Workshop\@DayZ_MCP\Addons\DayZ_MCP.pbo`. Set
 `DAYZ_TOOLS_PATH` if DayZ Tools are not under `C:\Program Files (x86)`; the script names
 every path it tried before failing. The script packs the git-tracked `addon/` of the

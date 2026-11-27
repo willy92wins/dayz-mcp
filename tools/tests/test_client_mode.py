@@ -1190,8 +1190,10 @@ class ClientRuntimeProvenanceGateTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.keyfile = self.root / "daemon.key"
         self.keyfile.write_text("fixture-key", encoding="utf-8")
+        self.keyfile.chmod(0o600)
         self.foreign_keyfile = self.root / "foreign.key"
         self.foreign_keyfile.write_text("foreign-key", encoding="utf-8")
+        self.foreign_keyfile.chmod(0o600)
         self.launcher = str(Path(sys.executable).resolve())
         native = self.root / "native-python.exe"
         native.write_bytes(b"native-fixture")
@@ -1502,6 +1504,7 @@ class ClientDaemonStartupBudgetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             keyfile = Path(directory) / "daemon.key"
             keyfile.write_text("fixture-key", encoding="utf-8")
+            keyfile.chmod(0o600)
             config = ServerConfig(
                 mode="client",
                 key="fixture-key",
@@ -1718,6 +1721,7 @@ class ClientStartupHostConfigErrorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="client-host-err-") as tmp:
             keyfile = Path(tmp) / "daemon.key"
             keyfile.write_text("fixture-key\n", encoding="ascii")
+            keyfile.chmod(0o600)
             for code in (
                 "daemon_provenance_conflict",
                 "daemon_provenance_incomplete",
