@@ -1,8 +1,8 @@
 # Quickstart
 
-**With an AI agent, no clone.** Subscribe to the [DayZ-MCP Workshop item](https://steamcommunity.com/sharedfiles/filedetails/?id=3846741037) and ask your agent to follow [llms-install.md](llms-install.md). It installs the Python half from the GitHub release with uv, registers it with Claude Code (and Codex, when installed) and prints the `-mod=` argument for your server. The five steps below are the clone path.
-
 Five steps, from a fresh clone to an agent reading live state out of your server.
+An AI agent can follow [llms-install.md](llms-install.md), which is the same clone path in short form (the no-clone install from a GitHub release is not published yet).
+
 Everything else in this repo is optional until this works.
 
 **You need** Windows, DayZ **and** DayZ Tools from Steam, Python **3.11 or newer**,

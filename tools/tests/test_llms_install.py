@@ -206,118 +206,87 @@ class LlmsInstallDocsTest(unittest.TestCase):
             f"{len(non_empty)} non-empty lines; expected between 1 and 6",
         )
 
-    def test_versions_match_pyproject_toml(self) -> None:
-        version = _project_version()
+    def test_commands_block_is_the_clone_path(self) -> None:
+        block_text = self._commands_block_text()
+        required_tokens = (
+            "git clone https://github.com/willy92wins/dayz-mcp.git",
+            "cd dayz-mcp\\tools",
+            ".\\install-mcp.ps1",
+            "-ServerProfiles",
+            "-Register",
+        )
+        for token in required_tokens:
+            self.assertIn(
+                token,
+                block_text,
+                f"llms-install.md '## Commands' block omits required token "
+                f"{token!r} from the clone-path recipe",
+            )
+        self.assertIsNone(
+            re.search(
+                r"https://github.com/willy92wins/dayz-mcp/releases/download/",
+                block_text,
+            ),
+            "llms-install.md '## Commands' block must not advertise a "
+            "releases/download URL until a release publishes that asset",
+        )
+        self.assertIsNone(
+            re.search(r"\buv\s+venv\b", block_text),
+            "llms-install.md '## Commands' block uses forbidden 'uv venv'",
+        )
+
+    def test_guide_does_not_sell_an_unpublished_no_clone_path(self) -> None:
+        concrete_asset = re.compile(
+            r"https://github.com/willy92wins/dayz-mcp/releases/download/"
+            r"v[0-9][^\s/\"'`)]+/[A-Za-z0-9._+-]+"
+        )
+        for doc_name in ("llms-install.md", "README.md", "QUICKSTART.md"):
+            text = _read(doc_name)
+            with self.subTest(doc=doc_name):
+                self.assertIsNone(
+                    concrete_asset.search(text),
+                    f"{doc_name} still contains a concrete releases/download "
+                    "asset URL; the no-clone path is not published yet",
+                )
+                lowered = text.casefold()
+                self.assertNotIn("no clone.", lowered)
+                self.assertNotIn("without a clone", lowered)
+                self.assertNotIn("sin clonar", lowered)
+
+    def test_powershell_invokes_dayz_mcp_exe_with_dot_slash(self) -> None:
         text = _read("llms-install.md")
+        self.assertIn(
+            ".\\dayz-mcp.exe",
+            text,
+            "llms-install.md must tell a clean PowerShell to invoke "
+            ".\\dayz-mcp.exe, not a bare dayz-mcp or dayz-mcp.exe",
+        )
+        bare = re.compile(r"(?m)(?:^|[;&|]\s*)dayz-mcp(?:\.exe)?\b")
+        for opener, body in _extract_fenced_blocks(
+            text.splitlines(), context="llms-install.md"
+        ):
+            if not opener.endswith("powershell"):
+                continue
+            joined = "\n".join(body)
+            self.assertIsNone(
+                bare.search(joined),
+                "a PowerShell block invokes dayz-mcp without the .\\ prefix: "
+                f"{joined!r}",
+            )
 
-        venv_versions = [
-            value.rstrip(".")
-            for value in re.findall(r"\bvenv-([^\s\"'\\/`),;:]+)", text)
-        ]
-        self.assertGreaterEqual(
-            len(venv_versions),
-            1,
-            "llms-install.md has no venv-<version> references; expected at least "
-            f"one matching tools/pyproject.toml version {version!r}",
+    def test_exit_2_is_not_always_a_missing_list(self) -> None:
+        text = _read("llms-install.md")
+        self.assertRegex(
+            text,
+            r"exit(?:s| code)? 2.{0,160}missing",
         )
-        bad_venv = [value for value in venv_versions if value != version]
-        self.assertEqual(
-            bad_venv,
-            [],
-            f"llms-install.md venv-<version> references {bad_venv!r} differ from "
-            f"tools/pyproject.toml [project].version {version!r}",
-        )
-
-        expected_tag = f"v{version}"
-        download_tags = re.findall(r"/releases/download/([^/\s\"'`]+)/", text)
-        self.assertGreaterEqual(
-            len(download_tags),
-            1,
-            "llms-install.md has no /releases/download/v<version>/ URLs; expected "
-            f"at least one matching tools/pyproject.toml tag {expected_tag!r}",
-        )
-        bad_tags = [tag for tag in download_tags if tag != expected_tag]
-        self.assertEqual(
-            bad_tags,
-            [],
-            f"llms-install.md /releases/download/.../ tags {bad_tags!r} differ "
-            f"from tools/pyproject.toml tag {expected_tag!r}",
+        self.assertRegex(
+            text,
+            r"missing.{0,120}empty.{0,80}error|error.{0,80}missing.{0,80}empty",
+            "llms-install.md must say that exit 2 with an empty missing list "
+            "is read from error, not treated as missing",
         )
 
-    def test_requirements_url_matches_make_release(self) -> None:
-        release_download_url = _module_string_constant(
-            "tools/make_release.py", "RELEASE_DOWNLOAD_URL"
-        )
-        requirements_asset_name = _module_string_constant(
-            "tools/make_release.py", "REQUIREMENTS_ASSET_NAME"
-        )
-        version = _project_version()
-        expected_url = f"{release_download_url}/v{version}/{requirements_asset_name}"
-
-        block_text = self._commands_block_text()
-        targets = re.findall(r"(?<!\S)-r\s+(\S+)", block_text)
-        self.assertGreaterEqual(
-            len(targets),
-            1,
-            "llms-install.md '## Commands' block has no '-r <url>' argument; "
-            f"expected {expected_url!r} from tools/make_release.py and "
-            "tools/pyproject.toml",
-        )
-        bad_targets = [target for target in targets if target != expected_url]
-        self.assertEqual(
-            bad_targets,
-            [],
-            f"llms-install.md '## Commands' '-r' target(s) {bad_targets!r} differ "
-            f"from tools/make_release.py + tools/pyproject.toml {expected_url!r}",
-        )
-        self.assertIsNotNone(
-            re.search(rf"(?<!\S)-r {re.escape(expected_url)}(?!\S)", block_text),
-            "llms-install.md '## Commands' block does not contain exact "
-            f"'-r {expected_url}' from tools/make_release.py and "
-            "tools/pyproject.toml",
-        )
-
-    def test_python_version_matches_requirements_lock_header(self) -> None:
-        expected_py = _lock_python_version()
-        block_text = self._commands_block_text()
-
-        install_versions = re.findall(
-            r"\buv\s+python\s+install\s+([^\s\"'`)]+)", block_text
-        )
-        self.assertGreaterEqual(
-            len(install_versions),
-            1,
-            "llms-install.md '## Commands' block has no 'uv python install <ver>'; "
-            "expected at least one matching tools/release/requirements.lock.txt "
-            f"--python-version {expected_py!r}",
-        )
-        bad_install = [ver for ver in install_versions if ver != expected_py]
-        self.assertEqual(
-            bad_install,
-            [],
-            f"llms-install.md '## Commands' 'uv python install' version(s) "
-            f"{bad_install!r} differ from tools/release/requirements.lock.txt "
-            f"--python-version {expected_py!r}",
-        )
-
-        managed_versions = re.findall(
-            r"--managed-python\s+([^\s\"'`)]+)", block_text
-        )
-        self.assertGreaterEqual(
-            len(managed_versions),
-            1,
-            "llms-install.md '## Commands' block has no '--managed-python <ver>'; "
-            "expected at least one matching tools/release/requirements.lock.txt "
-            f"--python-version {expected_py!r}",
-        )
-        bad_managed = [ver for ver in managed_versions if ver != expected_py]
-        self.assertEqual(
-            bad_managed,
-            [],
-            f"llms-install.md '## Commands' '--managed-python' version(s) "
-            f"{bad_managed!r} differ from tools/release/requirements.lock.txt "
-            f"--python-version {expected_py!r}",
-        )
 
     def test_workshop_item_id_is_digits_and_matches_all_workshop_links(self) -> None:
         workshop_id = _module_string_constant(
@@ -345,31 +314,6 @@ class LlmsInstallDocsTest(unittest.TestCase):
                 f"{doc_name} Steam Workshop link id(s) {bad_ids!r} differ from "
                 f"tools/dayz_mcp/setup_cmd.py WORKSHOP_ITEM_ID {workshop_id!r}",
             )
-
-    def test_commands_block_required_flags_and_no_uv_venv(self) -> None:
-        block_text = self._commands_block_text()
-        required_tokens = (
-            "--no-bin",
-            "--no-registry",
-            "os.path.realpath",
-            "--without-pip",
-            "--link-mode=copy",
-            "--require-hashes",
-            "setup --json",
-        )
-        for token in required_tokens:
-            self.assertIn(
-                token,
-                block_text,
-                f"llms-install.md '## Commands' block omits required token "
-                f"{token!r} from the install recipe",
-            )
-        self.assertIsNone(
-            re.search(r"\buv\s+venv\b", block_text),
-            "llms-install.md '## Commands' block uses forbidden 'uv venv'; "
-            "the recipe must invoke 'os.path.realpath(sys.executable)' with "
-            "'-m venv --without-pip'",
-        )
 
     def test_readme_and_quickstart_link_to_llms_install(self) -> None:
         self.assertTrue(
@@ -416,6 +360,78 @@ class LlmsInstallDocsTest(unittest.TestCase):
             "docs/RELEASE.md step 1 ('## 1.' to '## 2.') does not name "
             "'llms-install.md' as a file to update with tools/pyproject.toml",
         )
+
+    def test_documented_release_assets_return_http_200(self) -> None:
+        """Every concrete GitHub release asset URL in the docs must exist.
+
+        The no-clone install path advertised a requirements file that returned
+        404. This GET is skipped only when GitHub cannot be reached.
+        """
+        import urllib.error
+        import urllib.request
+
+        doc_paths = [
+            path
+            for path in REPO.rglob("*.md")
+            if ".git" not in path.parts and "tools/tests" not in path.as_posix()
+        ]
+        url_re = re.compile(
+            r"https://github.com/willy92wins/dayz-mcp/releases/download/"
+            r"v[0-9][^/\s\"'`)]+/[A-Za-z0-9._+-]+"
+        )
+        found: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for path in sorted(doc_paths):
+            rel = path.relative_to(REPO).as_posix()
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeError:
+                continue
+            for url in url_re.findall(text):
+                if url in seen:
+                    continue
+                seen.add(url)
+                found.append((rel, url))
+
+        probe = "https://github.com/willy92wins/dayz-mcp/releases"
+        try:
+            request = urllib.request.Request(
+                probe,
+                method="GET",
+                headers={"User-Agent": "dayz-mcp-docs-asset-check"},
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                response.read(64)
+        except (urllib.error.URLError, TimeoutError, OSError):
+            self.skipTest("offline: cannot GET GitHub to verify release assets")
+
+        failures: list[str] = []
+        for rel, url in found:
+            request = urllib.request.Request(
+                url,
+                method="GET",
+                headers={"User-Agent": "dayz-mcp-docs-asset-check"},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    status = getattr(response, "status", None) or response.getcode()
+                    response.read(64)
+            except urllib.error.HTTPError as error:
+                failures.append(f"{rel}: GET {url} -> {error.code}")
+                continue
+            except (urllib.error.URLError, TimeoutError, OSError) as error:
+                failures.append(f"{rel}: GET {url} -> {error}")
+                continue
+            if status != 200:
+                failures.append(f"{rel}: GET {url} -> {status}")
+        self.assertEqual(
+            failures,
+            [],
+            "documented release asset URL(s) did not return HTTP 200:\n"
+            + "\n".join(failures),
+        )
+
+
 
 
 if __name__ == "__main__":

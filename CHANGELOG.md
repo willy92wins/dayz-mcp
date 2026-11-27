@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The AI-agent install guide, README and QUICKSTART install from a clone until a GitHub release publishes the wheel and `dayz-mcp-requirements.txt`. In PowerShell, invoke the wheel entry point as `.\dayz-mcp.exe`. `setup --json` exit 2 is not always a `missing` list: when `missing` is empty, read `error`.
+
 ## [1.6] - 2026-11-28
 
 Verified on DayZ 1.30.164289: `dayz_test_run` starts the server and the client with this release's PBO, the bridge (version 13) passes its handshake, and `dayz_test_close` closes both in order. The PBO is signed with the DayZ-MCP key and published on the Steam Workshop as item 3846741037, and the Python half installs from this release without a clone: `llms-install.md` takes an AI agent through uv and `dayz-mcp setup --json`. 15 new public tools, 122 in all. This release changes Python modules sealed in the native launcher: after updating a clone, build the launcher again and register it (`build_native_launcher.py --offline --verify-reproducible`, then `python -m dayz_mcp.launcher_registry_update replace-dayz-test-v1 --expected-sha256` with the sha256 of the current `tools/approved-launchers.json`; `tools/README-mcp.md`).
