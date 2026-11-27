@@ -4,8 +4,9 @@ ResolveOwnedCar (MCPClientBridge.c) returned the CarScript of any vehicle
 command the local player had, so a passenger, or a driver whose client does not
 own the car, got ok=true from engine_set and vehicle_control. It now returns
 null with an error and both verbs answer that error before touching the car:
-not_seated for the old refusals (no player, no vehicle command, not a
-CarScript), then not_driver when HumanCommandVehicle.GetVehicleSeat
+not_seated when there is no player or no vehicle command, not_a_car when the
+vehicle command's transport is not a CarScript (inbox 1cb7: a vanilla boat used
+to read not_seated), then not_driver when HumanCommandVehicle.GetVehicleSeat
 (human.c:696) is not DayZPlayerConstants.VEHICLESEAT_DRIVER (dayzplayer.c:674),
 then not_owner when Pawn.IsOwner (pawn.c:193-194) is false.
 
@@ -33,10 +34,12 @@ RESOLVE = "protected CarScript ResolveOwnedCar(out string error)"
 ENGINE_SET = "protected bool DispatchEngineSet(MCPCommand command, MCPResult result)"
 VEHICLE_CONTROL = "protected bool DispatchVehicleControl(MCPCommand command, MCPResult result)"
 FINITE = "protected bool IsFiniteFloat(float value)"
+TRACE_DISPATCH = "protected bool DispatchVehicleTrace(MCPCommand command, MCPResult result)"
 GET_IN_PREP = "protected bool ProcessVehicleGetInClientPrep(MCPJob job)"
 CAPTURE = "protected void CaptureDriveProbeClientOwnership(MCPJob job, CarScript car)"
 DRIVER_CHECK = "if (vehicleCommand.GetVehicleSeat() != DayZPlayerConstants.VEHICLESEAT_DRIVER)"
-REFUSALS = ("not_seated", "not_driver", "not_owner")
+REFUSALS = ("not_seated", "not_a_car", "not_driver", "not_owner")
+NOT_A_CAR = 'error = "not_a_car";'
 
 SEATS = SimpleNamespace(
     VEHICLESEAT_DRIVER=101,
@@ -131,7 +134,9 @@ def _seated(seat: int, *, owner: bool = True, carscript: bool = True):
 SCENARIOS = {
     "no_player": (lambda: (None, None), "not_seated"),
     "on_foot": (lambda: (FakePlayer(None), None), "not_seated"),
-    "boat_driver": (lambda: _seated(SEATS.VEHICLESEAT_DRIVER, carscript=False), "not_seated"),
+    "boat_driver": (lambda: _seated(SEATS.VEHICLESEAT_DRIVER, carscript=False), "not_a_car"),
+    # The transport is checked before the seat, so a boat passenger is not_a_car too.
+    "boat_codriver": (lambda: _seated(SEATS.VEHICLESEAT_CODRIVER, carscript=False), "not_a_car"),
     "codriver": (lambda: _seated(SEATS.VEHICLESEAT_CODRIVER), "not_driver"),
     "passenger_left": (lambda: _seated(SEATS.VEHICLESEAT_PASSENGER_L), "not_driver"),
     "passenger_right": (lambda: _seated(SEATS.VEHICLESEAT_PASSENGER_R), "not_driver"),
@@ -238,7 +243,7 @@ class ResolveOwnedCarTest(unittest.TestCase):
                     self.assertIs(resolved, transport)
                     self.assertEqual(error.text, "")
 
-    def test_every_null_carries_one_of_the_three_codes(self) -> None:
+    def test_every_null_carries_one_of_the_four_codes(self) -> None:
         body = method_body(self.source, RESOLVE)
         coded = re.findall(r'error = "([a-z_]+)";\s*return null;', body)
         self.assertEqual(len(coded), body.count("return null;"))
@@ -248,6 +253,10 @@ class ResolveOwnedCarTest(unittest.TestCase):
         self.assertIn("if (!car.IsOwner())", body)
         self.assertLess(body.index("CarScript.Cast("), body.index(DRIVER_CHECK))
         self.assertLess(body.index(DRIVER_CHECK), body.index("if (!car.IsOwner())"))
+        # not_a_car is the refusal of the CarScript cast, the only one of its kind.
+        self.assertEqual(body.count(NOT_A_CAR), 1)
+        self.assertLess(body.index("CarScript.Cast("), body.index(NOT_A_CAR))
+        self.assertLess(body.index(NOT_A_CAR), body.index(DRIVER_CHECK))
 
 
 class DriveVerbGateTest(unittest.TestCase):
@@ -314,6 +323,7 @@ class DriveVerbGateTest(unittest.TestCase):
             "owner_unchecked": (RESOLVE, "if (!car.IsOwner())", "if (false)"),
             "owner_inverted": (RESOLVE, "if (!car.IsOwner())", "if (car.IsOwner())"),
             "passenger_reported_not_seated": (RESOLVE, 'error = "not_driver";', 'error = "not_seated";'),
+            "boat_reported_not_seated": (RESOLVE, NOT_A_CAR, 'error = "not_seated";'),
             "engine_set_legacy_code": (ENGINE_SET, "result.error = carError;", 'result.error = "not_seated";'),
             "vehicle_control_legacy_code": (
                 VEHICLE_CONTROL,
@@ -366,11 +376,22 @@ class DriveVerbRefusalDocsTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(tool=tool):
                 description = self.tools[tool].description or ""
                 self.assertIn("must drive a car this client owns", description)
-                self.assertIn("not_seated (not seated in a car)", description)
+                self.assertIn("not_seated (not seated in a vehicle)", description)
+                self.assertIn("not_a_car (seated in a vehicle that is not a car, such as a boat)", description)
                 self.assertIn("not_driver (seated, but not in the driver seat)", description)
                 self.assertIn("not_owner (in the driver seat, but this client does not own the car)", description)
                 for code in codes:
                     self.assertIn(code, description)
+
+    async def test_vehicle_trace_keeps_no_vehicle_for_a_transport_that_is_not_a_car(self) -> None:
+        # vehicle_trace does not use ResolveOwnedCar: its start answers no_vehicle for a
+        # transport that is not a CarScript, so its description does not name not_a_car.
+        dispatch = method_body(CLIENT_BRIDGE.read_text(encoding="utf-8"), TRACE_DISPATCH)
+        cast = dispatch.index("CarScript car = CarScript.Cast(vehicleCommand.GetTransport());")
+        refusal = " ".join(method_body(dispatch[cast:], "if (!car)").split())
+        self.assertEqual(refusal, 'result.ok = false; result.error = "no_vehicle"; return true;')
+        self.assertNotIn("not_a_car", dispatch)
+        self.assertNotIn("not_a_car", self.tools["vehicle_trace"].description or "")
 
 
 if __name__ == "__main__":
