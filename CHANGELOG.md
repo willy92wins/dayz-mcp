@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6] - 2026-11-28
+
+Verified on DayZ 1.30.164289: `dayz_test_run` starts the server and the client with this release's PBO, the bridge (version 13) passes its handshake, and `dayz_test_close` closes both in order. The PBO is signed with the DayZ-MCP key and published on the Steam Workshop as item 3846741037, and the Python half installs from this release without a clone: `llms-install.md` takes an AI agent through uv and `dayz-mcp setup --json`. 15 new public tools, 122 in all. This release changes Python modules sealed in the native launcher: after updating a clone, build the launcher again and register it (`build_native_launcher.py --offline --verify-reproducible`, then `python -m dayz_mcp.launcher_registry_update replace-dayz-test-v1 --expected-sha256` with the sha256 of the current `tools/approved-launchers.json`; `tools/README-mcp.md`).
+
 ### Added
 
 - `llms-install.md` is the install guide for an AI agent: the person subscribes to the DayZ-MCP Workshop item, and the agent installs the Python half from the GitHub release with uv in five PowerShell commands and runs `dayz-mcp setup --json`, which now finds the item by its Workshop id without `--item`; `README.md` and `QUICKSTART.md` point to it, and `docs/RELEASE.md` sets its version with each release.
@@ -97,6 +101,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Known issues
 
 - `vehicle_enter` puts a second player in the driver's seat while another player holds it. The 1.5 notes said a taken seat had not been tried in game; on 2026-11-27 (DayZDiag 1.30.164289, two players, a `CivilianSedan`) `vehicle_enter` for one player with the other at the wheel answered `ok`, `seated` and seat `driver`, and the server logged a script exception, "The pawn is already possessed by another player!" in `SurvivorBase.OnVehicleSeatDriverEnter` (`playerbase.c:4574` in 1.30). That player's client logged `Command ID de-synchronized, server=ACID_Human_Vehicle, client=ACID_Human_Move`. Both players then read `in_vehicle` true at the same position, `player_teleport` refused both with `occupant_client_seated`, and only deleting the car got them out.
+- In the installed mode `dayz-mcp setup` does not install the Knowledge Pack, so `dayz-mcp doctor` reports `KNOWLEDGE_PACK_MISSING` (WARN), and its remedy, `python -m dayz_mcp.knowledge_pack install`, names a `python` that the installed mode does not put on the `PATH`.
 
 ## [1.5] - 2026-11-11
 

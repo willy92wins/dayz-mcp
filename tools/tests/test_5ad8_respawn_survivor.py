@@ -600,8 +600,8 @@ class ToolTest(unittest.IsolatedAsyncioTestCase):
             "or dress a world_spawn'ed survivor by object_id.",
             description,
         )
-        unreleased = CHANGELOG.split("## [Unreleased]", 1)[1].split("## [", 1)[0]
-        added = unreleased.split("### Added", 1)[1].split("### ", 1)[0]
+        release = CHANGELOG[CHANGELOG.index("## [1.6]") : CHANGELOG.index("## [1.5]")]
+        added = release.split("### Added", 1)[1].split("### ", 1)[0]
         self.assertIn("fb-20261112-154523-5ad8", added)
         self.assertIn("player_respawn(survivor_type", added)
 
