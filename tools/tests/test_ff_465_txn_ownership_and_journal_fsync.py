@@ -879,6 +879,116 @@ class TwoJournalsRound5Test(unittest.TestCase):
         self.assertTrue((self.root / "reg" / "dayz-mcp").exists())
 
 
+@unittest.skipUnless(POSIX, "the POSIX host-config transaction")
+class TwoJournalsFollowUpTest(TwoJournalsRound5Test):
+    """Follow-up to #475 (Sol r5, counted as P2): a cut inside the outer rollback."""
+
+    def _cut_before_codex_previous_is_back(self):
+        import install_mcp
+
+        client = self._provider()
+        old = self._spec("old")
+        client.add("CODEX", old)
+        real_add = client.add
+
+        def cut(role, value):
+            if role == "CODEX" and value == old:
+                raise install_mcp.RegistrationCrash("cut before restoring previous Codex")
+            real_add(role, value)
+
+        client.add = cut
+        with self.assertRaises(install_mcp.RegistrationCrash):
+            self._install(client, edit_at="after_write_codex")
+        client.add = real_add
+        self.assertIsNone(client.get("CODEX"))
+        self.assertEqual(client.get("CLAUDE"), self._spec("foreign"))
+        return client
+
+    def test_a1_an_empty_codex_left_by_a_cut_rollback_is_accepted(self) -> None:
+        client = self._cut_before_codex_previous_is_back()
+        client.remove("CLAUDE")
+        self._install(client)
+        self.assertEqual(client.get("CLAUDE"), self._spec("new"))
+        self.assertEqual(client.get("CODEX"), self._spec("new"))
+        self.assertFalse((self.root / "host").exists())
+        self.assertFalse((self.root / "reg" / "dayz-mcp").exists())
+
+    def test_a1_an_empty_codex_without_the_recorded_removal_still_refuses(self) -> None:
+        import install_mcp
+
+        client = self._cut_before_codex_previous_is_back()
+        manifest_path = self.root / "reg" / "dayz-mcp" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        self.assertEqual(manifest["rollback_removed"], ["CODEX"])
+        manifest.pop("rollback_removed")
+        manifest_path.write_text(json.dumps(manifest))
+        client.remove("CLAUDE")
+        error = self._fails("registration_recovery_conflict", client)
+        self.assertEqual(error.remedy, install_mcp._RELEASE_REFUSED_REMEDY)
+        self.assertTrue((self.root / "host").exists())
+        self.assertTrue((self.root / "reg" / "dayz-mcp").exists())
+
+    def test_a2_an_old_journal_remedy_never_promises_that_remove_releases(self) -> None:
+        import install_mcp
+
+        client = self._provider()
+        self._fails(
+            "registration_rollback_preserved_foreign_edit",
+            client, dual=False, edit_at="after_write_claude",
+        )
+        manifest_path = self.root / "host" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest.pop("attempt")
+        manifest_path.write_text(json.dumps(manifest))
+        client.remove("CLAUDE")
+        error = self._fails("registration_recovery_conflict", client, dual=False)
+        self.assertEqual(error.remedy, install_mcp._OTHER_JOURNAL_REMEDY)
+        self.assertIn("does not release", error.remedy)
+        self.assertIn(
+            "put back the previous registration in the other client",
+            install_mcp._RELEASE_REFUSED_REMEDY,
+        )
+
+    def test_a3_a_probe_failure_during_the_retry_carries_the_remedy(self) -> None:
+        import install_mcp
+
+        for code, kind in (
+            ("unsupported_codex_registration", install_mcp.InstallerContractError),
+            ("registration_probe_failed", install_mcp.InstallerExecutionError),
+        ):
+            with self.subTest(code=code):
+                self.tearDown_journals()
+                client = self._edit_after_write_codex()
+                client.remove("CLAUDE")
+                real_get = client.get
+
+                def get(role, real_get=real_get, code=code, kind=kind):
+                    if role == "CODEX":
+                        raise kind(code)
+                    return real_get(role)
+
+                client.get = get
+                with self.assertRaises((install_mcp.InstallerContractError,
+                                        install_mcp.InstallerExecutionError)) as raised:
+                    self._install(client)
+                self.assertEqual(getattr(raised.exception, "code", str(raised.exception)), code)
+                self.assertEqual(raised.exception.remedy, install_mcp._RETRY_PROBE_REMEDY)
+
+    def tearDown_journals(self) -> None:
+        import shutil
+
+        for name in ("host", "reg"):
+            shutil.rmtree(self.root / name, ignore_errors=True)
+        self.claude.write_text('{"mcpServers": {}}')
+        self.codex.write_text("")
+
+
+# Reuse the fixtures only; the round 5 tests run once, in their own class.
+for _name in [n for n in vars(TwoJournalsRound5Test) if n.startswith("test_")]:
+    setattr(TwoJournalsFollowUpTest, _name, None)
+del _name
+
+
 class PreservedWayOutDocsTest(unittest.TestCase):
     """Round 4 (Sol r3 P2): the CLI and QUICKSTART name the way out."""
 
@@ -900,6 +1010,9 @@ class PreservedWayOutDocsTest(unittest.TestCase):
         self.assertIn("codex mcp remove dayz-mcp", quickstart)
         for remedy in (install_mcp._PRESERVED_REMEDY, install_mcp._RECOVERY_CONFLICT_REMEDY):
             self.assertIn("'Interrupted install'", remedy)
+        # Follow-up (Sol r5 P2): the remedy that names remove is the one for a
+        # releasable journal; the generic one promises only a full put-back.
+        for remedy in (install_mcp._PRESERVED_REMEDY, install_mcp._RELEASE_REFUSED_REMEDY):
             self.assertIn("claude mcp remove -s user dayz-mcp", remedy)
             self.assertIn("codex mcp remove dayz-mcp", remedy)
 

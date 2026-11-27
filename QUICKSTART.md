@@ -130,6 +130,7 @@ instance uses its own name) or put back the registration you had before, then
 run the install again: it releases that attempt's journals and registers.
 `registration_recovery_conflict` means an interrupted run left a journal that
 no longer matches the files or the registration, and nothing was overwritten.
-If the change is that entry, removing it as above releases it; if the journal
-belongs to another server name on this host, resolve that install first;
-otherwise the files must go back to what that install recorded.
+Its remedy says which case applies: remove the changed entry and put back the
+previous registration in the other client; or, for a journal of an older
+installer or another server name, resolve that install (removing an entry does
+not release it); otherwise put everything back to what that install recorded.
