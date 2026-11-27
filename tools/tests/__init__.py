@@ -25,6 +25,7 @@ test_fn_p0_small_model_loops.py default it before they import the server, so
 the same default comes first here.
 """
 
+import functools
 import itertools
 import os
 import tempfile
@@ -101,6 +102,8 @@ def _isolate_box_queue_per_coordinator() -> None:
     roots = itertools.count(1)
     original = SessionCoordinator.__init__
 
+    # wraps keeps inspect.signature(SessionCoordinator) on the real __init__.
+    @functools.wraps(original)
     def _init(self, *args, **kwargs):
         original(self, *args, **kwargs)
         current = os.environ.get("DAYZ_MCP_SHARED_ROOT", "").strip()
