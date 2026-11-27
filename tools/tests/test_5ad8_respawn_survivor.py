@@ -97,6 +97,7 @@ SERVER_CONTRACT = {
     "object_set_health": ("health01", "object_id", "pos", "slot", "type", "zone"),
     "player_kill": ("uid",),
     "players_kinematics": ("cursor", "limit", "max_samples", "mode", "sample_hz", "trace_id", "uids"),
+    "players_los_cone": ("half_yaw_deg", "radius", "uids"),
     "players_visibility": ("pos", "radius"),
     "scene_clear": ("scene_id",),
     "scene_entities": ("scene_id",),
@@ -354,12 +355,12 @@ class EnforceSourceTest(unittest.TestCase):
         self.assertEqual(CLIENT_CAPABILITY_BITS[46], COMMAND)
         self.assertEqual(CLIENT_CAPABILITY_BITS[47:], ("ui_menu_set", "ui_map_set"))
         self.assertEqual(SERVER_CAPABILITY_BITS[:48], SERVER_BITS)
-        self.assertEqual(SERVER_CAPABILITY_BITS[48:], ("player_set_stance", "players_kinematics"))
+        self.assertEqual(SERVER_CAPABILITY_BITS[48:], ("player_set_stance", "players_kinematics", "players_los_cone"))
         self.assertEqual(SERVER_ARG_CONTRACT, SERVER_CONTRACT)
-        self.assertEqual(server_arg_contract_hash(), "c282097c3d1855ba")
-        self.assertEqual(bridge_readiness.EXPECTED_SERVER_ARG_CONTRACT_HASH, "c282097c3d1855ba")
+        self.assertEqual(server_arg_contract_hash(), "d8a199f4d30470f1")
+        self.assertEqual(bridge_readiness.EXPECTED_SERVER_ARG_CONTRACT_HASH, "d8a199f4d30470f1")
         self.assertIn(
-            'SERVER_ARG_CONTRACT_HASH = "c282097c3d1855ba"',
+            'SERVER_ARG_CONTRACT_HASH = "d8a199f4d30470f1"',
             SERVER_BRIDGE_PATH.read_text(encoding="utf-8"),
         )
         self.assertIsNone(_BRIDGE_COMMAND_TOOLS["client"][COMMAND])
@@ -393,7 +394,7 @@ class CompatibilityTest(unittest.TestCase):
         state = _state()
         status, body = state.record_poll(
             "server", VERSION, instance=INST_SERVER, source_pid=PID_SERVER,
-            cm="1.ffffffffffff", ach="c282097c3d1855ba",
+            cm="1.ffffffffffff", ach="d8a199f4d30470f1",
         )
         self.assertEqual(status, 200, body)
         _poll_client(state, without_pinned)

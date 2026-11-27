@@ -59,7 +59,7 @@ EXPECTED_SERVER_CAPS = (
     "infected_drive,inventory_attach,inventory_give,inventory_move,lease_close,loadout_apply,"
     "loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,"
     "object_inspect,object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_set_stance,"
-    "player_teleport,players_kinematics,players_visibility,query_all_players,query_get_in_condition,query_player_state,"
+    "player_teleport,players_kinematics,players_los_cone,players_visibility,query_all_players,query_get_in_condition,query_player_state,"
     "scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,"
     "survivor_drive_release,telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,"
     "weapon_state,world_spawn,world_spawn_batch,world_time_get,world_time_set,world_weather_set"
@@ -473,7 +473,7 @@ class DtoContractTest(unittest.TestCase):
         client = "".join(re.findall(r'"([^"]*)"', re.search(r"CLIENT_POLL_CAPS = ([^;]+);", CLIENT_BRIDGE).group(1)))  # type: ignore[union-attr]
         self.assertEqual(client, EXPECTED_CLIENT_CAPS)
         self.assertIn('"query_player_state": _command_schema(_schema_variant()),', LOOPBACK)
-        self.assertIn('protected const string SERVER_ARG_CONTRACT_HASH = "c282097c3d1855ba";', BRIDGE)
+        self.assertIn('protected const string SERVER_ARG_CONTRACT_HASH = "d8a199f4d30470f1";', BRIDGE)
 
 
 def _answer(events: list[dict[str, Any]] | None, run: int = 4242, evicted: int = 0) -> dict[str, Any]:
