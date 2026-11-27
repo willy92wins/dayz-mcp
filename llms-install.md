@@ -7,7 +7,7 @@ DayZ-MCP is an MCP server and in-game bridge mod that lets an AI agent inspect a
 You cannot do these steps from a shell, so ask the person to handle them:
 
 - Subscribe to the [DayZ-MCP Workshop item](https://steamcommunity.com/sharedfiles/filedetails/?id=3846741037) in Steam and wait for Steam to download it (no command can subscribe without their click).
-- Have Steam with DayZ installed and Claude Code installed as a native Windows executable. Codex is optional: when neither a Codex CLI nor `~/.codex/config.toml` is present, `setup` registers Claude only.
+- Have Steam with DayZ installed, a DayZ server on this same machine that they may load mods on (retail `DayZServer` works), and Claude Code installed as a native Windows executable. Codex is optional: when neither a Codex CLI nor `~/.codex/config.toml` is present, `setup` registers Claude only.
 - Restart the MCP client when you ask, and start the game with the launch arguments `setup` prints.
 
 No repository clone and no pre-installed Python are needed.
@@ -23,9 +23,9 @@ uv pip install --python "$env:LOCALAPPDATA\DayZ_MCP\venv-1.5\Scripts\python.exe"
 ```
 
 Run the first line only if `uv` is not already on `PATH`, and use a new shell afterwards because `winget` puts `uv` on the `PATH` of new shells.
-The virtual environment is created from the real path of uv's Python rather than `uv venv`, because uv's venv launcher switches working directories on startup and the installed daemon would then interfere with other instances.
+The virtual environment is created from the real path of uv's Python rather than with `uv venv`, because the `python.exe` that `uv venv` makes is a launcher that runs from another folder: while a daemon started through it runs, any other DayZ-MCP daemon on the machine waits 30 s and exits.
 The requirements file pins the wheel and every dependency by hash, so if even one byte changes, `uv` installs nothing.
-Each version lives in its own `venv-1.5` folder named after the release version, so an upgrade runs the same recipe with the new version in a new folder.
+The venv folder carries the release version (`venv-1.5` for this release), so an upgrade runs the same commands with the new version into a new folder.
 
 ## Reading the setup JSON
 
