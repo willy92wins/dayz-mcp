@@ -1662,6 +1662,84 @@ class MCPPlayersLosConeRead
 	}
 };
 
+// loot_los_cone raw row (one loose world InventoryItem inside an observer's yaw cone).
+// JsonSerializer always writes every member; unavailable optional fields travel
+// with their *_available flag set to false and are omitted by the Python layer.
+// Primitives and float arrays only: no entity reference.
+class MCPLootLosConeRow
+{
+	string uid;
+	int tick_ms;
+	string gap_kind;
+	int net_low;
+	int net_high;
+	string item_type;
+	string item_kind;
+	ref array<float> item_pos;
+	ref array<float> observer_head;
+	bool observer_head_bone;
+	float distance_m;
+	float yaw_deg;
+	float yaw_off_deg;
+	float pitch_deg;
+	bool pitch_deg_available;
+	bool ray_hit;
+	ref array<float> hit_pos;
+	bool hit_pos_available;
+	float hit_distance_m;
+	bool hit_distance_m_available;
+	float clearance_m;
+	bool clearance_m_available;
+	string hit_type;
+	bool hit_type_available;
+	string hit_class;
+	bool hit_class_available;
+
+	void MCPLootLosConeRow()
+	{
+		item_pos = new array<float>();
+		observer_head = new array<float>();
+		hit_pos = new array<float>();
+	}
+};
+
+// loot_los_cone per-observer summary. yaw_deg is meaningful only when
+// yaw_deg_available is true; the Python layer omits yaw_deg otherwise.
+class MCPLootLosConeObserver
+{
+	string uid;
+	bool found;
+	bool yaw_deg_available;
+	float yaw_deg;
+	int scanned;
+	int in_radius;
+	int in_cone;
+	int rays;
+	int rows;
+};
+
+// loot_los_cone header, per-observer summaries, and raw cone rows.
+class MCPLootLosConeRead
+{
+	string schema;
+	int tick_ms;
+	float radius_m;
+	float half_yaw_deg;
+	bool pitch_filter_applied;
+	int observers_max;
+	int rays_per_observer_max;
+	int rows_per_observer_max;
+	bool truncated;
+	ref array<ref MCPLootLosConeObserver> observers;
+	ref array<ref MCPLootLosConeRow> rows;
+
+	void MCPLootLosConeRead()
+	{
+		observers = new array<ref MCPLootLosConeObserver>();
+		rows = new array<ref MCPLootLosConeRow>();
+	}
+};
+
 class MCPResult
 {
 	int id;
@@ -1790,6 +1868,8 @@ class MCPResult
 	ref MCPPlayersKinematicsRead players_kinematics;
 	// players_los_cone header, observer summaries, and raw cone rows. Unassigned on other commands.
 	ref MCPPlayersLosConeRead players_los_cone;
+	// loot_los_cone header, observer summaries, and raw cone rows. Unassigned on other commands.
+	ref MCPLootLosConeRead loot_los_cone;
 	// bot_start / bot_stop reply. Unassigned on their refusals and on other commands.
 	ref MCPBotReport bot;
 	// player_set_stance reply. Unassigned on its refusals and on other commands.

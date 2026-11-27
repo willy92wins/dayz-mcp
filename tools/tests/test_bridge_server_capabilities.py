@@ -94,6 +94,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "loadout_apply",
     "loadout_clear",
     "loadout_get",
+    "loot_los_cone",
     "nav_path_query",
     "notify_players",
     "object_anim",
