@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The DayZ box queue is one FIFO shared by every instance on the machine (LIVE, experimental, xai and harness daemons): `box-queue.json` under `server_cli.shared_root()`, changed only under `box-queue.lock` and written with `atomic_write_json` (`tools/dayz_mcp/shared_box_queue.py`). A daemon keeps only its own tickets in memory. Every new start is admitted under `box_admission()` with the exact ticket at the head in `claimed`; a start without that ticket is refused with `active_run_exists` (`box_queue_ahead` or `box_claimed`) while anyone else is ahead. A claim lasts 600 s, is refreshed by the existing heartbeat, and a lost claim never launches. Entries whose owner process exited (pid gone, or alive with another creation time) are purged; an unreadable or unknown queue file keeps the box occupied (`box_queue_unreadable`) and blocks `takeover`. Plan: `plans/2026-11-27-cola-caja-comun.md`, phase 3A.
+
 ## [1.6] - 2026-11-28
 
 Verified on DayZ 1.30.164289: `dayz_test_run` starts the server and the client with this release's PBO, the bridge (version 13) passes its handshake, and `dayz_test_close` closes both in order. The PBO is signed with the DayZ-MCP key and published on the Steam Workshop as item 3846741037, and the Python half of this version installs from a clone (`llms-install.md`). The GitHub release also carries the wheel and the hash-pinned `dayz-mcp-requirements.txt`; this version's guide does not use them yet. 15 new public tools, 122 in all. This release changes Python modules sealed in the native launcher: after updating a clone, build the launcher again and register it (`build_native_launcher.py --offline --verify-reproducible`, then `python -m dayz_mcp.launcher_registry_update replace-dayz-test-v1 --expected-sha256` with the sha256 of the current `tools/approved-launchers.json`; `tools/README-mcp.md`).

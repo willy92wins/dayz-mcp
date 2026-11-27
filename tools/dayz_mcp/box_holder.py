@@ -302,9 +302,15 @@ def public_holder(value: object) -> dict[str, str] | None:
         return None
     instance, run_id, since = value["instance"], value["run_id"], value["since"]
     holder, purpose = value["holder"], value["purpose"]
-    if not valid_name(instance):
+    external = instance == "external"
+    if external:
+        if run_id is not None and (
+            not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id)
+        ):
+            return None
+    elif not valid_name(instance):
         return None
-    if not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id):
+    elif not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id):
         return None
     if not isinstance(since, str) or not _SINCE.fullmatch(since):
         return None

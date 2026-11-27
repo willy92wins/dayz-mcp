@@ -625,6 +625,18 @@ def _enrich_active_run_result(
     caller_session: str | None = None,
     port: int | None = None,
 ) -> dict[str, Any]:
+    if box.get("reason") == "box_queue_unreadable":
+        payload = dict(result)
+        payload["status"] = "failed"
+        payload["run_id"] = None
+        payload["error_code"] = "active_run_exists"
+        payload["reason"] = "box_queue_unreadable"
+        payload["hint"] = (
+            "box-queue.json is unreadable; the box stays occupied and "
+            "takeover is not offered"
+        )
+        payload["queue_offer"] = None
+        return payload
     extra = occupancy_error_fields(box, caller_session=caller_session)
     payload = dict(result)
     payload.update(extra)

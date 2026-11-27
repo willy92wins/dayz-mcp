@@ -6353,6 +6353,24 @@ def _failed_active_run_result(
     caller_session: str | None = None,
     port: int | None = None,
 ) -> dict[str, Any]:
+    if isinstance(box, dict) and box.get("reason") == "box_queue_unreadable":
+        return {
+            "status": "failed",
+            "project": project,
+            "mode": mode,
+            "run_id": None,
+            "phase": "executing",
+            "elapsed_s": round(time.monotonic() - started, 3),
+            "artifacts_paths": [],
+            "error_code": "active_run_exists",
+            "reason": "box_queue_unreadable",
+            "hint": "box-queue.json is unreadable; the box stays occupied and takeover is not offered",
+            "queue_offer": None,
+            "cleanup_degraded": False,
+            "server_alive": None,
+            "client_alive": None,
+            "server_boot": None,
+        }
     extra = occupancy_error_fields(box, caller_session=caller_session)
     extra.update(_port_conflict_fields(box, port, caller_session=caller_session))
     _name_foreign_holder(extra, box)
@@ -6552,6 +6570,16 @@ def _annotate_worker_internal_failure(
     return payload
 
 
+class BoxClaimLost(Exception):
+    """The shared queue no longer holds this launch's claim."""
+
+
+def _claim_task_lost(task: asyncio.Task[None] | None) -> bool:
+    if task is None or not task.done() or task.cancelled():
+        return False
+    return isinstance(task.exception(), BoxClaimLost)
+
+
 async def _heartbeat_box_claim(
     client: Any,
     ticket: str,
@@ -6565,13 +6593,17 @@ async def _heartbeat_box_claim(
     transport errors must not stop the heartbeat.
     """
 
+    from dayz_mcp.shared_box_queue import claim_refresh_keeps
+
     sleeper = sleep_fn or asyncio.sleep
     while True:
         await sleeper(BOX_CLAIM_HEARTBEAT_S)
         try:
-            await client.session_box_status(wait=True, ticket=ticket)
+            answer = await client.session_box_status(wait=True, ticket=ticket)
         except Exception:
             continue
+        if not claim_refresh_keeps(answer):
+            raise BoxClaimLost()
 
 
 async def _release_box_wait_ticket(client: Any, ticket: str | None) -> None:
@@ -6684,6 +6716,13 @@ async def execute_wait_for_box(
                     ticket = next_ticket
             else:
                 wait_error = "box_status_invalid"
+            if isinstance(box, dict) and box.get("reason") == "box_queue_unreadable":
+                return {
+                    "ok": False,
+                    "ticket": ticket,
+                    "box": box,
+                    "error": "box_queue_unreadable",
+                }
             if box.get("port_scan_known") is False:
                 # The box reads occupied because the daemon could not read the
                 # UDP socket table; the FIFO does not repair that, so waiting
@@ -7921,6 +7960,39 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                             port=port,
                         )
                     )
+                if box.get("reason") == "box_queue_unreadable":
+                    # An unreadable shared queue occupies the box. Takeover
+                    # must not evict, and the launch must not spawn.
+                    return annotated(
+                        _failed_active_run_result(
+                            project=project,
+                            mode=mode,
+                            box=box,
+                            started=started,
+                            caller_session=caller_session,
+                            port=port,
+                        )
+                    )
+                queue_ahead = box.get("queue")
+                if (
+                    target is not None
+                    and takeover
+                    and not box_ticket
+                    and isinstance(queue_ahead, list)
+                    and queue_ahead
+                ):
+                    # A waiting head owns the next turn. Takeover must not
+                    # stop the live run and then lose the launch to the queue.
+                    return annotated(
+                        _failed_active_run_result(
+                            project=project,
+                            mode=mode,
+                            box=box,
+                            started=started,
+                            caller_session=caller_session,
+                            port=port,
+                        )
+                    )
                 if target is not None and takeover:
                     try:
                         stop_result = await dayz_test_tool.execute_dayz_test_stop(
@@ -7942,6 +8014,23 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 execute_error, result = await execute(
                     {"build": build, "clean": clean, "pack_only": pack_only}
                 )
+                admission_miss = (
+                    isinstance(result, dict)
+                    and not result.get("run_id")
+                    and result.get("status") != "succeeded"
+                    and result.get("error_code")
+                    in {"active_run_exists", "box_queue_ahead"}
+                )
+                if (
+                    _claim_task_lost(claim_task)
+                    and execute_error is None
+                    and admission_miss
+                ):
+                    result = {
+                        "error_code": "active_run_exists",
+                        "error": "active_run_exists",
+                        "audit_reason": "box_claim_lost",
+                    }
             # The box this launch was admitted over, read under the same lock.
             admitted_box: object = box
             # The box read after a refusal, while this call still holds any
