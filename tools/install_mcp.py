@@ -1627,6 +1627,7 @@ def _load_registration_manifest(
     tuple[Path, ...] | None,
     Path | None,
     dict[str, RegistrationSpec | None] | None,
+    frozenset[str],
 ] | None:
     published, pending, _staging = _registration_publication_paths(journal)
     only_next = False
@@ -1688,8 +1689,10 @@ def _load_registration_manifest(
     else:
         raise RegistrationTransactionError("registration_journal_invalid")
     raw_preserved = value.get("preserved", [])
-    if not isinstance(raw_preserved, list) or any(
-        role not in roles for role in raw_preserved
+    if (
+        not isinstance(raw_preserved, list)
+        or any(role not in roles for role in raw_preserved)
+        or len(set(raw_preserved)) != len(raw_preserved)
     ):
         raise RegistrationTransactionError("registration_journal_invalid")
     raw_desired = value.get("desired")
@@ -1697,19 +1700,24 @@ def _load_registration_manifest(
         not isinstance(raw_desired, dict) or set(raw_desired) != set(roles)
     ):
         raise RegistrationTransactionError("registration_journal_invalid")
-    # A role recorded as preserved holds another writer's entry that the
-    # rollback decided to keep: recovery leaves it as it is too.
     previous = {
         role: _registration_spec_from_payload(value["previous"][role])
         for role in roles
-        if role not in raw_preserved
     }
     desired: dict[str, RegistrationSpec | None] | None = None
     if raw_desired is not None:
         desired = {
             role: _registration_spec_from_payload(raw_desired[role]) for role in roles
         }
-    return previous, only_next, value["server_name"], host_configs, host_journal, desired
+    return (
+        previous,
+        only_next,
+        value["server_name"],
+        host_configs,
+        host_journal,
+        desired,
+        frozenset(raw_preserved),
+    )
 
 
 def _restore_registered_roles(
@@ -1758,10 +1766,20 @@ def _recover_registration_journal(
         tuple[Path, ...] | None,
         Path | None,
         dict[str, RegistrationSpec | None] | None,
+        frozenset[str],
     ],
 ) -> None:
-    previous, only_next, _owner, _hosts, _host_journal, desired = loaded
-    if only_next and all(provider.get(role) == previous[role] for role in previous):
+    full_previous, only_next, _owner, _hosts, _host_journal, desired, preserved = loaded
+    # A role recorded as preserved holds another writer's entry that the
+    # rollback decided to keep: recovery never restores over it.
+    previous = {
+        role: spec for role, spec in full_previous.items() if role not in preserved
+    }
+    if (
+        only_next
+        and not preserved
+        and all(provider.get(role) == previous[role] for role in previous)
+    ):
         _cleanup_registration_journal(journal)
         return
     if only_next:
@@ -1779,7 +1797,31 @@ def _recover_registration_journal(
             # restores the previous spec over it (fix-forward #465 round 2).
             raise RegistrationTransactionError("registration_recovery_conflict")
     _restore_registered_roles(provider, previous)
+    _release_preserved_or_refuse(provider, full_previous, desired, preserved)
     _cleanup_registration_journal(journal)
+
+
+def _release_preserved_or_refuse(
+    provider: RegistrationProvider,
+    previous: dict[str, RegistrationSpec | None],
+    desired: dict[str, RegistrationSpec | None] | None,
+    preserved: frozenset[str] | set[str],
+) -> None:
+    """Keep refusing while a preserved foreign entry is still live.
+
+    Fix-forward #465 round 3 (Sol P1-6): a preserved entry stays protected
+    until an explicit action resolves it: the user removes it, or puts back
+    the previous or the desired registration. Until then every
+    register_transaction refuses with registration_preserved_foreign_edit and
+    keeps the journal, instead of registering over the other writer's entry.
+    """
+    for role in sorted(preserved):
+        live = provider.get(role)
+        accepted = {None, previous.get(role)}
+        if desired is not None:
+            accepted.add(desired.get(role))
+        if live not in accepted:
+            raise RegistrationTransactionError("registration_preserved_foreign_edit")
 
 
 def register_transaction(
@@ -1849,7 +1891,15 @@ def _register_transaction_locked(
     recorded_hosts: tuple[Path, ...] | None = None
     recorded_host_journal: Path | None = None
     if loaded is not None:
-        _previous, _only_next, owner, recorded_hosts, recorded_host_journal, _desired = loaded
+        (
+            _previous,
+            _only_next,
+            owner,
+            recorded_hosts,
+            recorded_host_journal,
+            _desired,
+            _preserved,
+        ) = loaded
         if owner != server_name:
             # Another instance owns this journal. Do not restore its specs here
             # and do not delete it.
@@ -1955,7 +2005,10 @@ def _register_transaction_locked(
             _rollback_registrations(
                 provider, previous, touched, ours=ours, preserved=preserved
             )
-            _cleanup_registration_journal(journal)
+            if not preserved:
+                # With a preserved role the journal stays: it is what keeps
+                # the next run from registering over that entry (Sol P1-6).
+                _cleanup_registration_journal(journal)
         except Exception as rollback_error:
             raise RegistrationRollbackError("registration_rollback_failed") from rollback_error
         if preserved:

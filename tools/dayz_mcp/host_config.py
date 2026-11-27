@@ -1509,7 +1509,17 @@ def _recover_if_needed(
         raise HostConfigError("registration_recovery_conflict")
     handles = _open_both(expected_paths)
     try:
-        if any(handles[role].identity() != decoded[role][1] for role in decoded):
+        # The recorded inode is required only for files recovery may still
+        # write (fix-forward #465 round 3, Sol P1-2). In a terminal restore
+        # state nothing is written: a file the user put back as the original
+        # through an atomic replace (a new inode) releases the journal.
+        if manifest["status"] in {"restored", "restore_conflict"}:
+            must_match: tuple[str, ...] = ()
+        elif manifest["status"] == "restoring_original":
+            must_match = _restore_selection(manifest)[0]
+        else:
+            must_match = tuple(decoded)
+        if any(handles[role].identity() != decoded[role][1] for role in must_match):
             raise HostConfigError("registration_recovery_conflict")
         currents = {role: handles[role].read() for role in decoded}
         if only_next:
@@ -1633,6 +1643,9 @@ def apply_host_timeouts(
     # write and again before committed, every file must still be the inode we
     # opened and hold the bytes we expect (fix-forward #465).
     touched: set[str] = set()
+    # The role whose write() raised, if any: only that attempt can have left a
+    # torn prefix of our target (fix-forward #465 round 3, Sol P1-1).
+    failed_write: str | None = None
 
     def expected(role: str) -> bytes:
         return targets[role] if role in touched else originals[role]
@@ -1662,7 +1675,9 @@ def apply_host_timeouts(
         for role in roles:
             verify_owned()
             touched.add(role)
+            failed_write = role
             handles[role].write(targets[role])
+            failed_write = None
             if fault_injector is not None:
                 fault_injector(f"after_write_{role}")
         if any(handles[role].read() != targets[role] for role in paths):
@@ -1709,8 +1724,9 @@ def apply_host_timeouts(
                             # inode: none of our bytes are reachable there,
                             # and what is there is another writer's.
                             continue
-                    if currents[role] == targets[role] or _is_own_write(
-                        currents[role], originals[role], targets[role]
+                    if currents[role] == targets[role] or (
+                        role == failed_write
+                        and _is_own_write(currents[role], originals[role], targets[role])
                     ):
                         restore_roles.append(role)
                     else:

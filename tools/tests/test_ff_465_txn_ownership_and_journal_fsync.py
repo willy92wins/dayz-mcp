@@ -347,6 +347,78 @@ class RollbackRound2Test(ConcurrentSameInodeEditTest):
 
 
 @unittest.skipUnless(POSIX, "the POSIX host-config transaction")
+class RollbackRound3Test(RollbackRound2Test):
+    """Round 3 of the #465 fix-forward (Sol P1-1 and P1-2 on 33ff52c4)."""
+
+    test_p1_1_a_short_write_then_eio_is_restored_not_left_torn = None
+    test_p1_1_a_foreign_edit_on_a_written_file_keeps_the_journal_unrestored = None
+    test_p1_2_a_resumed_restore_never_overwrites_a_foreign_codex_edit = None
+
+    def _conflict(self) -> bytes:
+        from dayz_mcp import host_config
+
+        edited: dict[str, bytes] = {}
+
+        def edit(phase: str) -> None:
+            if phase == "after_write_claude":
+                edited["claude"] = self._add_foreign_server(self.claude)
+
+        with self.assertRaisesRegex(
+            host_config.HostConfigError, "^registration_config_rollback_conflict$"
+        ):
+            self._apply(edit)
+        return edited["claude"]
+
+    def test_p1_2_an_original_put_back_by_atomic_replace_releases_the_journal(self) -> None:
+        self._conflict()
+        old_inode = self.claude.stat().st_ino
+        staged = self.root / "editor-save.tmp"
+        staged.write_bytes(self.original_claude)
+        os.replace(staged, self.claude)
+        self.assertNotEqual(self.claude.stat().st_ino, old_inode)
+        self.assertEqual(self._apply(None), {"status": "committed"})
+        self.assertFalse(self.journal.exists())
+
+    def test_p1_2_a_foreign_file_on_a_new_inode_still_refuses(self) -> None:
+        from dayz_mcp import host_config
+
+        kept = self._conflict()
+        staged = self.root / "editor-save.tmp"
+        staged.write_bytes(kept)
+        os.replace(staged, self.claude)
+        with self.assertRaisesRegex(
+            host_config.HostConfigError, "^registration_recovery_conflict$"
+        ):
+            self._apply(None)
+        self.assertEqual(self.claude.read_bytes(), kept)
+        self.assertTrue(self.journal.exists())
+
+    def test_p1_1_a_torn_shaped_foreign_edit_after_a_finished_write_is_kept(self) -> None:
+        from dayz_mcp import host_config
+
+        target = host_config.build_claude_target(self.original_claude, "dayz-mcp")
+        shared = 0
+        while target[shared] == self.original_claude[shared]:
+            shared += 1
+        # Same shape a short write of our target would leave, but written by
+        # someone else after our write() to Claude completed.
+        foreign = target[: shared + 4] + self.original_claude[shared + 4 :]
+        self.assertNotIn(foreign, (target, self.original_claude))
+        self.assertTrue(host_config._is_own_write(foreign, self.original_claude, target))
+
+        def edit(phase: str) -> None:
+            if phase == "after_write_claude":
+                self.claude.write_bytes(foreign)
+
+        with self.assertRaisesRegex(
+            host_config.HostConfigError, "^registration_config_rollback_conflict$"
+        ):
+            self._apply(edit)
+        self.assertEqual(self.claude.read_bytes(), foreign)
+        self.assertTrue(self.journal.exists())
+
+
+@unittest.skipUnless(POSIX, "the POSIX host-config transaction")
 class InstallerOuterRollbackRound2Test(unittest.TestCase):
     """Sol P1-3: register_transaction's rollback keeps an edit timeouts kept."""
 
@@ -432,7 +504,8 @@ class InstallerOuterRollbackRound2Test(unittest.TestCase):
                 fault_injector=edit,
             )
         self.assertEqual(self._command(), "/bin/edited-command")
-        self.assertFalse((self.root / "reg-journal" / "dayz-mcp").exists())
+        # Round 3 (Sol P1-6): the journal keeps the preserved decision.
+        self.assertTrue((self.root / "reg-journal" / "dayz-mcp").exists())
 
     def test_p1_3_recovery_after_a_crash_keeps_a_foreign_entry(self) -> None:
         import install_mcp
@@ -456,6 +529,66 @@ class InstallerOuterRollbackRound2Test(unittest.TestCase):
             )
         self.assertEqual(self._command(), "/bin/foreign-command")
         self.assertTrue((self.root / "reg-journal" / "dayz-mcp").exists())
+
+    def _register(self, **kwargs):
+        import install_mcp
+        from install_mcp import RegistrationSpec
+
+        desired = {"CLAUDE": RegistrationSpec(Path("/opt/new/bin/python"), ("-m", "dayz_mcp", "--client"))}
+        return install_mcp.register_transaction(
+            self._provider(),
+            desired,
+            host_configs=(self.claude,),
+            journal_root=self.root / "reg-journal",
+            host_journal_root=self.root / "host-journal",
+            **kwargs,
+        )
+
+    def test_p1_6_a_cut_after_preserved_never_lets_the_next_run_overwrite(self) -> None:
+        import install_mcp
+
+        def edit(phase: str) -> None:
+            if phase == "after_prepare":
+                self._edit_command("/bin/edited-command")
+
+        real_write = install_mcp._write_registration_manifest
+
+        def write_then_cut(journal, manifest):
+            real_write(journal, manifest)
+            if manifest.get("preserved"):
+                raise install_mcp.RegistrationCrash("cut after preserved")
+
+        with patch.object(install_mcp, "_write_registration_manifest", write_then_cut):
+            with self.assertRaises(install_mcp.RegistrationCrash):
+                self._register(fault_injector=edit)
+        self.assertEqual(self._command(), "/bin/edited-command")
+        for _attempt in range(2):
+            with self.assertRaisesRegex(
+                install_mcp.InstallerExecutionError, "^registration_preserved_foreign_edit$"
+            ):
+                self._register()
+            self.assertEqual(self._command(), "/bin/edited-command")
+            self.assertTrue((self.root / "reg-journal" / "dayz-mcp").exists())
+
+    def test_p1_6_an_explicit_removal_of_the_preserved_entry_releases_it(self) -> None:
+        import install_mcp
+
+        def edit(phase: str) -> None:
+            if phase == "after_prepare":
+                self._edit_command("/bin/edited-command")
+
+        with self.assertRaises(install_mcp.InstallerExecutionError):
+            self._register(fault_injector=edit)
+        with self.assertRaisesRegex(
+            install_mcp.InstallerExecutionError, "^registration_preserved_foreign_edit$"
+        ):
+            self._register()
+        document = json.loads(self.claude.read_bytes())
+        document["mcpServers"].pop("dayz-mcp")
+        self.claude.write_bytes((json.dumps(document, indent=2) + "\n").encode())
+        self._register()
+        self.assertEqual(self._command(), "/opt/new/bin/python")
+        self.assertFalse((self.root / "reg-journal" / "dayz-mcp").exists())
 
     def test_recovery_after_a_crash_still_restores_our_own_entry(self) -> None:
         import install_mcp
