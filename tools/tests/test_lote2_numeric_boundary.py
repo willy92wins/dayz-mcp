@@ -152,14 +152,16 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # mode and trace_id are strings, uids a string list, include_unverified a bool).
         # + 3 from f078 (http_capture_start ttl_s; http_capture_read since_seq/max_entries;
         # capture_id is a string and responses a list, not in this census).
+        # + 1 from 3b83 (inventory_give ammo, StrictInt).
         # + 3 from players_los_cone (radius_m/half_yaw_deg/timeout_s; uids a string
         # list, include_unverified a bool).
         # + 3 from loot_los_cone (radius_m/half_yaw_deg/timeout_s; uids a string
         # list, include_unverified a bool).
-        self.assertEqual(len(rows), 276)
+        self.assertEqual(len(rows), 277)
         self.assertIn(("loot_los_cone", "radius_m", "float"), rows)
         self.assertIn(("loot_los_cone", "half_yaw_deg", "float"), rows)
         self.assertIn(("loot_los_cone", "timeout_s", "float"), rows)
+        self.assertIn(("inventory_give", "ammo", "int"), rows)
         self.assertIn(("players_los_cone", "radius_m", "float"), rows)
         self.assertIn(("players_los_cone", "half_yaw_deg", "float"), rows)
         self.assertIn(("players_los_cone", "timeout_s", "float"), rows)

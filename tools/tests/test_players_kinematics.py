@@ -79,7 +79,7 @@ CENSUS_FIXTURE = (
 )
 TRACE_ID = "0123456789abcdef0123456789abcdef"
 PREVIOUS_ACH = "3b800b7c7ee0674c"
-NEW_ACH = "fe4cd4a4597078cf"
+NEW_ACH = "49cc1290c4293fcb"
 WIRE_KEYS = {"mode", "trace_id", "cursor", "limit", "sample_hz", "max_samples", "uids"}
 
 PREVIOUS_49_SERVER_BITS: tuple[str, ...] = (

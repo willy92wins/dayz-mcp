@@ -473,7 +473,7 @@ class DtoContractTest(unittest.TestCase):
         client = "".join(re.findall(r'"([^"]*)"', re.search(r"CLIENT_POLL_CAPS = ([^;]+);", CLIENT_BRIDGE).group(1)))  # type: ignore[union-attr]
         self.assertEqual(client, EXPECTED_CLIENT_CAPS)
         self.assertIn('"query_player_state": _command_schema(_schema_variant()),', LOOPBACK)
-        self.assertIn('protected const string SERVER_ARG_CONTRACT_HASH = "fe4cd4a4597078cf";', BRIDGE)
+        self.assertIn('protected const string SERVER_ARG_CONTRACT_HASH = "49cc1290c4293fcb";', BRIDGE)
 
 
 def _answer(events: list[dict[str, Any]] | None, run: int = 4242, evicted: int = 0) -> dict[str, Any]:

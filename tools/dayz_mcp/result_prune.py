@@ -77,6 +77,8 @@ PRUNABLE_FIELDS = (
     "ui_request",
     # action_use and action_hold fill it on a deploy's hologram_colliding (204e).
     "hologram",
+    # action_use and action_hold fill it on a world target's target_not_found (b951).
+    "target_search",
     "dialog",
     "weapon_state",
     # Nested probe (ficha 4f50) lives inside this object. prune does not
