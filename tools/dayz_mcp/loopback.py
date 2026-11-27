@@ -650,7 +650,7 @@ def _is_real_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
 
 
-def _box_payload(state: "ServerState") -> dict:
+def _box_payload(state: "ServerState", session_id: str = "") -> dict:
     """Compose the public box snapshot for /session/status only."""
 
     lifecycle = getattr(state, "lifecycle", None)
@@ -691,15 +691,53 @@ def _box_payload(state: "ServerState") -> dict:
     coordination = getattr(state, "coordination", None)
     queue: list = []
     claimed = False
-    if coordination is not None:
+    snapshot_fn = getattr(coordination, "box_status_snapshot", None) if coordination is not None else None
+    if callable(snapshot_fn):
+        try:
+            view = snapshot_fn(session_id)
+        except Exception:
+            view = {"unreadable": True}
+        if not isinstance(view, dict) or view.get("unreadable"):
+            occupancy["occupied"] = True
+            occupancy["reason"] = "box_queue_unreadable"
+        else:
+            public_queue = view.get("queue")
+            if isinstance(public_queue, list):
+                queue = public_queue
+            if view.get("claimed") is True:
+                claimed = True
+                if view.get("claimed_s") is not None:
+                    occupancy["claimed_s"] = view.get("claimed_s")
+            if view.get("occupies") is True:
+                occupancy["occupied"] = True
+            raw_holder = view.get("external_holder")
+            if isinstance(raw_holder, dict):
+                from dayz_mcp.box_holder import public_holder
+
+                holder = public_holder(raw_holder)
+                if isinstance(holder, dict):
+                    occupancy["foreign_holder"] = holder
+        occupancy["_shared_queue_view"] = True
+    elif coordination is not None:
         queue_fn = getattr(coordination, "box_queue_public", None)
         if callable(queue_fn):
             try:
                 public_queue = queue_fn()
             except Exception:
                 public_queue = []
+                occupancy["occupied"] = True
+                occupancy["reason"] = "box_queue_unreadable"
             if isinstance(public_queue, list):
                 queue = public_queue
+        reason_fn = getattr(coordination, "box_document_reason", None)
+        if callable(reason_fn):
+            try:
+                document_reason = reason_fn()
+            except Exception:
+                document_reason = "box_queue_unreadable"
+            if document_reason:
+                occupancy["occupied"] = True
+                occupancy["reason"] = document_reason
         claimed_fn = getattr(coordination, "box_is_claimed", None)
         if callable(claimed_fn):
             try:
@@ -10617,15 +10655,43 @@ class Handler(BaseHTTPRequestHandler):
             claim_flag = body.get("box_wait_claim") is True
             ticket = body.get("box_ticket")
             if wait_flag or done_flag or claim_flag or ticket:
-                payload.update(
-                    coordination.box_wait_touch(
-                        client,
-                        ticket,
-                        done=done_flag,
-                        claim=claim_flag,
+                try:
+                    payload.update(
+                        coordination.box_wait_touch(
+                            client,
+                            ticket,
+                            done=done_flag,
+                            claim=claim_flag,
+                        )
                     )
-                )
-            payload["box"] = _box_payload(self.state)
+                except OSError:
+                    payload.update(
+                        {
+                            "box_ticket": None,
+                            "box_wait_error": "box_queue_unreadable",
+                        }
+                    )
+            payload["box"] = _box_payload(self.state, client.session_id)
+            occupies = getattr(coordination, "box_queue_occupies", None)
+            if payload["box"].pop("_shared_queue_view", False):
+                occupies = None
+            if callable(occupies):
+                try:
+                    if occupies(client.session_id):
+                        payload["box"]["occupied"] = True
+                except Exception:
+                    payload["box"]["occupied"] = True
+                    payload["box"]["reason"] = "box_queue_unreadable"
+            external = getattr(coordination, "box_external_holder", None)
+            if "foreign_holder" in payload["box"]:
+                external = None
+            if callable(external):
+                try:
+                    holder = external()
+                except Exception:
+                    holder = None
+                if isinstance(holder, dict) and "foreign_holder" not in payload["box"]:
+                    payload["box"]["foreign_holder"] = holder
             payload["retired_run_diagnostics"] = _retired_run_diagnostics_payload(
                 self.state, client
             )

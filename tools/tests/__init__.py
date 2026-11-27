@@ -25,6 +25,7 @@ test_fn_p0_small_model_loops.py default it before they import the server, so
 the same default comes first here.
 """
 
+import itertools
 import os
 import tempfile
 from pathlib import Path
@@ -36,6 +37,16 @@ install_fast_tier_desktop_gate_guard()
 os.environ.setdefault(
     "LOCALAPPDATA", str(Path(tempfile.gettempdir()) / "dayz-mcp-localapp")
 )
+
+# The sealed server_cli.shared_root uses the real profile unless this override
+# is set. A test that needs the variable absent clears it in its own setUp.
+_suite_shared_root = (
+    Path(tempfile.gettempdir()) / "dayz-mcp-test-shared" / f"suite-{os.getpid()}"
+)
+if not os.environ.get("DAYZ_MCP_SHARED_ROOT", "").strip():
+    _suite_shared_root.mkdir(parents=True, exist_ok=True)
+    os.environ["DAYZ_MCP_SHARED_ROOT"] = str(_suite_shared_root)
+_suite_shared_root_value = os.environ["DAYZ_MCP_SHARED_ROOT"]
 
 if os.name != "nt":
     # The Linux implementations, as python -m dayz_mcp installs them first. Without
@@ -75,3 +86,40 @@ def no_box_reservation() -> None:
 
 
 _box_reservation.read_box_reservation = no_box_reservation
+
+
+def _isolate_box_queue_per_coordinator() -> None:
+    """One shared-queue directory per coordinator unless the test set one.
+
+    The CI runner is unittest and every daemon in that process would otherwise
+    share a single ``box-queue.json``. A test that sets ``DAYZ_MCP_SHARED_ROOT``
+    before constructing the coordinator keeps that directory.
+    """
+
+    from dayz_mcp.session_coordination import SessionCoordinator
+
+    roots = itertools.count(1)
+    original = SessionCoordinator.__init__
+
+    def _init(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        current = os.environ.get("DAYZ_MCP_SHARED_ROOT", "").strip()
+        # The suite default stays per coordinator. A test that picks its own
+        # directory wants every coordinator in the process to share it.
+        if current and os.path.normcase(current) != os.path.normcase(
+            _suite_shared_root_value
+        ):
+            self._box_root = None
+            return
+        root = (
+            Path(tempfile.gettempdir())
+            / "dayz-mcp-test-shared"
+            / f"{os.getpid()}-{next(roots)}"
+        )
+        root.mkdir(parents=True, exist_ok=True)
+        self._box_root = root
+
+    SessionCoordinator.__init__ = _init
+
+
+_isolate_box_queue_per_coordinator()

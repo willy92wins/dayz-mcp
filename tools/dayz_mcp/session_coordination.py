@@ -334,6 +334,7 @@ class SessionCoordinator:
         self,
         *,
         time_fn: Callable[[], float] = time.monotonic,
+        wall_time_fn: Callable[[], float] = time.time,
         token_fn: Callable[[], str] | None = None,
         id_fn: Callable[[], str] | None = None,
         audit: AuditCallback | None = None,
@@ -353,6 +354,8 @@ class SessionCoordinator:
         idle_hold_probe: IdleHoldProbe | None = None,
     ) -> None:
         self._time_fn = time_fn
+        self._wall_time_fn = wall_time_fn
+        self._box_bound_ticket: dict[str, str] = {}
         self._token_fn = token_fn or (lambda: secrets.token_urlsafe(32))
         self._id_fn = id_fn or (lambda: uuid.uuid4().hex)
         self._fault_id_fn = fault_id_fn or (lambda: uuid.uuid4().hex)
@@ -417,11 +420,7 @@ class SessionCoordinator:
         self._queue: list[_Ticket] = []
         self._queue_reservations: list[_Ticket] = []
         self._operation_tombstones: dict[tuple[ClientIdentity, str], float] = {}
-        self._box_queue: list[_Ticket] = []
         self._box_tombstones: dict[tuple[str, str], float] = {}
-        self._box_claiming: str | None = None
-        self._box_claimed_at: float | None = None
-        self._box_claiming_ticket: str | None = None
         self._invalid_tokens: dict[str, tuple[ClientIdentity, str]] = {}
         self._revision = 0
         self._cleanup_worker_slots = threading.BoundedSemaphore(
@@ -2519,42 +2518,165 @@ class SessionCoordinator:
                 **self._status_lease_end_locked(now),
             }
 
+    def _box_io_root(self):
+        """Optional document directory. None means ``shared_root()``.
+
+        Tests set ``_box_root`` when each coordinator needs its own queue.
+        Production leaves it unset.
+        """
+
+        return getattr(self, "_box_root", None)
+
+    def _box_apply_removed_locked(self, removed: object) -> None:
+        if not isinstance(removed, list) or not removed:
+            return
+        now = self._time_fn()
+        for item in removed:
+            if not isinstance(item, tuple) or len(item) != 2:
+                continue
+            session_id, ticket_id = item
+            if isinstance(session_id, str) and isinstance(ticket_id, str):
+                self._box_tombstones[(session_id, ticket_id)] = (
+                    now + OPERATION_TOMBSTONE_TTL_S
+                )
+        self._bump_revision_locked()
+        self._condition.notify_all()
+
+    def _box_view_locked(self, session_id: str = "") -> dict:
+        from dayz_mcp import shared_box_queue
+
+        view = shared_box_queue.read_view(
+            now=self._wall_time_fn(),
+            session_id=session_id,
+            root=self._box_io_root(),
+        )
+        self._box_apply_removed_locked(view.get("removed"))
+        return view
+
     def box_queue_public(self) -> list[dict[str, object]]:
         with self._condition:
-            self._purge_box_locked()
-            now = self._time_fn()
-            return [
-                {
-                    "session": ticket.client.public_payload()["session"],
-                    "waiting_s": max(0.0, now - ticket.created_at),
-                }
-                for ticket in self._box_queue
-            ]
+            view = self._box_view_locked()
+            if view.get("unreadable"):
+                return []
+            queue = view.get("queue")
+            return list(queue) if isinstance(queue, list) else []
+
+    def box_document_reason(self) -> str | None:
+        with self._condition:
+            view = self._box_view_locked()
+            if view.get("unreadable"):
+                return "box_queue_unreadable"
+            return None
+
+    def box_queue_occupies(self, session_id: str) -> bool:
+        with self._condition:
+            view = self._box_view_locked(session_id)
+            if view.get("unreadable"):
+                return True
+            return view.get("occupies") is True
+
+    def box_external_holder(self) -> dict | None:
+        from dayz_mcp.box_holder import public_holder
+
+        with self._condition:
+            view = self._box_view_locked()
+            raw = view.get("external_holder")
+            if not isinstance(raw, dict):
+                return None
+            return public_holder(raw)
 
     def box_is_claimed(self) -> bool:
         with self._condition:
-            self._purge_box_locked()
-            return self._box_claiming is not None
+            view = self._box_view_locked()
+            return view.get("claimed") is True
 
     def box_blocks_start(self, client: ClientIdentity) -> bool:
         with self._condition:
-            self._purge_box_locked()
-            return (
-                self._box_claiming is not None
-                and self._box_claiming != client.session_id
-            )
+            view = self._box_view_locked(client.session_id)
+            if view.get("unreadable"):
+                return True
+            return view.get("blocked") is True
 
     def box_claim_public(self) -> dict[str, object]:
         with self._condition:
-            self._purge_box_locked()
-            if self._box_claiming is None:
+            view = self._box_view_locked()
+            if view.get("claimed") is not True:
                 return {"claimed": False, "claimed_s": None}
-            now = self._time_fn()
-            started = self._box_claimed_at
-            claimed_s = (
-                max(0.0, now - started) if isinstance(started, (int, float)) else 0.0
+            return {"claimed": True, "claimed_s": view.get("claimed_s")}
+
+    def box_status_snapshot(self, session_id: str = "") -> dict:
+        """One locked read of the shared document for a status request."""
+
+        with self._condition:
+            return self._box_view_locked(session_id)
+
+    def _forget_bound_locked(self, session_id: str, ticket: str) -> None:
+        if self._box_bound_ticket.get(session_id) == ticket:
+            self._box_bound_ticket.pop(session_id, None)
+
+    @staticmethod
+    def _left_pairs(left: object) -> list[tuple[str, str]]:
+        found: list[tuple[str, str]] = []
+        if not isinstance(left, list):
+            return found
+        for item in left:
+            if (
+                isinstance(item, tuple)
+                and len(item) == 2
+                and isinstance(item[0], str)
+                and isinstance(item[1], str)
+            ):
+                found.append((item[0], item[1]))
+        return found
+
+    @staticmethod
+    def _removed_ticket_ids(removed: object) -> set[str]:
+        found: set[str] = set()
+        if not isinstance(removed, list):
+            return found
+        for item in removed:
+            if (
+                isinstance(item, tuple)
+                and len(item) == 2
+                and isinstance(item[1], str)
+            ):
+                found.add(item[1])
+        return found
+
+    def _bound_ticket(self, client: ClientIdentity, ticket: object) -> object:
+        if isinstance(ticket, str) and ticket:
+            return ticket
+        return self._box_bound_ticket.get(client.session_id)
+
+    def box_admit_start(self, client: ClientIdentity, ticket: object) -> str | None:
+        """Audit reason that refuses a new start, or None when it may proceed."""
+
+        from dayz_mcp import shared_box_queue
+
+        with self._condition:
+            reason = shared_box_queue.admit(
+                client.session_id,
+                self._bound_ticket(client, ticket),
+                now=self._wall_time_fn(),
+                root=self._box_io_root(),
             )
-            return {"claimed": True, "claimed_s": claimed_s}
+            return reason
+
+    def box_bind_run(
+        self, client: ClientIdentity, ticket: object, run_id: str
+    ) -> str | None:
+        from dayz_mcp import shared_box_queue
+
+        supplied = self._bound_ticket(client, ticket)
+        supplied = supplied if isinstance(supplied, str) and supplied else None
+        with self._condition:
+            return shared_box_queue.bind_run(
+                client.session_id,
+                supplied,
+                run_id,
+                now=self._wall_time_fn(),
+                root=self._box_io_root(),
+            )
 
     def box_wait_touch(
         self,
@@ -2563,66 +2685,80 @@ class SessionCoordinator:
         *,
         done: bool = False,
         claim: bool = False,
+        purpose: str = "box_wait",
+        kind: str = "mcp",
+        holder: str | None = None,
+        instance: str | None = None,
     ) -> dict[str, object]:
-        """Join, refresh, claim, or leave the box FIFO.
+        """Join, refresh, claim, or leave the shared box FIFO.
 
-        Same TTL, capacity and tombstone constants as the lease queue. Tickets
-        are request-bound and are not written into the durable snapshot.
+        RAM keeps tombstones for this daemon. The queue itself is the shared
+        document. Tickets are not written into the durable coordination snapshot.
         """
 
+        from dayz_mcp import shared_box_queue
+        from dayz_mcp.box_holder import own_name
+
         with self._condition:
-            self._purge_box_locked()
-            if done:
-                self._box_leave_locked(client, ticket_id)
-                return {"box_ticket": None}
+            self._purge_box_tombstones_locked()
             supplied = ticket_id if isinstance(ticket_id, str) and ticket_id else None
             if supplied is not None and self._box_tombstoned_locked(
                 client.session_id, supplied
             ):
-                return {"box_ticket": None, "box_wait_error": "box_wait_cancelled"}
-            existing = (
-                self._box_ticket_id_locked(client, supplied)
-                if supplied is not None
-                else None
+                if done:
+                    self._forget_bound_locked(client.session_id, supplied)
+                return {
+                    "box_ticket": None,
+                    "box_claimed": False,
+                    "box_wait_error": "box_wait_cancelled",
+                }
+            if (
+                not done
+                and supplied is None
+                and len(self._box_tombstones) >= MAX_OPERATION_TOMBSTONES
+            ):
+                return {
+                    "box_ticket": None,
+                    "box_wait_error": "box_queue_saturated",
+                    "hint": "retry with wait_for_box_s=<n>",
+                }
+            minted = None if supplied or done else self._id_fn()
+            outcome = shared_box_queue.touch(
+                now=self._wall_time_fn(),
+                session_id=client.session_id,
+                holder=holder or client.session_id[:12],
+                purpose=purpose,
+                instance=instance or own_name(),
+                ticket=supplied,
+                new_ticket=minted,
+                done=done,
+                claim=claim,
+                kind=kind,
+                capacity=MAX_SESSION_QUEUE,
+                root=self._box_io_root(),
             )
-            if existing is None:
-                if supplied is not None:
-                    return {"box_ticket": None, "box_wait_error": "box_ticket_invalid"}
-                if len(self._box_tombstones) >= MAX_OPERATION_TOMBSTONES:
-                    return {
-                        "box_ticket": None,
-                        "box_wait_error": "box_queue_saturated",
-                        "hint": "retry with wait_for_box_s=<n>",
-                    }
-                if len(self._box_queue) >= MAX_SESSION_QUEUE:
-                    return {"box_ticket": None, "box_wait_error": "queue_full"}
-                now = self._time_fn()
-                ticket = _Ticket(
-                    self._id_fn(),
-                    client,
-                    "box_wait",
-                    now,
-                    now,
-                )
-                self._box_queue.append(ticket)
-                self._bump_revision_locked()
-                self._condition.notify_all()
-                existing = ticket
-            else:
-                existing.touched_at = self._time_fn()
-            if claim and self._box_queue and self._box_queue[0] is existing:
-                if self._box_claiming != client.session_id:
-                    self._box_claimed_at = self._time_fn()
-                self._box_claiming = client.session_id
-                self._box_claiming_ticket = existing.ticket_id
-            return {
-                "box_ticket": existing.ticket_id,
-                "box_position": self._box_queue.index(existing) + 1,
-                "box_claimed": (
-                    self._box_claiming == client.session_id
-                    and self._box_claiming_ticket == existing.ticket_id
-                ),
-            }
+            self._box_apply_removed_locked(outcome.get("removed"))
+            response = outcome.get("response")
+            if not isinstance(response, dict):
+                return {"box_ticket": None, "box_wait_error": "box_queue_unreadable"}
+            bound = response.get("box_ticket")
+            removed_ids = self._removed_ticket_ids(outcome.get("removed"))
+            if done:
+                if supplied is None:
+                    for session_id, ticket_id in self._left_pairs(outcome.get("left")):
+                        if session_id == client.session_id:
+                            self._forget_bound_locked(session_id, ticket_id)
+                elif outcome.get("unreadable") is not True:
+                    entries = outcome.get("entries")
+                    still_there = isinstance(entries, list) and any(
+                        isinstance(item, dict) and item.get("ticket") == supplied
+                        for item in entries
+                    )
+                    if supplied in removed_ids or not still_there:
+                        self._forget_bound_locked(client.session_id, supplied)
+            elif response.get("box_claimed") is True and isinstance(bound, str):
+                self._box_bound_ticket[client.session_id] = bound
+            return response
 
     def durable_revision(self) -> int:
         with self._condition:
@@ -3704,9 +3840,16 @@ class SessionCoordinator:
     def _admission_privileged_locked(self, client: ClientIdentity) -> bool:
         if self._active is not None and self._active.client == client:
             return True
-        if self._box_claiming == client.session_id:
-            return True
-        return False
+        view = self._box_view_locked(client.session_id)
+        entries = view.get("entries")
+        if not isinstance(entries, list) or not entries:
+            return False
+        head = entries[0]
+        return (
+            isinstance(head, dict)
+            and head.get("state") == "claimed"
+            and head.get("session_id") == client.session_id
+        )
 
     def _oldest_tombstone_retry_after_locked(self) -> float:
         if not self._operation_tombstones:
@@ -3745,9 +3888,8 @@ class SessionCoordinator:
             self._bump_revision_locked()
             self._condition.notify_all()
 
-    def _purge_box_locked(self) -> None:
+    def _purge_box_tombstones_locked(self) -> None:
         now = self._time_fn()
-        changed = False
         expired_tombstones = [
             key
             for key, expires_at in self._box_tombstones.items()
@@ -3755,121 +3897,25 @@ class SessionCoordinator:
         ]
         for key in expired_tombstones:
             self._box_tombstones.pop(key, None)
-            changed = True
-        kept: list[_Ticket] = []
-        for ticket in self._box_queue:
-            claimed = (
-                self._box_claiming == ticket.client.session_id
-                and self._box_claiming_ticket == ticket.ticket_id
-            )
-            ttl = BOX_CLAIM_TTL_S if claimed else SESSION_TTL_S
-            if now - ticket.touched_at >= ttl:
-                self._box_tombstones[(ticket.client.session_id, ticket.ticket_id)] = (
-                    now + OPERATION_TOMBSTONE_TTL_S
-                )
-                if claimed:
-                    self._box_clear_claim_locked()
-                changed = True
-                continue
-            kept.append(ticket)
-        if len(kept) != len(self._box_queue):
-            self._box_queue = kept
-            changed = True
-        if changed:
+        if expired_tombstones:
             self._bump_revision_locked()
             self._condition.notify_all()
+
+    def _purge_box_locked(self) -> None:
+        self._purge_box_tombstones_locked()
+        self._box_view_locked()
 
     def _box_tombstoned_locked(self, session_id: str, ticket_id: str) -> bool:
         return (session_id, ticket_id) in self._box_tombstones
 
-    def _box_ticket_for_client_locked(self, client: ClientIdentity) -> _Ticket | None:
-        for ticket in self._box_queue:
-            if ticket.client.session_id == client.session_id:
-                return ticket
-        return None
-
-    def _box_ticket_id_locked(
-        self, client: ClientIdentity, ticket_id: str
-    ) -> _Ticket | None:
-        for ticket in self._box_queue:
-            if (
-                ticket.ticket_id == ticket_id
-                and ticket.client.session_id == client.session_id
-            ):
-                return ticket
-        return None
-
-    def _box_clear_claim_locked(self) -> None:
-        self._box_claiming = None
-        self._box_claimed_at = None
-        self._box_claiming_ticket = None
-
     def _box_leave_session_locked(self, session_id: str) -> None:
-        now = self._time_fn()
-        remaining: list[_Ticket] = []
-        removed = False
-        for ticket in self._box_queue:
-            if ticket.client.session_id == session_id:
-                self._box_tombstones[(ticket.client.session_id, ticket.ticket_id)] = (
-                    now + OPERATION_TOMBSTONE_TTL_S
-                )
-                removed = True
-                continue
-            remaining.append(ticket)
-        if self._box_claiming == session_id:
-            self._box_clear_claim_locked()
-            removed = True
-        if removed:
-            self._box_queue = remaining
-            self._bump_revision_locked()
-            self._condition.notify_all()
+        from dayz_mcp import shared_box_queue
 
-    def _box_leave_locked(self, client: ClientIdentity, ticket_id: object) -> None:
-        if ticket_id in (None, ""):
-            # A live ticket of this session that is a sibling's is left
-            # alone. A single unclaimed one is treated as this request's
-            # own unseen join and swept.
-            live = 0
-            for ticket in self._box_queue:
-                if ticket.client.session_id == client.session_id:
-                    live += 1
-                    if live > 1:
-                        break
-            if live > 1 or (
-                live > 0 and self._box_claiming == client.session_id
-            ):
-                return
-            self._box_leave_session_locked(client.session_id)
-            return
-        now = self._time_fn()
-        remaining: list[_Ticket] = []
-        removed = False
-        for ticket in self._box_queue:
-            match_ticket = (
-                isinstance(ticket_id, str)
-                and ticket_id
-                and ticket.ticket_id == ticket_id
-                and ticket.client.session_id == client.session_id
-            )
-            if match_ticket:
-                self._box_tombstones[(ticket.client.session_id, ticket.ticket_id)] = (
-                    now + OPERATION_TOMBSTONE_TTL_S
-                )
-                removed = True
-                continue
-            remaining.append(ticket)
-        if (
-            isinstance(ticket_id, str)
-            and ticket_id
-            and self._box_claiming == client.session_id
-            and self._box_claiming_ticket == ticket_id
-        ):
-            self._box_clear_claim_locked()
-            removed = True
-        if removed:
-            self._box_queue = remaining
-            self._bump_revision_locked()
-            self._condition.notify_all()
+        self._box_bound_ticket.pop(session_id, None)
+        result = shared_box_queue.leave_session(
+            session_id, now=self._wall_time_fn(), root=self._box_io_root()
+        )
+        self._box_apply_removed_locked(result.get("removed"))
 
     def _operation_tombstoned_locked(
         self, client: ClientIdentity, operation_id: str | None
