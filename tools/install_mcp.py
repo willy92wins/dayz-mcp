@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import math
@@ -998,6 +999,21 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _keyfile_path(value: str | None, canonical_tools: Path) -> Path:
+    """The keyfile path, absolute, without following a link at the leaf.
+
+    On POSIX the directories are resolved but the last component is kept as
+    given (fix-forward #464 round 2): Path.resolve() on the leaf would turn a
+    symbolic link into its target and defeat the O_NOFOLLOW refusal when the
+    key is read or created. Windows keeps the full resolve() it always had.
+    """
+    raw = Path(value) if value else canonical_tools / ".dayz_mcp.key"
+    if os.name != "posix":
+        return raw.resolve()
+    absolute = Path(os.path.abspath(raw))
+    return absolute.parent.resolve() / absolute.name
+
+
 def parse_args(
     argv: Sequence[str] | None = None,
     *,
@@ -1038,11 +1054,7 @@ def parse_args(
         parser.error(error.code)
 
     canonical_tools = Path(tools_root).resolve()
-    keyfile = (
-        Path(args.keyfile).resolve()
-        if args.keyfile
-        else (canonical_tools / ".dayz_mcp.key").resolve()
-    )
+    keyfile = _keyfile_path(args.keyfile, canonical_tools)
     return InstallerOptions(
         port=args.port,
         keyfile=keyfile,
@@ -1217,74 +1229,165 @@ def _run_required(
 _PRIVATE_FILE_MODE = 0o600
 
 
-def _write_private_file(path: Path, data: bytes, *, exclusive: bool) -> None:
-    """Write a secret-bearing file that is 0600 from the open on POSIX.
+_NOFOLLOW_FLAGS = (
+    getattr(os, "O_BINARY", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NOCTTY", 0)
+)
 
-    The mode is passed to os.open, so the umask can only narrow it. An existing
-    file must be a regular file with one link owned by this user; it is
-    narrowed to 0600 before its old bytes are truncated and the new ones
-    written. A symbolic link at the leaf is refused (O_NOFOLLOW). On Windows
-    the mode bits carry no access control and the file is written as before.
-    """
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NOCTTY", 0)
-    )
-    if exclusive:
-        flags |= os.O_EXCL
-    descriptor = os.open(path, flags, _PRIVATE_FILE_MODE)
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        view = view[written:]
+
+
+def _fsync_parent_posix(path: Path) -> None:
+    if os.name != "posix":
+        return
+    descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
-        if os.name == "posix":
-            info = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or info.st_nlink != 1
-                or info.st_uid != os.geteuid()
-            ):
-                raise PermissionError("private_file_not_owned_regular")
-            if stat.S_IMODE(info.st_mode) != _PRIVATE_FILE_MODE:
-                os.fchmod(descriptor, _PRIVATE_FILE_MODE)
-        os.ftruncate(descriptor, 0)
-        view = memoryview(data)
-        while view:
-            written = os.write(descriptor, view)
-            view = view[written:]
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
 
 
-def _private_key_mode_ok(path: Path) -> bool:
+def _check_owned_regular(info: os.stat_result) -> None:
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != os.geteuid()
+    ):
+        raise PermissionError("private_file_not_owned_regular")
+
+
+def _write_private_file(path: Path, data: bytes, *, exclusive: bool) -> None:
+    """Write a secret-bearing file that is 0600 from the open on POSIX.
+
+    The mode is passed to os.open with O_EXCL, so the umask can only narrow it
+    and no other inode ever holds the new bytes. A new key (exclusive) is
+    created in place; O_EXCL refuses any existing name, a dangling symbolic
+    link included. A rewrite (not exclusive) never reuses the existing inode
+    (fix-forward #464 round 2): a descriptor opened while the old file was
+    0644 would read the new secret through it. The bytes go to a fresh 0600
+    temporary file in the same directory, are fsynced, and os.replace
+    publishes it, followed by an fsync of the directory. An existing leaf that
+    is a symbolic link, not a regular file, hard-linked or not ours is refused
+    and left as it is. On Windows the mode bits carry no access control and
+    the file is rewritten in place as before.
+    """
+    if exclusive:
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW_FLAGS,
+            _PRIVATE_FILE_MODE,
+        )
+        try:
+            if os.name == "posix":
+                _check_owned_regular(os.fstat(descriptor))
+            _write_all(descriptor, data)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _fsync_parent_posix(path)
+        return
     if os.name != "posix":
-        return True
-    info = path.lstat()
-    return (
-        stat.S_ISREG(info.st_mode)
-        and info.st_nlink == 1
-        and info.st_uid == os.geteuid()
-        and not info.st_mode & 0o077
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | _NOFOLLOW_FLAGS, _PRIVATE_FILE_MODE
+        )
+        try:
+            os.ftruncate(descriptor, 0)
+            _write_all(descriptor, data)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        _check_owned_regular(existing)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW_FLAGS,
+        _PRIVATE_FILE_MODE,
     )
+    try:
+        try:
+            _check_owned_regular(os.fstat(descriptor))
+            _write_all(descriptor, data)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    _fsync_parent_posix(path)
+
+
+def _read_private_key_posix(path: Path) -> str:
+    """Read the key from the one descriptor that was validated.
+
+    O_NOFOLLOW refuses a symbolic link at the leaf (a dangling one included),
+    and fstat on that same descriptor checks it is a regular file with one
+    link, owned by us and not readable by group or others before any byte is
+    read, so the file cannot be swapped between the check and the read.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | _NOFOLLOW_FLAGS)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise InstallerExecutionError("keyfile_permissions_unsafe") from None
+        raise
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+        ):
+            raise InstallerExecutionError("keyfile_permissions_unsafe")
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if sum(map(len, chunks)) > 65536:
+                raise InstallerExecutionError("keyfile_unreadable")
+    finally:
+        os.close(descriptor)
+    return b"".join(chunks).decode("ascii").strip()
 
 
 def _load_or_create_key(
     path: Path,
     token_factory: Callable[[], str],
 ) -> str:
-    if path.exists():
-        # A key readable by group or others is already exposed: refuse it
-        # rather than re-copy it into the configs (fix-forward #464). The
-        # POSIX daemon reader refuses the same modes.
+    # A key readable by group or others is already exposed: refuse it rather
+    # than re-copy it into the configs (fix-forward #464). The POSIX daemon
+    # reader refuses the same modes.
+    value: str | None = None
+    if os.name == "posix":
         try:
-            if not _private_key_mode_ok(path):
-                raise InstallerExecutionError("keyfile_permissions_unsafe")
+            value = _read_private_key_posix(path)
+        except FileNotFoundError:
+            value = None
+        except (OSError, UnicodeError) as error:
+            raise InstallerExecutionError("keyfile_unreadable") from error
+    elif path.exists():
+        try:
             value = path.read_text(encoding="ascii").strip()
         except (OSError, UnicodeError) as error:
             raise InstallerExecutionError("keyfile_unreadable") from error
-    else:
+    if value is None:
         value = token_factory()
         if not isinstance(value, str) or not value:
             raise InstallerExecutionError("key_generation_failed")

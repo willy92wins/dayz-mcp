@@ -111,6 +111,98 @@ class PosixInstallerSecretModesTest(unittest.TestCase):
         key.chmod(0o600)
         self.assertEqual(installer._load_or_create_key(key, lambda: "unused"), "old-key")
 
+    # --- round 2 (Sol P1-1): a rewrite never reuses the old inode ---------
+
+    def test_a_descriptor_opened_while_the_config_was_0644_never_sees_the_new_key(self) -> None:
+        config = self.root / "dayz_mcp.json"
+        config.write_text('{"key":"old-key"}\n', encoding="ascii")
+        config.chmod(0o644)
+        old_inode = config.lstat().st_ino
+        with open(config, "rb") as early_reader:
+            installer._write_config(config, installer.config_payload(18765, "new-secret"))
+            early_reader.seek(0)
+            seen = early_reader.read()
+        self.assertNotIn(b"new-secret", seen)
+        self.assertNotEqual(config.lstat().st_ino, old_inode)
+        self.assertEqual(self._mode(config), 0o600)
+        self.assertEqual(json.loads(config.read_text(encoding="ascii"))["key"], "new-secret")
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["dayz_mcp.json"])
+
+    def test_a_failed_rewrite_leaves_the_old_config_and_no_temporary(self) -> None:
+        config = self.root / "dayz_mcp.json"
+        config.write_text("{}\n", encoding="ascii")
+        config.chmod(0o600)
+        with patch.object(installer.os, "replace", side_effect=OSError(5, "EIO")):
+            with self.assertRaises(InstallerExecutionError):
+                installer._write_config(config, installer.config_payload(1, "never"))
+        self.assertEqual(config.read_text(encoding="ascii"), "{}\n")
+        self.assertEqual([p.name for p in self.root.iterdir()], ["dayz_mcp.json"])
+
+    # --- round 2 (Sol P1-2): no resolve() of the keyfile leaf ------------
+
+    def _options_for(self, keyfile: Path):
+        tools_root = self.root / "tools"
+        tools_root.mkdir(exist_ok=True)
+        return parse_args(["--port", "18765", "--keyfile", str(keyfile)], tools_root=tools_root)
+
+    def test_parse_args_keeps_a_keyfile_link_and_the_link_is_refused(self) -> None:
+        target = self.root / "real.key"
+        target.write_text("linked-secret\n", encoding="ascii")
+        target.chmod(0o600)
+        link = self.root / "link.key"
+        link.symlink_to(target)
+        options = self._options_for(link)
+        self.assertEqual(options.keyfile, link)
+        with self.assertRaises(InstallerExecutionError) as raised:
+            installer._load_or_create_key(options.keyfile, lambda: "unused")
+        self.assertEqual(str(raised.exception), "keyfile_permissions_unsafe")
+
+    def test_a_dangling_keyfile_link_never_creates_the_key_at_its_target(self) -> None:
+        target = self.root / "elsewhere" / "planted.key"
+        target.parent.mkdir()
+        link = self.root / "dangling.key"
+        link.symlink_to(target)
+        options = self._options_for(link)
+        with self.assertRaises(InstallerExecutionError):
+            installer._load_or_create_key(options.keyfile, lambda: "fresh-secret")
+        self.assertFalse(target.exists())
+        self.assertTrue(link.is_symlink())
+
+    def test_a_key_swapped_after_validation_is_not_read(self) -> None:
+        key = self.root / "daemon.key"
+        key.write_text("validated-key\n", encoding="ascii")
+        key.chmod(0o600)
+        swapped = {"done": False}
+
+        def swap() -> None:
+            if swapped["done"]:
+                return
+            swapped["done"] = True
+            planted = self.root / "planted"
+            planted.write_text("planted-key\n", encoding="ascii")
+            planted.chmod(0o644)
+            os.replace(planted, key)
+
+        real_lstat = Path.lstat
+        real_fstat = os.fstat
+
+        def lstat_then_swap(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            if Path(path) == key:
+                swap()
+            return info
+
+        def fstat_then_swap(descriptor, *args, **kwargs):
+            info = real_fstat(descriptor, *args, **kwargs)
+            swap()
+            return info
+
+        with patch.object(Path, "lstat", lstat_then_swap), \
+                patch.object(installer.os, "fstat", side_effect=fstat_then_swap):
+            value = installer._load_or_create_key(key, lambda: "unused")
+        self.assertTrue(swapped["done"])
+        self.assertEqual(value, "validated-key")
+
     def test_install_runtime_under_umask_022_leaves_every_secret_0600(self) -> None:
         tools_root = self.root / "tools"
         tools_root.mkdir()
