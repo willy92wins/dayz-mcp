@@ -110,6 +110,20 @@ class SeatDescriptionsTest(unittest.IsolatedAsyncioTestCase):
             _squashed(self.tools["vehicle_enter"].description or ""),
         )
 
+    async def test_vehicle_enter_names_seat_occupied_from_the_source(self) -> None:
+        # 2026-11-27, two-player run of #432: a driver seat someone already
+        # holds is refused before any StartCommand_Vehicle, with the code the
+        # bridge answers.
+        body = method_body(
+            BRIDGE, "protected bool DispatchVehicleEnter(MCPCommand command, MCPResult result)"
+        )
+        self.assertIn('result.error = "seat_occupied";', body)
+        self.assertIn(
+            "If the server already reads someone in the driver seat, vehicle_enter "
+            "answers seat_occupied and seats nobody.",
+            _squashed(self.tools["vehicle_enter"].description or ""),
+        )
+
     async def test_vehicle_get_in_client_says_which_step_reads_which_seat(self) -> None:
         description = _squashed(self.tools["vehicle_get_in_client"].description or "")
         self.assertIn(
