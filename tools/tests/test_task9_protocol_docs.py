@@ -240,6 +240,75 @@ class Task9ProtocolDocsTests(unittest.TestCase):
                     with self.subTest(pattern=pattern.pattern):
                         self.assertRegex(text, pattern)
 
+    def test_pocket_rule_classifies_reason_and_caps_requeue(self) -> None:
+        """Agents must not treat every active_run_exists as an unbounded re-queue.
+
+        port_in_use_foreign with queue_offer null is terminal, re-queue time is
+        capped, m1.espera never expires on its own, and the lease also covers
+        low-level lifecycle.
+        """
+        runbook = self.read_required(RUNBOOK)
+        agents = self.read_required(PROJECT_ROOT / "AGENTS.md")
+        claude = self.read_required(PROJECT_ROOT / "CLAUDE.md")
+        pocket_heading = "## La caja está ocupada: ponte en la cola (regla de bolsillo)"
+        self.assertIn(pocket_heading, runbook)
+        pocket = runbook.split(pocket_heading, 1)[1]
+        next_heading = re.search(r"^## ", pocket, re.MULTILINE)
+        if next_heading is not None:
+            pocket = pocket[: next_heading.start()]
+
+        self.assertRegex(
+            pocket,
+            r"reason.{0,80}queue_offer|queue_offer.{0,80}reason",
+            "the pocket rule must classify rejections by reason and queue_offer",
+        )
+        self.assertRegex(
+            pocket,
+            r"port_in_use_foreign.{0,120}queue_offer.{0,80}(null|nulo).{0,80}terminal"
+            r"|terminal.{0,80}port_in_use_foreign.{0,120}queue_offer.{0,80}(null|nulo)",
+            "port_in_use_foreign with a null queue_offer must be a terminal block",
+        )
+        self.assertIn(
+            "1800 s",
+            pocket,
+            "the pocket rule must cap total re-queue time at 1800 s",
+        )
+        self.assertRegex(
+            pocket,
+            r"m1\.espera.{0,120}(nunca caduca|never expires|no caduca)",
+            "the pocket rule must say m1.espera never expires on its own",
+        )
+        self.assertRegex(
+            pocket,
+            r"lease.{0,80}lifecycle|lifecycle.{0,80}lease",
+            "the pocket rule must say the lease also covers low-level lifecycle",
+        )
+        self.assertIsNotNone(
+            re.search(
+                r"^\|[^\n]*port_in_use_foreign[^\n]*\|",
+                pocket,
+                re.MULTILINE,
+            ),
+            "the pocket rule must include a rejection table that names port_in_use_foreign",
+        )
+
+        for text, source in (
+            (agents, PROJECT_ROOT / "AGENTS.md"),
+            (claude, PROJECT_ROOT / "CLAUDE.md"),
+        ):
+            with self.subTest(source=str(source)):
+                folded = text.casefold()
+                self.assertIn("queue_offer", folded)
+                self.assertIn("port_in_use_foreign", folded)
+                self.assertIn("1800 s", text)
+                self.assertRegex(
+                    text,
+                    r"terminal",
+                    f"{source.name} must call port_in_use_foreign with a null offer terminal",
+                )
+
+
+
 
 if __name__ == "__main__":
     unittest.main()

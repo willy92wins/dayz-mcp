@@ -21,12 +21,20 @@ Mejora planificada (run compartido con stack unión, cola para el recurso run, z
 
 ## La caja está ocupada: ponte en la cola (regla de bolsillo)
 
-1. La caja de DayZ es una por máquina. Mira `session_status()` → `box.occupied` (y `box.foreign_holder`, que nombra la instancia, el titular y el propósito del otro). Un daemon o un arnés que solo escucha en otro puerto (por ejemplo el 8797) **no** ocupa la caja: sin un DayZ vivo, la caja está libre.
+1. La caja de DayZ es una por máquina. Mira `session_status()` → `box.occupied` (y `box.foreign_holder`, que nombra la instancia, el titular y el propósito del otro). Un daemon o un arnés que solo escucha en otro puerto (por ejemplo el 8797) **no** ocupa la caja. Sin un DayZ vivo la caja **no** está libre si existe `C:\tmp\caja-dayz\m1.espera`: ese fichero nunca caduca solo, y ocupa la caja hasta que una persona lo quite a mano.
 2. Si está ocupada, llama a `dayz_test_run(..., on_busy="queue")` y espera tu turno. No sondees buscando un hueco: los relevos por la cola no dejan hueco libre.
-3. Nunca mates un DayZ, nunca cierres un arnés, una sesión o un daemon ajeno y nunca borres `C:\tmp\caja-dayz\m1.espera`. Tampoco preguntes a Guillermo si cerrar lo de otro: esperar en la cola es la respuesta.
-4. Si te para `run_protected` o `m1.espera`, espera en la cola. Un run abandonado lo cierra el vigilante (`idle_warden`), que viene encendido por defecto.
-5. Si la espera vence (600 s), vuelve a ponerte en la cola. En scripts, `active_run_exists`, `box_reserved` o una espera vencida son contención: no son un fallo del test ni cuentan como intento fallido.
-6. El lease es solo para mutar en el juego: suéltalo al acabar y no lo retengas sin partida.
+3. Nunca mates un DayZ, nunca cierres un arnés, una sesión o un daemon ajeno y nunca borres `C:\tmp\caja-dayz\m1.espera`. Tampoco preguntes a Guillermo si cerrar lo de otro: esperar en la cola es la respuesta, salvo que el rechazo sea terminal (paso 5).
+4. Si te para `run_protected` o `m1.espera`, espera en la cola. Un run abandonado lo cierra el vigilante (`idle_warden`), que viene encendido por defecto. `m1.espera` no lo quita nadie automático: nunca caduca.
+5. Clasifica cada rechazo por `reason` y `queue_offer`, no solo por `error_code`. `active_run_exists` no es siempre contención.
+   - Contención (puedes volver a encolar; no cuenta como intento fallido): una espera vencida, o un `active_run_exists` / `box_reserved` con `queue_offer` no nulo, mientras el ocupante pueda terminar.
+   - Bloqueo terminal (no reencoles): `reason="port_in_use_foreign"` con `queue_offer` nulo. La caja quedó libre y el puerto sigue ocupado por otro; `wait_for_box_s` no ayuda. Agotar el tope de reencolado también es terminal.
+   - Si la espera vence (600 s) y el rechazo sigue siendo contención, puedes volver a ponerte en la cola. El tiempo total de reencolado está acotado a 1800 s desde el primer `dayz_test_run(..., on_busy="queue")`. Al superar ese tope, es un bloqueo terminal: regístralo y no reintentes en bucle.
+6. El lease hace falta para mutar en el juego y para el lifecycle low-level (adopt/reap u otra operación no cubierta por `dayz_test_run` / `dayz_test_stop`). Suéltalo al acabar y no lo retengas sin partida.
+
+| reason | queue_offer | Qué hacer |
+|---|---|---|
+| `port_in_use_foreign` | `null` | Terminal. No reencolar. |
+| `active_run_exists` o `box_reserved` | no nulo | Contención. Reencolar hasta el tope de 1800 s. |
 
 Límites conocidos (2026-11-27, consultoría de la cola): la cola vive en la memoria de cada daemon, así que LIVE, experimental y los daemons de otros arneses no ven las colas de los demás; y lo que se lanza fuera del MCP (DayZDiag sueltos, bancos de otros proyectos) no puede pedir turno. Con un DayZ ajeno vivo, `on_busy="queue"` espera igual a que salga, pero sin orden respecto a la cola del otro daemon.
 

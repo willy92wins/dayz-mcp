@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The box-queue pocket rule classifies rejections by `reason` and `queue_offer`: `port_in_use_foreign` with a null offer is a terminal block, and total re-queue time is capped at 1800 s. `m1.espera` occupies the box even without DayZ and never expires on its own. The lease also covers low-level lifecycle.
+
 ## [1.6] - 2026-11-28
 
 Verified on DayZ 1.30.164289: `dayz_test_run` starts the server and the client with this release's PBO, the bridge (version 13) passes its handshake, and `dayz_test_close` closes both in order. The PBO is signed with the DayZ-MCP key and published on the Steam Workshop as item 3846741037, and the Python half installs from this release without a clone: `llms-install.md` takes an AI agent through uv and `dayz-mcp setup --json`. 15 new public tools, 122 in all. This release changes Python modules sealed in the native launcher: after updating a clone, build the launcher again and register it (`build_native_launcher.py --offline --verify-reproducible`, then `python -m dayz_mcp.launcher_registry_update replace-dayz-test-v1 --expected-sha256` with the sha256 of the current `tools/approved-launchers.json`; `tools/README-mcp.md`).
