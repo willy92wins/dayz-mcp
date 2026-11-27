@@ -26,6 +26,9 @@ def _fixture_client_runtime(
     with tempfile.TemporaryDirectory() as directory:
         keyfile = Path(directory) / "daemon.key"
         keyfile.write_text(config.key or "fixture-key", encoding="utf-8")
+        # The POSIX reader refuses a key readable by group or others
+        # (fix-forward #464); a real install writes it 0600.
+        keyfile.chmod(0o600)
         fixture_config = replace(config, keyfile=str(keyfile.resolve()))
         launcher = str(Path(sys.executable).resolve())
         native = launcher

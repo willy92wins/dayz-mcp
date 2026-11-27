@@ -24,6 +24,7 @@ class StartupKeyfileHardeningTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             keyfile = Path(directory) / "daemon.key"
             keyfile.write_bytes(b"test-key\n")
+            keyfile.chmod(0o600)
             self.assertEqual(loopback.read_key(str(keyfile)), "test-key")
 
     def test_oversized_keyfile_is_rejected(self) -> None:
@@ -31,6 +32,7 @@ class StartupKeyfileHardeningTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             keyfile = Path(directory) / "daemon.key"
             keyfile.write_bytes(payload)
+            keyfile.chmod(0o600)
             with self.assertRaises(ValueError) as raised:
                 loopback.read_key(str(keyfile))
         message = str(raised.exception)

@@ -371,6 +371,39 @@ class DoctorDefaultSourcesInstalledTest(unittest.TestCase):
         self.assertIsNone(sources.codex_config)
         self.assertTrue(sources.codex_expected)
 
+    def test_claude_only_manifest_with_codex_on_path_keeps_codex_expected(self) -> None:
+        # Fix-forward #464 P1-1: a codex CLI that appeared on PATH after a
+        # Claude-only pin is a discrepancy the doctor reports (CLI_NOT_PINNED).
+        home = self.base / "codex-on-path-home"
+        home.mkdir()
+        payload = {
+            "entries": {
+                "CLAUDE": {"path": str(self.claude_exe)},
+                "CODEX": None,
+            }
+        }
+        (self.security / "installer-cli-manifest-v1.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        env = {
+            "DAYZ_MCP_SECURITY_DIR": str(self.security),
+            "USERPROFILE": str(home),
+            "HOME": str(home),
+        }
+        codex_on_path = str(self.cli_dir / "codex")
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch.object(
+                doctor.shutil,
+                "which",
+                side_effect=lambda name: codex_on_path if name.startswith("codex") else None,
+            ),
+        ):
+            sources = _default_sources(str(self.doctor_file))
+        self.assertIsNotNone(sources.claude_config)
+        self.assertIsNone(sources.codex_config)
+        self.assertTrue(sources.codex_expected)
+
     def test_checkout_sources_without_codex_cli_or_config_sets_codex_not_expected(self) -> None:
         home = self.base / "checkout-claude-only-home"
         home.mkdir()

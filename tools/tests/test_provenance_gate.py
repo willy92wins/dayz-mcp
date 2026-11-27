@@ -32,6 +32,9 @@ class ProvenanceGateTests(unittest.TestCase):
         self.other_command = self.root / "other.exe"
         for path in (self.keyfile, self.other_keyfile, self.other_command):
             self._write(path, b"test-fixture-only")
+        # Keys are private (0600); the POSIX reader refuses group/other read (#464).
+        self.keyfile.chmod(0o600)
+        self.other_keyfile.chmod(0o600)
         self.entries = {}
         for platform in self.paths:
             entry = {"command": str(Path(sys.executable).resolve()), "args": [
@@ -270,6 +273,7 @@ class SupervisedFlagRegistrationTests(unittest.TestCase):
                       "codex": self.root / "config.toml"}
         self.keyfile = self.root / "daemon.key"
         self.keyfile.write_bytes(b"test-fixture-only")
+        self.keyfile.chmod(0o600)
 
     def _entry(self, platform, extra=()):
         entry = {"command": str(Path(sys.executable).resolve()),
@@ -401,6 +405,7 @@ class ClaudeOnlyProvenanceTests(unittest.TestCase):
         }
         self.keyfile = self.root / "daemon.key"
         self.keyfile.write_bytes(b"test-fixture-only")
+        self.keyfile.chmod(0o600)
 
     def _entry(self, platform: str, *, port: int = 18765) -> dict:
         entry = {
@@ -540,6 +545,7 @@ class CodexInspectionFailClosedTests(unittest.TestCase):
         }
         self.keyfile = self.root / "daemon.key"
         self.keyfile.write_bytes(b"test-fixture-only")
+        self.keyfile.chmod(0o600)
 
     def _write_claude(self, *, port: int = 18765) -> None:
         entry = {

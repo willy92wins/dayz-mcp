@@ -1045,6 +1045,7 @@ class SlowAccreditationTest(unittest.IsolatedAsyncioTestCase):
         keyfile.write_text(
             (stale if mode == "401" else daemon.key) + "\n", encoding="utf-8"
         )
+        keyfile.chmod(0o600)
         argv = (
             r"P:\Runtime\python.exe",
             "-m",
@@ -1078,6 +1079,7 @@ class SlowAccreditationTest(unittest.IsolatedAsyncioTestCase):
         )
         if mode == "401":
             keyfile.write_text(daemon.key + "\n", encoding="utf-8")
+            keyfile.chmod(0o600)
 
         def request_fn(**kwargs: object) -> tuple[int, bytes]:
             path = str(kwargs.get("path"))

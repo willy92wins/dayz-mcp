@@ -796,6 +796,7 @@ class DaemonStartupElectionProcessTest(HangGuardedTestCase):
             base = Path(temporary)
             keyfile = base / "fixture.key"
             keyfile.write_text("fixture-key", encoding="ascii")
+            keyfile.chmod(0o600)
             fixture_home = base / "home"
             write_client_host_fixture(fixture_home, keyfile)
             environment = os.environ.copy()
@@ -870,6 +871,7 @@ class DaemonStartupElectionProcessTest(HangGuardedTestCase):
             base = Path(temporary)
             keyfile = base / "fixture.key"
             keyfile.write_text("fixture-key", encoding="ascii")
+            keyfile.chmod(0o600)
             environment = os.environ.copy()
             environment["LOCALAPPDATA"] = str(base / "local")
             child = subprocess.Popen(
@@ -924,6 +926,7 @@ class DaemonStartupElectionProcessTest(HangGuardedTestCase):
                 port = unused_port()
                 keyfile = base / "fixture.key"
                 keyfile.write_text("fixture-key", encoding="ascii")
+                keyfile.chmod(0o600)
                 cwd = fixture_daemon_cwd()
                 base_environment = os.environ.copy()
                 base_environment["LOCALAPPDATA"] = str(localappdata)
@@ -1002,6 +1005,7 @@ class DaemonStartupElectionProcessTest(HangGuardedTestCase):
             ports = (unused_port(), unused_port())
             keyfile = base / "fixture.key"
             keyfile.write_text("fixture-key", encoding="ascii")
+            keyfile.chmod(0o600)
             cwd = fixture_daemon_cwd()
             base_environment = os.environ.copy()
             base_environment["LOCALAPPDATA"] = str(localappdata)
@@ -1097,6 +1101,7 @@ class DaemonStartupElectionProcessTest(HangGuardedTestCase):
             port = unused_port()
             keyfile = base / "fixture.key"
             keyfile.write_text("fixture-key", encoding="ascii")
+            keyfile.chmod(0o600)
             base_environment = os.environ.copy()
             base_environment["LOCALAPPDATA"] = str(base / "local")
             environment = fixture_environment(
