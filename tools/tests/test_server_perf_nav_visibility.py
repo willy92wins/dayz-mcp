@@ -419,9 +419,9 @@ class ReadsCensusTest(unittest.TestCase):
                 self.assertEqual(
                     set(server.SERVER_ARG_CONTRACT[command]), set(WIRE_ARGS[command])
                 )
-        self.assertEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, "c282097c3d1855ba")
+        self.assertEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, "49cc1290c4293fcb")
         self.assertNotEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, PREVIOUS_ARG_CONTRACT_HASH)
-        self.assertIn('SERVER_ARG_CONTRACT_HASH = "c282097c3d1855ba"', self.source)
+        self.assertIn('SERVER_ARG_CONTRACT_HASH = "49cc1290c4293fcb"', self.source)
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
         self.assertIn('const string MCP_BRIDGE_VERSION = "13";', messages)
 
@@ -1228,7 +1228,10 @@ class ReadsToolTest(unittest.IsolatedAsyncioTestCase):
                 "in_fov is an approximation",
                 "any part of a sphere of radius around pos",
                 "asin(radius / the horizontal distance)",
-                "GetHeadingAngle, not measured in game yet",
+                "(GetHeadingAngle), that is when the",
+                "Measured in game on 2026-11-27 with a person playing",
+                "the heading of the client's input controller",
+                "Free look (holding Alt) moved neither",
                 "scene_raycast's default ray",
                 "from the head to pos only",
                 "visible false is no guarantee that nobody sees part of a volume",

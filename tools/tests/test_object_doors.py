@@ -212,7 +212,7 @@ class ObjectDoorsEnforceContractTest(unittest.TestCase):
         anim = _method_body(source, "protected bool DispatchObjectAnim(")
         self.assertNotIn("IsDoorOpen", anim)
         self.assertNotIn("GetDoorCount", anim)
-        self.assertIn('SERVER_ARG_CONTRACT_HASH = "c282097c3d1855ba"', source)
+        self.assertIn('SERVER_ARG_CONTRACT_HASH = "49cc1290c4293fcb"', source)
 
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
         self.assertIn("class MCPDoorState", messages)
@@ -240,7 +240,7 @@ class ObjectDoorsEnforceContractTest(unittest.TestCase):
         )
         self.assertEqual(result["reason"], "census_disagrees_with_registered_tools")
         self.assertEqual(result["registered_without_announced_command"], [COMMAND])
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "c282097c3d1855ba")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "49cc1290c4293fcb")
         self.assertEqual(
             server.server_arg_contract_canonical(),
             "bot_start=action,bot_ttl_s,object_id\n"
@@ -250,11 +250,13 @@ class ObjectDoorsEnforceContractTest(unittest.TestCase):
             "loadout_apply=loadout_items,object_id,uid\n"
             "loadout_clear=object_id,uid\n"
             "loadout_get=object_id,uid\n"
+            "loot_los_cone=half_yaw_deg,radius,uids\n"
             "nav_path_query=from,snap_radius,to\n"
             "object_resolve=pos,radius,type\n"
             "object_set_health=health01,object_id,pos,slot,type,zone\n"
             "player_kill=uid\n"
             "players_kinematics=cursor,limit,max_samples,mode,sample_hz,trace_id,uids\n"
+            "players_los_cone=half_yaw_deg,radius,uids\n"
             "players_visibility=pos,radius\n"
             "scene_clear=scene_id\n"
             "scene_entities=scene_id\n"
