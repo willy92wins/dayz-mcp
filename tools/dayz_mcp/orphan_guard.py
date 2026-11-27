@@ -303,10 +303,13 @@ def _toolhelp_lookup(pid: int) -> tuple[int, str] | None:
         _k32.CloseHandle(snapshot)
 
 
+RETAIL_PROCESS_NAMES = ["DayZ_BE.exe", "DayZ_x64.exe"]
+
+
 def _retail_snapshot_from_entries(
     entries: list[tuple[int, str]],
 ) -> dict[str, object]:
-    return _named_snapshot_from_entries(entries, ["DayZ_BE.exe", "DayZ_x64.exe"])
+    return _named_snapshot_from_entries(entries, list(RETAIL_PROCESS_NAMES))
 
 
 def _named_snapshot_from_entries(
@@ -474,7 +477,7 @@ def snapshot_processes_with_parent(names: list[str]) -> dict[str, object]:
 
 def snapshot_retail_processes() -> dict[str, object]:
     """Read-only retail wrapper; exact-name observation never attributes ownership."""
-    return snapshot_processes_by_name(["DayZ_BE.exe", "DayZ_x64.exe"])
+    return snapshot_processes_by_name(list(RETAIL_PROCESS_NAMES))
 
 
 def parent_pid_of(pid: int) -> int | None:
