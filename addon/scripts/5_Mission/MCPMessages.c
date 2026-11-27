@@ -215,6 +215,11 @@ class MCPArgs
 	string classname;
 	string dest;
 	string slot;
+	// inventory_give magazine fill (3b83). ammo_set true asks for
+	// ServerSetAmmoCount on the created magazine; false, which is what an
+	// absent key arrives as, leaves it as created (see the class comment).
+	int ammo;
+	bool ammo_set;
 	// F3.6 object_inspect — memory-point / bounding_center names
 	ref array<string> want;
 	// anim_timeline: animation source names read from the item in hands.
@@ -1450,6 +1455,24 @@ class MCPHologram
 	float max_m;
 };
 
+// b951: one object the client's world-target search returned.
+class MCPSearchHit
+{
+	string type;
+	float distance;
+};
+
+// b951: what action_use's client search saw when it found no target.
+class MCPActionSearch
+{
+	ref array<float> center;
+	ref array<float> player_pos;
+	float radius;
+	int scanned;
+	bool truncated;
+	ref array<ref MCPSearchHit> nearest;
+};
+
 class MCPChatLine
 {
 	int seq;
@@ -1646,6 +1669,9 @@ class MCPResult
 	// action_use / action_hold (204e): the hologram of a deploy refused with
 	// hologram_colliding. Unassigned otherwise.
 	ref MCPHologram hologram;
+	// action_use / action_hold (b951): what the client's world-target search
+	// saw on target_not_found. Unassigned otherwise.
+	ref MCPActionSearch target_search;
 	// action_use_door / action_use_component. Same default-0 rule as
 	// MCPArgs.door_index: 0 is a valid door and a valid component, so
 	// the command name, not these fields, is what turns the mode on.
@@ -1834,6 +1860,12 @@ class MCPJob
 	// loadout_clear: the uid its reply carries (MCPResult.uid).
 	string loadout_uid;
 	Object move_target;
+	// inventory_move: where the item was at dispatch (InventoryLocation type,
+	// parent and slot), so the confirmation can tell a move from an item
+	// that stayed.
+	int move_origin_type;
+	Object move_origin_parent;
+	int move_origin_slot;
 	float move_quantity;
 	// server_perf: phase 1 once the first tick has set sample_start_s
 	// (GetTickTime); sample_s_target is window_s. perf_frames counts the ticks

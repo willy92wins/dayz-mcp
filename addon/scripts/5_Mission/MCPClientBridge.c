@@ -443,6 +443,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const int UI_TREE_DEFAULT_LIMIT = 256;
 	protected const int UI_TREE_MAX_LIMIT = 512;
 	protected const float ACTION_USE_DEFAULT_RADIUS = 5.0;
+	protected const int ACTION_SEARCH_NEAREST_MAX = 8;
 	// action_use_door scans view-geometry components for GetDoorIndex == door.
 	// A component that is not that door returns -1 (actionopendoors.c:39-45),
 	// so the scan cannot stop on -1. Past this cap the result is
@@ -4971,6 +4972,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			Object targetObj = FindNearestObjectNearClient(searchPos, searchRadius, classFilter, player);
 			if (!targetObj)
 			{
+				FillTargetSearch(result, searchPos, searchRadius, player);
 				result.ok = false;
 				result.error = "target_not_found";
 				return true;
@@ -5273,6 +5275,73 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		return best;
+	}
+
+	//! b951: capture what FindNearestObjectNearClient saw in m_ReadyObjects
+	//! before DispatchActionUse answers target_not_found.
+	protected void FillTargetSearch(MCPResult result, vector center, float radius, PlayerBase player)
+	{
+		MCPActionSearch report = new MCPActionSearch();
+		report.center = new array<float>();
+		VectorToArray(center, report.center);
+		report.player_pos = new array<float>();
+		VectorToArray(player.GetPosition(), report.player_pos);
+		report.radius = radius;
+		report.scanned = 0;
+		report.truncated = false;
+		report.nearest = new array<ref MCPSearchHit>();
+
+		int i = 0;
+		while (i < m_ReadyObjects.Count())
+		{
+			Object found = m_ReadyObjects.Get(i);
+			if (found && found != player)
+			{
+				report.scanned = report.scanned + 1;
+				float dist = vector.Distance(center, found.GetPosition());
+
+				int insertAt = 0;
+				while (insertAt < report.nearest.Count())
+				{
+					MCPSearchHit existing = report.nearest.Get(insertAt);
+					if (existing && dist < existing.distance)
+					{
+						break;
+					}
+
+					insertAt = insertAt + 1;
+				}
+
+				if (insertAt < ACTION_SEARCH_NEAREST_MAX)
+				{
+					MCPSearchHit hit = new MCPSearchHit();
+					hit.type = found.GetType();
+					hit.distance = dist;
+					if (insertAt == report.nearest.Count())
+					{
+						report.nearest.Insert(hit);
+					}
+					else
+					{
+						report.nearest.InsertAt(hit, insertAt);
+					}
+
+					if (report.nearest.Count() > ACTION_SEARCH_NEAREST_MAX)
+					{
+						report.nearest.Remove(report.nearest.Count() - 1);
+					}
+				}
+			}
+
+			i = i + 1;
+		}
+
+		if (report.scanned > ACTION_SEARCH_NEAREST_MAX)
+		{
+			report.truncated = true;
+		}
+
+		result.target_search = report;
 	}
 
 	//! Common UI resolver (DAG v6 UI contract). `root` names a widget that must

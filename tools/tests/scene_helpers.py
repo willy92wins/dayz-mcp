@@ -69,6 +69,8 @@ _SUPPORT_METHODS = (
     "protected bool DispatchWorldSpawn(MCPCommand command, MCPResult result)",
     "protected bool ApplySpawnLifetime(MCPCommand command, MCPResult result)",
     "protected MCPSpawnValidation ValidateSpawnArgs(MCPArgs args)",
+    # ValidateSpawnArgs checks the classname against the three tables through it (3b83).
+    "protected bool IsKnownInventoryClassname(string classname)",
     "protected bool IsFiniteFloat(float value)",
     "protected bool IsFiniteWorldCoord(float value, float worldSize)",
     "protected bool IsAllowedSpawnFlags(int flags)",
