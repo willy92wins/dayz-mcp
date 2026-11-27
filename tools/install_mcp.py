@@ -205,12 +205,15 @@ def _native_regular_file(path: Path) -> os.stat_result:
         metadata = path.lstat()
     except OSError as error:
         raise InstallerContractError("installer_cli_missing") from error
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    file_attributes = getattr(metadata, "st_file_attributes", 0)
+    is_reparse = False
+    if _is_windows_host():
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        file_attributes = getattr(metadata, "st_file_attributes", 0) or 0
+        is_reparse = bool(file_attributes & reparse_flag)
     if (
         not stat.S_ISREG(metadata.st_mode)
         or path.is_symlink()
-        or bool(file_attributes & reparse_flag)
+        or is_reparse
     ):
         raise InstallerContractError("installer_cli_not_native_regular_file")
     return metadata
@@ -306,6 +309,8 @@ def _validate_cli_entry(role: str, value: object) -> InstallerCliEntry:
     if is_windows:
         _validate_x64_pe(path)
     else:
+        if not _has_posix_executable_bit(metadata):
+            raise InstallerContractError("installer_cli_not_executable")
         _validate_elf(path)
     try:
         digest = hashlib.sha256(path.read_bytes()).hexdigest().upper()
@@ -1126,11 +1131,9 @@ def _validate_python_executable(
     if resolved.parent.name != "bin" or not _is_posix_python_name(resolved.name):
         raise InstallerContractError("python_path_not_exact")
     metadata = _native_regular_file(resolved)
-    if (
-        os.path.normcase(str(candidate)) != os.path.normcase(str(resolved))
-        and not _has_posix_executable_bit(metadata)
-    ):
+    if not _has_posix_executable_bit(metadata):
         raise InstallerContractError("python_executable_not_executable")
+    _validate_elf(resolved)
     return resolved
 
 
@@ -1858,11 +1861,12 @@ def run_runs_backup_gate(
         metadata = script.lstat()
     except OSError as error:
         raise InstallerContractError("runs_backup_gate_missing") from error
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    if (
-        not stat.S_ISREG(metadata.st_mode)
-        or bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
-    ):
+    is_reparse = False
+    if _is_windows_host():
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        file_attributes = getattr(metadata, "st_file_attributes", 0) or 0
+        is_reparse = bool(file_attributes & reparse_flag)
+    if not stat.S_ISREG(metadata.st_mode) or is_reparse:
         raise InstallerContractError("runs_backup_gate_invalid")
     command = [
         str(python),

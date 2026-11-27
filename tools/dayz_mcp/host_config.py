@@ -744,9 +744,17 @@ class _PosixFile:
         except OSError:
             raise HostConfigError("registration_config_busy") from None
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
+            fd_info = os.fstat(fd)
+            if not stat.S_ISREG(fd_info.st_mode):
                 raise HostConfigError("registration_config_busy")
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            path_info = os.lstat(self.path)
+            if (
+                not stat.S_ISREG(path_info.st_mode)
+                or path_info.st_dev != fd_info.st_dev
+                or path_info.st_ino != fd_info.st_ino
+            ):
+                raise HostConfigError("registration_config_busy")
         except HostConfigError:
             os.close(fd)
             raise
@@ -814,6 +822,20 @@ class _PosixFile:
             "volume_serial": int(info.st_dev),
             "file_id": f"{info.st_ino:032X}",
         }
+
+    def verify_path_identity(self) -> None:
+        assert self.fd is not None
+        try:
+            fd_info = os.fstat(self.fd)
+            path_info = os.lstat(self.path)
+        except OSError:
+            raise HostConfigError("registration_config_drift") from None
+        if (
+            not stat.S_ISREG(path_info.st_mode)
+            or path_info.st_dev != fd_info.st_dev
+            or path_info.st_ino != fd_info.st_ino
+        ):
+            raise HostConfigError("registration_config_drift")
 
 
 class _PinnedConfigMissing(Exception):
@@ -1062,6 +1084,21 @@ def _default_journal_root() -> Path:
     return Path(local) / "DayZ_MCP" / "host-config-transaction"
 
 
+def _fsync_dir_posix(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _mkdir_restricted(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -1070,6 +1107,8 @@ def _mkdir_restricted(path: Path) -> None:
         return
     if os.name != "nt":
         path.mkdir(mode=0o700)
+        _fsync_dir_posix(path.parent)
+        _fsync_dir_posix(path)
         return
     descriptor = wintypes.LPVOID()
     # Protected DACL: local SYSTEM and the object's owner only.
@@ -1116,7 +1155,9 @@ def _persist_manifest(journal: Path, manifest: dict[str, object]) -> None:
     staging = journal / "manifest.staging"
     _write_private(staging, payload)
     os.replace(staging, pending)
+    _fsync_dir_posix(journal)
     os.replace(pending, published)
+    _fsync_dir_posix(journal)
 
 
 def _journal_payload(
@@ -1535,6 +1576,11 @@ def apply_host_timeouts(
         build_claude_target(handles["claude"].read(), server_name)
         if "codex" in handles:
             build_codex_target(handles["codex"].read(), server_name)
+        if os.name != "nt":
+            for role in roles:
+                handle = handles[role]
+                assert isinstance(handle, _PosixFile)
+                handle.verify_path_identity()
         manifest["status"] = "committed"
         _persist_manifest(journal, manifest)
         if fault_injector is not None:

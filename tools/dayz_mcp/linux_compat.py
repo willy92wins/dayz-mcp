@@ -222,9 +222,11 @@ def ensure_localappdata() -> str:
     """Default ``LOCALAPPDATA`` to ``$XDG_STATE_HOME`` (else ``~/.local/state``) when empty."""
     current = os.environ.get("LOCALAPPDATA", "").strip()
     if not current:
-        current = os.environ.get("XDG_STATE_HOME", "").strip() or os.path.join(
-            os.path.expanduser("~"), ".local", "state"
-        )
+        xdg_state = os.environ.get("XDG_STATE_HOME", "").strip()
+        if xdg_state and os.path.isabs(xdg_state):
+            current = xdg_state
+        else:
+            current = os.path.join(os.path.expanduser("~"), ".local", "state")
         os.environ["LOCALAPPDATA"] = current
     return current
 

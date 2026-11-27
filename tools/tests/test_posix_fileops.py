@@ -255,5 +255,262 @@ class RunsBackupGatePosixTest(unittest.TestCase):
         self.assertEqual(list(real.iterdir()), [])
 
 
+@unittest.skipUnless(POSIX, "POSIX host_config durability and rename-swap detection")
+class HostConfigPosixDurabilityAndSwapTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(os.path.realpath(self.temporary.name))
+        self.claude = self.root / ".claude.json"
+        self.codex = self.root / ".codex" / "config.toml"
+        self.codex.parent.mkdir()
+        self.journal = self.root / "state" / "host-config-transaction"
+        self.original_claude = (
+            '{\n  "mcpServers": {\n    "dayz-mcp": {\n'
+            '      "type": "stdio",\n'
+            '      "command": "/opt/venv/bin/python",\n'
+            '      "args": ["-m", "dayz_mcp", "--client"]\n'
+            "    }\n  }\n}\n"
+        ).encode("utf-8")
+        self.original_codex = (
+            "[mcp_servers.dayz-mcp]\n"
+            'command = "/opt/venv/bin/python"\n'
+            'args = ["-m", "dayz_mcp", "--client"]\n'
+        ).encode("utf-8")
+        self.claude.write_bytes(self.original_claude)
+        self.codex.write_bytes(self.original_codex)
+
+    def test_apply_host_timeouts_fails_closed_when_claude_replaced_by_rename(
+        self,
+    ) -> None:
+        from dayz_mcp import host_config
+
+        for phase in ("after_prepare", "after_write_claude"):
+            with self.subTest(phase=phase):
+                self.claude.write_bytes(self.original_claude)
+                self.codex.write_bytes(self.original_codex)
+                replacement = b'{"external_writer": true}\n'
+
+                def swap(current_phase: str) -> None:
+                    if current_phase == phase:
+                        staged = self.root / f"replacement-{phase}.json"
+                        staged.write_bytes(replacement)
+                        os.replace(staged, self.claude)
+
+                with self.assertRaisesRegex(
+                    host_config.HostConfigError,
+                    "^registration_config_transaction_failed$",
+                ):
+                    host_config.apply_host_timeouts(
+                        self.claude,
+                        self.codex,
+                        journal_root=self.journal,
+                        fault_injector=swap,
+                    )
+                self.assertEqual(self.claude.read_bytes(), replacement)
+                self.assertEqual(self.codex.read_bytes(), self.original_codex)
+                self.assertFalse(self.journal.exists())
+
+    def test_apply_host_timeouts_fails_closed_when_claude_unlinked_before_commit(
+        self,
+    ) -> None:
+        from dayz_mcp import host_config
+
+        def remove_claude(current_phase: str) -> None:
+            if current_phase == "after_write_claude":
+                self.claude.unlink()
+
+        with self.assertRaisesRegex(
+            host_config.HostConfigError,
+            "^registration_config_transaction_failed$",
+        ):
+            host_config.apply_host_timeouts(
+                self.claude,
+                self.codex,
+                journal_root=self.journal,
+                fault_injector=remove_claude,
+            )
+        self.assertFalse(self.claude.exists())
+        self.assertEqual(self.codex.read_bytes(), self.original_codex)
+        self.assertFalse(self.journal.exists())
+
+    def test_posix_file_verify_path_identity_raises_drift_on_rename(self) -> None:
+        from dayz_mcp import host_config
+
+        with host_config._PosixFile(self.claude) as handle:
+            handle.verify_path_identity()
+            staged = self.root / "swapped.json"
+            staged.write_bytes(self.original_claude)
+            os.replace(staged, self.claude)
+            with self.assertRaisesRegex(
+                host_config.HostConfigError,
+                "^registration_config_drift$",
+            ):
+                handle.verify_path_identity()
+
+    def test_mkdir_restricted_and_persist_manifest_fsync_directories(self) -> None:
+        from dayz_mcp import host_config
+
+        events: list[tuple[object, ...]] = []
+        fd_paths: dict[int, tuple[Path, int]] = {}
+        real_open = os.open
+        real_fsync = os.fsync
+        real_close = os.close
+        real_replace = os.replace
+
+        def spy_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            fd_paths[fd] = (Path(os.fsdecode(path)), int(flags))
+            return fd
+
+        def spy_fsync(fd):
+            info = fd_paths.get(fd)
+            if info is not None:
+                path, flags = info
+                events.append(("fsync", path, flags))
+            return real_fsync(fd)
+
+        def spy_close(fd):
+            fd_paths.pop(fd, None)
+            return real_close(fd)
+
+        def spy_replace(src, dst):
+            events.append(
+                ("replace", Path(os.fsdecode(src)).name, Path(os.fsdecode(dst)).name)
+            )
+            return real_replace(src, dst)
+
+        expected_dir_flag = getattr(os, "O_DIRECTORY", 0)
+        with (
+            patch.object(host_config.os, "open", side_effect=spy_open),
+            patch.object(host_config.os, "fsync", side_effect=spy_fsync),
+            patch.object(host_config.os, "close", side_effect=spy_close),
+            patch.object(host_config.os, "replace", side_effect=spy_replace),
+        ):
+            host_config._mkdir_restricted(self.journal)
+            mkdir_dir_fsyncs = [
+                (path, flags) for kind, path, flags in events if kind == "fsync"
+            ]
+            self.assertIn(self.journal.parent, [path for path, _ in mkdir_dir_fsyncs])
+            self.assertIn(self.journal, [path for path, _ in mkdir_dir_fsyncs])
+            for _path, flags in mkdir_dir_fsyncs:
+                self.assertEqual(flags & (os.O_WRONLY | os.O_RDWR), 0)
+                if expected_dir_flag:
+                    self.assertTrue(bool(flags & expected_dir_flag))
+
+            events.clear()
+            host_config._persist_manifest(
+                self.journal,
+                {"schema": 1, "status": "prepared", "files": {}},
+            )
+
+        manifest_dir_events = [
+            event
+            for event in events
+            if event[0] == "replace"
+            or (event[0] == "fsync" and event[1] == self.journal)
+        ]
+        self.assertEqual(len(manifest_dir_events), 4)
+        self.assertEqual(
+            manifest_dir_events[0], ("replace", "manifest.staging", "manifest.next")
+        )
+        self.assertEqual(manifest_dir_events[1][:2], ("fsync", self.journal))
+        self.assertEqual(
+            manifest_dir_events[2], ("replace", "manifest.next", "manifest.json")
+        )
+        self.assertEqual(manifest_dir_events[3][:2], ("fsync", self.journal))
+        for idx in (1, 3):
+            flags = manifest_dir_events[idx][2]
+            self.assertEqual(flags & (os.O_WRONLY | os.O_RDWR), 0)
+            if expected_dir_flag:
+                self.assertTrue(bool(flags & expected_dir_flag))
+
+
+@unittest.skipUnless(POSIX, "real POSIX filesystem validation for install_mcp")
+class PosixInstallerValidationRealFsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(os.path.realpath(self.temporary.name))
+
+    @staticmethod
+    def _import_installer():
+        import sys
+
+        tools_dir = str(Path(__file__).resolve().parents[1])
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import install_mcp as installer
+
+        return installer
+
+    @staticmethod
+    def _write_elf(path: Path, mode: int) -> Path:
+        payload = bytearray(64)
+        payload[0:4] = b"\x7fELF"
+        payload[4] = 2
+        payload[5] = 1
+        payload[6] = 1
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        path.chmod(mode)
+        return path
+
+    def test_validate_python_executable_base_requires_elf_and_exec_bit(self) -> None:
+        installer = self._import_installer()
+
+        bin_dir = self.root / "usr" / "bin"
+        good = self._write_elf(bin_dir / "python3.13", 0o755)
+        good_link = bin_dir / "python3"
+        good_link.symlink_to(good)
+
+        noexec = self._write_elf(bin_dir / "python3.12", 0o644)
+        noexec_link = bin_dir / "python"
+        noexec_link.symlink_to(noexec)
+
+        script = bin_dir / "python3.14"
+        script.write_bytes(b"#!/bin/sh\necho hi\n")
+        script.chmod(0o755)
+        script_link = self.root / "alt" / "bin" / "python3"
+        script_link.parent.mkdir(parents=True)
+        script_link.symlink_to(script)
+
+        self.assertEqual(
+            installer._validate_python_executable(good, allow_symlink=True), good
+        )
+        self.assertEqual(
+            installer._validate_python_executable(good_link, allow_symlink=True), good
+        )
+        for bad in (noexec, noexec_link):
+            with self.subTest(noexec=str(bad)):
+                with self.assertRaises(installer.InstallerContractError) as err:
+                    installer._validate_python_executable(bad, allow_symlink=True)
+                self.assertEqual(err.exception.code, "python_executable_not_executable")
+        for bad in (script, script_link):
+            with self.subTest(non_elf=str(bad)):
+                with self.assertRaises(installer.InstallerContractError) as err:
+                    installer._validate_python_executable(bad, allow_symlink=True)
+                self.assertEqual(err.exception.code, "installer_cli_not_elf")
+
+    def test_validate_cli_entry_requires_exec_bit_on_posix(self) -> None:
+        installer = self._import_installer()
+
+        good_claude = self._write_elf(self.root / "ok" / "claude", 0o755)
+        noexec_claude = self._write_elf(self.root / "noexec" / "claude", 0o644)
+
+        payload = installer.build_installer_cli_entry_payload("CLAUDE", good_claude)
+        entry = installer._validate_cli_entry("CLAUDE", payload)
+        self.assertEqual(entry.path, good_claude)
+
+        with self.assertRaises(installer.InstallerContractError) as err:
+            installer.build_installer_cli_entry_payload("CLAUDE", noexec_claude)
+        self.assertEqual(err.exception.code, "installer_cli_not_executable")
+
+        good_claude.chmod(0o644)
+        with self.assertRaises(installer.InstallerContractError) as reval_err:
+            entry.revalidate()
+        self.assertEqual(reval_err.exception.code, "installer_cli_not_executable")
+
+
 if __name__ == "__main__":
     unittest.main()

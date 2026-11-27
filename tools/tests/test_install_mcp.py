@@ -3507,7 +3507,9 @@ class PosixInstallerRound3Test(unittest.TestCase):
         tools_root = self._make_tools_root(with_psutil_vendor=False)
         base_python = self.root / "base" / "bin" / "python3"
         base_python.parent.mkdir(parents=True)
-        base_python.write_bytes(b"#!/bin/sh\n")
+        # The POSIX base interpreter must now be an executable ELF file.
+        _write_fake_elf(base_python)
+        base_python.chmod(0o755)
         options = parse_args(["--port", "18765"], tools_root=tools_root)
         calls: list[tuple[list[str], dict[str, object]]] = []
 
@@ -3530,6 +3532,7 @@ class PosixInstallerRound3Test(unittest.TestCase):
                 "_verified_psutil_wheel",
                 side_effect=AssertionError("must not verify Windows psutil wheel on POSIX"),
             ),
+            PosixInstallerRound4Test._posix_mode_ctx(base_python, {base_python: 0o755}),
         ):
             summary = install_runtime(
                 options,
@@ -3855,6 +3858,13 @@ class PosixInstallerRound4Test(unittest.TestCase):
         noexec_target.chmod(0o644)
         noexec_link = bin_dir / "python"
 
+        script_target = bin_dir / "python3.14"
+        script_target.write_bytes(b"#!/bin/sh\necho hi\n")
+        script_target.chmod(0o755)
+        script_dir = self.root / "script-link" / "bin"
+        script_dir.mkdir(parents=True)
+        script_link = script_dir / "python3"
+
         sh_target = bin_dir / "sh"
         _write_fake_elf(sh_target)
         sh_target.chmod(0o755)
@@ -3874,6 +3884,7 @@ class PosixInstallerRound4Test(unittest.TestCase):
         modes = {
             py313: 0o755,
             noexec_target: 0o644,
+            script_target: 0o755,
             sh_target: 0o755,
             outside_target: 0o755,
         }
@@ -3884,14 +3895,19 @@ class PosixInstallerRound4Test(unittest.TestCase):
                 {
                     py3_link: py313,
                     noexec_link: noexec_target,
+                    script_link: script_target,
                     sh_link: sh_target,
                     outside_link: outside_target,
                 }
             ),
         ):
-            # Base interpreter symlink resolves to validated python3.13.
+            # Base interpreter symlink and direct regular ELF both validate to python3.13.
             self.assertEqual(
                 installer._validate_python_executable(py3_link, allow_symlink=True),
+                py313,
+            )
+            self.assertEqual(
+                installer._validate_python_executable(py313, allow_symlink=True),
                 py313,
             )
             # Venv python remains strict (symlinks rejected for sealed host_config).
@@ -3899,12 +3915,23 @@ class PosixInstallerRound4Test(unittest.TestCase):
                 installer._validate_python_executable(py3_link)
             self.assertEqual(venv_err.exception.code, "python_path_not_canonical")
 
-            # Symlink target must be executable, in bin/, and named python*.
-            with self.assertRaises(InstallerContractError) as noexec_err:
-                installer._validate_python_executable(noexec_link, allow_symlink=True)
-            self.assertEqual(
-                noexec_err.exception.code, "python_executable_not_executable"
-            )
+            # Base target must be executable ELF, in bin/, and named python* (symlink or not).
+            for noexec_candidate in (noexec_link, noexec_target):
+                with self.subTest(noexec=str(noexec_candidate)):
+                    with self.assertRaises(InstallerContractError) as noexec_err:
+                        installer._validate_python_executable(
+                            noexec_candidate, allow_symlink=True
+                        )
+                    self.assertEqual(
+                        noexec_err.exception.code, "python_executable_not_executable"
+                    )
+            for script_candidate in (script_target, script_link):
+                with self.subTest(non_elf=str(script_candidate)):
+                    with self.assertRaises(InstallerContractError) as elf_err:
+                        installer._validate_python_executable(
+                            script_candidate, allow_symlink=True
+                        )
+                    self.assertEqual(elf_err.exception.code, "installer_cli_not_elf")
             with self.assertRaises(InstallerContractError) as bad_target_err:
                 installer._validate_python_executable(sh_link, allow_symlink=True)
             self.assertEqual(bad_target_err.exception.code, "python_path_not_exact")
@@ -3982,6 +4009,21 @@ class PosixInstallerRound4Test(unittest.TestCase):
                 installer._validate_python_executable(bad_pe)
             self.assertEqual(pe_err.exception.code, "installer_cli_not_pe")
 
+    def test_native_regular_file_posix_ignores_windows_stat_fields(self) -> None:
+        sample = self.root / "posix-regular"
+        _write_fake_elf(sample)
+        real = sample.lstat()
+        # A 10-tuple os.stat_result leaves st_file_attributes as None on Windows.
+        posix_only_stat = os.stat_result(
+            (stat.S_IFMT(real.st_mode) | 0o755, *real[1:])
+        )
+        with (
+            patch.object(installer, "_is_windows_host", return_value=False),
+            patch.object(Path, "lstat", return_value=posix_only_stat),
+        ):
+            metadata = installer._native_regular_file(sample)
+        self.assertTrue(stat.S_ISREG(metadata.st_mode))
+
     def test_validate_cli_entry_posix_accepts_elf_and_rejects_bad_entries(
         self,
     ) -> None:
@@ -3991,24 +4033,47 @@ class PosixInstallerRound4Test(unittest.TestCase):
         codex.parent.mkdir(parents=True)
         _write_fake_elf(claude)
         _write_fake_elf(codex)
+        claude.chmod(0o755)
+        codex.chmod(0o755)
+
+        noexec_claude = self.root / "noexec" / "claude"
+        noexec_claude.parent.mkdir()
+        _write_fake_elf(noexec_claude)
+        noexec_claude.chmod(0o644)
 
         script_claude = self.root / "script" / "claude"
         script_claude.parent.mkdir()
         script_claude.write_bytes(b"#!/bin/sh\necho hi\n")
+        script_claude.chmod(0o755)
 
         pe_claude = self.root / "pe" / "claude"
         pe_claude.parent.mkdir()
         write_fake_x64_pe(pe_claude)
+        pe_claude.chmod(0o755)
 
         short_claude = self.root / "short" / "claude"
         short_claude.parent.mkdir()
         short_claude.write_bytes(b"\x7fEL")
+        short_claude.chmod(0o755)
 
         exe_claude = self.root / "exe" / "claude.exe"
         exe_claude.parent.mkdir()
         _write_fake_elf(exe_claude)
+        exe_claude.chmod(0o755)
 
-        with patch.object(installer, "_is_windows_host", return_value=False):
+        modes = {
+            claude: 0o755,
+            codex: 0o755,
+            noexec_claude: 0o644,
+            script_claude: 0o755,
+            pe_claude: 0o755,
+            short_claude: 0o755,
+            exe_claude: 0o755,
+        }
+        with (
+            patch.object(installer, "_is_windows_host", return_value=False),
+            self._posix_mode_ctx(claude, modes),
+        ):
             manifest_path = self.root / "installer-cli-manifest-v1.json"
             payload = {
                 "schema_version": 1,
@@ -4026,6 +4091,12 @@ class PosixInstallerRound4Test(unittest.TestCase):
             loaded = load_installer_cli_manifest(manifest_path)
             self.assertEqual(loaded.entries["CLAUDE"].path, claude)
             self.assertEqual(loaded.entries["CODEX"].path, codex)
+
+            with self.assertRaises(InstallerContractError) as noexec_err:
+                installer.build_installer_cli_entry_payload("CLAUDE", noexec_claude)
+            self.assertEqual(
+                noexec_err.exception.code, "installer_cli_not_executable"
+            )
 
             for non_elf in (script_claude, pe_claude, short_claude):
                 with self.subTest(non_elf=str(non_elf)):
@@ -4047,6 +4118,16 @@ class PosixInstallerRound4Test(unittest.TestCase):
                     {"path": "claude", "bytes": 64, "sha256": "A" * 64},
                 )
             self.assertEqual(rel_err.exception.code, "installer_cli_path_not_absolute")
+
+        # Removing the execute bit after pinning makes revalidate() refuse.
+        claude.chmod(0o644)
+        with (
+            patch.object(installer, "_is_windows_host", return_value=False),
+            self._posix_mode_ctx(codex, {claude: 0o644}),
+        ):
+            with self.assertRaises(InstallerContractError) as reval_err:
+                loaded.entries["CLAUDE"].revalidate()
+            self.assertEqual(reval_err.exception.code, "installer_cli_not_executable")
 
     def test_validate_cli_entry_windows_unchanged(self) -> None:
         claude_exe = self.root / "claude.exe"
@@ -4104,6 +4185,20 @@ class PosixInstallerRound4Test(unittest.TestCase):
         ):
             installer._ensure_posix_localappdata()
             self.assertEqual(os.environ["LOCALAPPDATA"], str(xdg_state))
+
+        # POSIX: relative XDG_STATE_HOME is ignored per XDG spec; falls back to ~/.local/state.
+        for relative_xdg in ("relative/state", "./state", "../state"):
+            with self.subTest(relative_xdg=relative_xdg):
+                rel_env = dict(base_env, XDG_STATE_HOME=relative_xdg)
+                with (
+                    patch.dict(os.environ, rel_env, clear=True),
+                    patch.object(installer, "_is_windows_host", return_value=False),
+                ):
+                    installer._ensure_posix_localappdata()
+                    self.assertEqual(
+                        os.environ["LOCALAPPDATA"],
+                        os.path.join(str(home), ".local", "state"),
+                    )
 
         # POSIX: existing non-empty LOCALAPPDATA is untouched.
         preset_env = dict(base_env, LOCALAPPDATA=str(preset), XDG_STATE_HOME=str(xdg_state))
