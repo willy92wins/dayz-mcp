@@ -6338,8 +6338,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// the owner" (pawn.c:193-194); vanilla hands a car to its driver's identity
 	// in PlayerBase.OnVehicleSeatDriverEnter (playerbase.c:4266-4281). On a
 	// refusal it returns null and error names the first check that failed:
-	// not_seated (no player, no vehicle command, or not a CarScript, as before),
-	// then not_driver, then not_owner.
+	// not_seated (no player or no vehicle command), then not_a_car (seated in a
+	// Transport that is not a CarScript, such as a vanilla boat), then
+	// not_driver, then not_owner.
 	protected CarScript ResolveOwnedCar(out string error)
 	{
 		error = "";
@@ -6360,7 +6361,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		CarScript car = CarScript.Cast(vehicleCommand.GetTransport());
 		if (!car)
 		{
-			error = "not_seated";
+			error = "not_a_car";
 			return null;
 		}
 
