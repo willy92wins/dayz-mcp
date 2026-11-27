@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- The box-queue pocket rule classifies rejections by `reason` and `queue_offer`: `port_in_use_foreign` with a null offer is a terminal block, and total re-queue time is capped at 1800 s. `m1.espera` occupies the box even without DayZ and never expires on its own. The lease also covers low-level lifecycle.
+- The box-queue pocket rule classifies rejections by `error_code`, `reason` and `queue_offer`. Only an actionable FIFO offer (`queue_offer.retry.on_busy="queue"`) is contention; `port_in_use_foreign`, `box_reserved` or `own_run` with a null offer is terminal. Each re-queue passes `wait_for_box_s=min(600, remaining)` so the 1800 s cap is strict (do not pass 0: that means 600 s). `m1.espera` occupies the box even without DayZ and never expires on its own. The lease also covers low-level lifecycle.
 
 ## [1.6] - 2026-11-28
 

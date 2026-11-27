@@ -291,6 +291,41 @@ class Task9ProtocolDocsTests(unittest.TestCase):
             ),
             "the pocket rule must include a rejection table that names port_in_use_foreign",
         )
+        self.assertIn(
+            "wait_for_box_s=min(600, remaining)",
+            pocket,
+            "the 1800 s cap must be applied as wait_for_box_s=min(600, remaining)",
+        )
+        self.assertIn(
+            "wait_for_box_s=0",
+            pocket,
+            "the pocket rule must warn that wait_for_box_s=0 means 600 s, not stop",
+        )
+        self.assertIn(
+            'retry.on_busy="queue"',
+            pocket,
+            "contention must require an actionable FIFO offer (retry.on_busy=queue)",
+        )
+        self.assertIn("own_run", pocket)
+        self.assertRegex(
+            pocket,
+            r"box_reserved.{0,80}(null|nulo).{0,80}terminal"
+            r"|terminal.{0,80}box_reserved.{0,80}(null|nulo)",
+            "box_reserved with a null queue_offer must be a terminal block",
+        )
+        self.assertIsNotNone(
+            re.search(r"^\|\s*error_code\s*\|", pocket, re.MULTILINE),
+            "the rejection table must have an error_code column, not mix codes into reason",
+        )
+        self.assertIsNone(
+            re.search(
+                r"^\|[^\n]*reason[^\n]*active_run_exists",
+                pocket,
+                re.MULTILINE | re.IGNORECASE,
+            ),
+            "the table must not list error_code active_run_exists in the reason column",
+        )
+
 
         for text, source in (
             (agents, PROJECT_ROOT / "AGENTS.md"),
