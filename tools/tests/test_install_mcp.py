@@ -4540,6 +4540,21 @@ class PosixInstallerSecretModesTest(unittest.TestCase):
         self.assertEqual(key.read_text(encoding="ascii"), "k-fixture\n")
         self.assertEqual(json.loads(config.read_text(encoding="ascii"))["key"], "k-fixture")
 
+    def test_the_mode_is_0600_at_the_open_not_only_after_it(self) -> None:
+        # No window where a new secret file exists with umask-derived bits.
+        real_open = os.open
+        modes: list[int] = []
+
+        def spy_open(path, flags, mode=0o777, *args, **kwargs):
+            if flags & os.O_CREAT:
+                modes.append(mode)
+            return real_open(path, flags, mode, *args, **kwargs)
+
+        with patch.object(installer.os, "open", side_effect=spy_open):
+            installer._load_or_create_key(self.root / "k", lambda: "k-open")
+            installer._write_config(self.root / "c.json", installer.config_payload(1, "k-open"))
+        self.assertEqual(modes, [0o600, 0o600])
+
     def test_an_existing_own_config_is_tightened_before_the_key_is_written(self) -> None:
         config = self.root / "dayz_mcp.json"
         config.write_text("{}\n", encoding="ascii")
