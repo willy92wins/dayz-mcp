@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- In installed mode, `dayz-mcp doctor` reports the same retail quarantine the daemon uses (`DayZ_x64.exe` / `DayZ_BE.exe` through `orphan_guard.snapshot_retail_processes`): WARN normally, FAIL under `--require-clean`. It still does not emit `PROCESS_UNREGISTERED` for the person's own server and client.
+- In installed mode, `dayz-mcp doctor` reports the same retail quarantine the daemon uses (`DayZ_x64.exe` / `DayZ_BE.exe` through `orphan_guard.snapshot_retail_processes`): WARN normally, FAIL under `--require-clean`. It still does not emit `PROCESS_UNREGISTERED` for the person's own server and client. `tools/README-mcp.md` matches that, and `RETAIL_PROCESS_NAMES` is a tuple.
 
 ## [1.6] - 2026-11-28
 

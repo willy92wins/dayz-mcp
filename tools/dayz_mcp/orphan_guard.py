@@ -303,7 +303,7 @@ def _toolhelp_lookup(pid: int) -> tuple[int, str] | None:
         _k32.CloseHandle(snapshot)
 
 
-RETAIL_PROCESS_NAMES = ["DayZ_BE.exe", "DayZ_x64.exe"]
+RETAIL_PROCESS_NAMES = ("DayZ_BE.exe", "DayZ_x64.exe")
 
 
 def _retail_snapshot_from_entries(

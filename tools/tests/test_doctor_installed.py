@@ -967,9 +967,26 @@ class DoctorInstalledDiagnoseTest(unittest.TestCase):
             list(doctor._RETAIL_NAMES),
             list(orphan_guard.RETAIL_PROCESS_NAMES),
         )
+        self.assertIsInstance(orphan_guard.RETAIL_PROCESS_NAMES, tuple)
         self.assertEqual(
             list(orphan_guard.RETAIL_PROCESS_NAMES),
             ["DayZ_BE.exe", "DayZ_x64.exe"],
+        )
+
+    def test_readme_mcp_installed_mode_reports_retail_quarantine(self) -> None:
+        from pathlib import Path
+
+        text = (
+            Path(__file__).resolve().parents[2] / "tools" / "README-mcp.md"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn(
+            "doctor reports neither `RETAIL_MANUAL_CLOSE_REQUIRED`",
+            text,
+        )
+        self.assertRegex(
+            text,
+            r"RETAIL_MANUAL_CLOSE_REQUIRED.{0,200}installed mode"
+            r"|installed mode.{0,200}RETAIL_MANUAL_CLOSE_REQUIRED",
         )
 
     def test_installed_with_require_clean_fails_on_retail_quarantine(
