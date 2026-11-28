@@ -7,15 +7,22 @@ Offline. No DayZ, no daemon, no ports. Oracle frozen before the implementation
 from __future__ import annotations
 
 import hashlib
+import io
+import contextlib
 import os
 import re
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from dayz_mcp import server, skills_catalog
+import anyio
+from mcp.shared.message import SessionMessage
+from mcp.types import JSONRPCMessage
+
+from dayz_mcp import dual_era, server, skills_catalog
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -390,6 +397,115 @@ class ShippedSkillsTest(unittest.IsolatedAsyncioTestCase):
         source = inspect.getsource(server.run)
         self.assertIn("dual_era", source)
         self.assertNotIn('app.run(transport="stdio")', source)
+
+
+_MODERN_META = {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientInfo": {"name": "oracle", "version": "1"},
+    "io.modelcontextprotocol/clientCapabilities": {},
+}
+
+
+def _build_app() -> FastMCP:
+    app, _runtime = server.build_app(
+        server.ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
+    )
+    return app
+
+
+async def _drive_front(app: FastMCP, methods: list[str]) -> list[dict]:
+    """Run dual_era.run_stdio(app) over memory streams; one modern request per method."""
+    c2s_send, c2s_recv = anyio.create_memory_object_stream(64)
+    s2c_send, s2c_recv = anyio.create_memory_object_stream(64)
+
+    @contextlib.asynccontextmanager
+    async def fake_stdio():
+        yield c2s_recv, s2c_send
+
+    answers: list[dict] = []
+    with mock.patch.object(dual_era, "stdio_server", fake_stdio):
+        with anyio.fail_after(60):
+            async with anyio.create_task_group() as group:
+                group.start_soon(dual_era.run_stdio, app)
+                for number, method in enumerate(methods, start=1):
+                    await c2s_send.send(
+                        SessionMessage(
+                            JSONRPCMessage.model_validate(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": number,
+                                    "method": method,
+                                    "params": {"_meta": dict(_MODERN_META)},
+                                }
+                            )
+                        )
+                    )
+                    reply = await s2c_recv.receive()
+                    answers.append(reply.message.model_dump(by_alias=True, exclude_none=True))
+                await c2s_send.aclose()
+    await s2c_recv.aclose()
+    return answers
+
+
+class ServerCatalogLoadingTest(unittest.IsolatedAsyncioTestCase):
+    def _bad_root(self) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        _write_skill(root, name="broken")
+        (root / "broken" / "references" / "blob.bin").write_bytes(b"\x00\x01")
+        return root
+
+    async def test_an_invalid_skills_folder_degrades_to_an_empty_catalog_with_a_warning(self) -> None:
+        root = self._bad_root()
+        stderr = io.StringIO()
+        with mock.patch.object(skills_catalog, "_default_skills_root", return_value=root):
+            with contextlib.redirect_stderr(stderr):
+                app = _build_app()  # must not raise: legacy startup is not blocked
+        warning = stderr.getvalue()
+        self.assertIn("skills", warning.lower())
+        self.assertIn("broken", warning)
+        instructions = app._mcp_server.instructions or ""
+        self.assertIn("Expose DayZDiag through typed MCP tools.", instructions)
+        self.assertNotIn("skill://", instructions)
+        uris = {str(item.uri) for item in await app.list_resources()}
+        self.assertFalse([uri for uri in uris if uri.startswith("skill://")])
+        # the front serves that same empty catalog; it must not reload (and re-raise)
+        answers = await _drive_front(app, ["skills/list", "tools/list"])
+        self.assertEqual(answers[0]["result"]["skills"], [])
+        self.assertIn("tools", answers[1]["result"])
+
+    async def test_the_catalog_is_loaded_once_for_build_app_and_run_stdio(self) -> None:
+        real_load = skills_catalog.SkillCatalog.load
+        roots: list[object] = []
+
+        def counting_load(cls, root=None):
+            roots.append(root)
+            return real_load(root)
+
+        with mock.patch.object(skills_catalog.SkillCatalog, "load", classmethod(counting_load)):
+            app = _build_app()
+            answers = await _drive_front(app, ["skills/list"])
+        self.assertEqual(len(roots), 1, roots)
+        self.assertTrue(answers[0]["result"]["skills"])
+        self.assertEqual(
+            [item["uri"] for item in answers[0]["result"]["skills"]],
+            ["skill://dayz-test-run/SKILL.md"],
+        )
+
+
+class ShippedSkillTextTest(unittest.TestCase):
+    ROOT = REPO_ROOT / "tools" / "dayz_mcp" / "skills" / "dayz-test-run"
+
+    def test_box_queue_names_the_real_fields_and_error_codes(self) -> None:
+        text = (self.ROOT / "references" / "box-queue.md").read_text(encoding="utf-8")
+        self.assertIn("foreign_ports_all", text)
+        self.assertIsNone(re.search(r"foreign_ports(?!_all)", text))
+        # run_protected / takeover_required replace active_run_exists as the error_code, and
+        # port_scan_unknown / box_queue_saturated are error_codes of their own.
+        for code in ("run_protected", "takeover_required", "port_scan_unknown", "box_queue_saturated"):
+            self.assertIn(f'error_code="{code}"', text, code)
+        self.assertNotIn('(`error_code="active_run_exists"`)', text)
 
 
 if __name__ == "__main__":

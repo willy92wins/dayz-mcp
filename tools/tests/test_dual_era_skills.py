@@ -21,6 +21,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 from typing import Any
 
 import anyio
@@ -417,6 +418,87 @@ class ModernTrafficTest(_Base):
         self.assertEqual(progress[0]["params"]["progressToken"], "tok")
 
 
+class MalformedInputTest(_Base):
+    """A bad line from the client is answered; it never ends the process or the next request."""
+
+    BAD_IDS = ([], {}, 1.5)
+
+    def _bad(self, request_id: Any, method: str) -> dict[str, Any]:
+        # The SDK parses a request whose id is not str|int as a notification with an extra
+        # `id`, which is how such a line reaches the front from stdio_server.
+        return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": {"_meta": dict(META)}}
+
+    async def _error_for_bad_line(self, wire: _Wire) -> dict[str, Any]:
+        with anyio.fail_after(10):
+            while True:
+                for message in wire.other:
+                    if "error" in message:
+                        return message
+                wire.other.append(await wire._receive())
+
+    async def test_invalid_ids_get_invalid_request_and_the_next_line_is_served(self) -> None:
+        for method in ("skills/list", "tools/list"):
+            for bad in self.BAD_IDS:
+                with self.subTest(method=method, bad_id=bad):
+                    async with self.wire() as wire:
+                        await wire._send(self._bad(bad, method))
+                        good = await wire.call("skills/list")
+                        error = await self._error_for_bad_line(wire)
+                    self.assertEqual(good["result"]["skills"], self.catalog.list_entries())
+                    self.assertEqual(error["error"]["code"], -32600)
+                    # The SDK cannot encode a null id, so an unusable id is answered with 0.
+                    self.assertEqual(error["id"], 0)
+
+    async def test_an_exception_in_a_local_skills_handler_is_answered_as_internal_error(self) -> None:
+        cases = (
+            ("list_entries", "skills/list", {}),
+            ("get_entry", "skills/get", {"uri": "skill://demo/SKILL.md"}),
+            ("read", "resources/read", {"uri": "skill://demo/SKILL.md"}),
+        )
+        for attribute, method, params in cases:
+            with self.subTest(method=method):
+                with mock.patch.object(self.catalog, attribute, side_effect=RuntimeError("boom")):
+                    async with self.wire() as wire:
+                        failed = await wire.call(method, params)
+                        after = await wire.call("tools/list")
+                self.assertEqual(failed["error"]["code"], -32603)
+                self.assertIn("result", after)
+
+    async def test_an_exception_while_bridging_is_answered_for_that_request_only(self) -> None:
+        real_shape = dual_era.modern_result
+        real_strip = dual_era.strip_modern_meta
+        seen = {"shape": 0, "strip": 0}
+
+        def flaky_shape(method: str, result: dict[str, Any]) -> dict[str, Any]:
+            if method == "tools/list":
+                seen["shape"] += 1
+                if seen["shape"] == 1:
+                    raise RuntimeError("boom")
+            return real_shape(method, result)
+
+        def flaky_strip(params: dict[str, Any] | None) -> dict[str, Any]:
+            seen["strip"] += 1
+            if seen["strip"] == 1:
+                raise RuntimeError("boom")
+            return real_strip(params)
+
+        for name, replacement in (("modern_result", flaky_shape), ("strip_modern_meta", flaky_strip)):
+            with self.subTest(patched=name):
+                seen.update(shape=0, strip=0)
+                with mock.patch.object(dual_era, name, replacement):
+                    async with self.wire() as wire:
+                        failed = await wire.call("tools/list")
+                        after = await wire.call("tools/list")
+                self.assertEqual(failed["error"]["code"], -32603)
+                self.assertIn("result", after)
+                self.assertEqual(after["result"]["resultType"], "complete")
+
+    def test_one_conversation_per_pipe_is_documented(self) -> None:
+        self.assertIn("one conversation per pipe", (dual_era.__doc__ or "").lower())
+        changelog = (Path(__file__).resolve().parents[2] / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn("one conversation per pipe", changelog.lower())
+
+
 class ShutdownTest(_Base):
     async def test_serve_ends_on_eof_and_closes_the_client_facing_streams(self) -> None:
         c2s_send, c2s_recv = anyio.create_memory_object_stream(8)
@@ -490,6 +572,44 @@ class SubprocessStdioTest(unittest.TestCase):
             "io.modelcontextprotocol/skills", by_id[1]["result"]["capabilities"]["extensions"]
         )
         self.assertTrue(by_id[2]["result"]["skills"])
+        self.assertNotIn(b"Traceback", done.stderr)
+
+    @slow_test
+    def test_malformed_ids_do_not_end_the_real_stdio_process(self) -> None:
+        script = textwrap.dedent(
+            """
+            import anyio
+            from mcp.server.fastmcp import FastMCP
+            from dayz_mcp import dual_era, skills_catalog
+
+            catalog = skills_catalog.SkillCatalog.load()
+            app = FastMCP("sub", instructions="x")
+            skills_catalog.install(app, catalog)
+            anyio.run(dual_era.run_stdio, app, catalog)
+            """
+        )
+        meta = json.dumps({"_meta": dict(META)})
+        lines = [
+            '{"jsonrpc":"2.0","id":[],"method":"skills/list","params":%s}' % meta,
+            '{"jsonrpc":"2.0","id":{},"method":"tools/list","params":%s}' % meta,
+            '{"jsonrpc":"2.0","id":2,"method":"skills/list","params":%s}' % meta,
+        ]
+        env = dict(os.environ, PYTHONPATH=str(self.TOOLS_DIR), PYTHONDONTWRITEBYTECODE="1")
+        done = subprocess.run(
+            [sys.executable, "-B", "-c", script],
+            input=("\n".join(lines) + "\n").encode(),
+            capture_output=True,
+            timeout=60,
+            cwd=self.TOOLS_DIR,
+            env=env,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr.decode(errors="replace")[-2000:])
+        out = [json.loads(line) for line in done.stdout.decode().splitlines() if line.strip()]
+        errors = [item for item in out if "error" in item]
+        self.assertEqual(sorted(item["error"]["code"] for item in errors), [-32600, -32600])
+        good = [item for item in out if item.get("id") == 2]
+        self.assertEqual(len(good), 1)
+        self.assertTrue(good[0]["result"]["skills"])
         self.assertNotIn(b"Traceback", done.stderr)
 
 
