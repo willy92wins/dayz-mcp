@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- `engine_set` and `vehicle_control` drive a vanilla motorbike (`MotorbikeScript`, such as `Motorbike_01_*`) as they drive a car: the driver is crew position 0, the refusal codes and their order are the car's, `brake` is the rear brake and `handbrake` the front brake, and the kickstand goes up while it drives; `vehicle_prepare_fixture` also prepares one (OnDebugSpawn, then the same wait; ready with every wheel on, fuel above 0 and its vital parts), so a `world_spawn` motorbike can start (inbox b95f). Needs a rebuilt PBO.
+- `engine_set` and `vehicle_control` drive a vanilla motorbike (`MotorbikeScript`, such as `Motorbike_01_*`) as they drive a car: the driver is crew position 0, the refusal codes and their order are the car's, `brake` is the rear brake and `handbrake` the front brake, and the kickstand goes up while it drives. Unlike a car with a manual gearbox, a running motorbike also gets throttle below idle, and its first gear counts from `GetNeutralGear()`; `vehicle_prepare_fixture` also prepares one (OnDebugSpawn, then the same wait; ready with every wheel on, fuel above 0 and its vital parts), so a `world_spawn` motorbike can start (inbox b95f). The `engine_set` and `vehicle_control` descriptions now say `vehicle_telemetry`'s gear, speed, position and ownership are a car's, and that a motorbike's speed is read with `players_kinematics`. Needs a rebuilt PBO.
 
 ## [1.6] - 2026-11-28
 

@@ -12786,7 +12786,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "driver seat, but this client does not own the vehicle). The reply "
             "confirms the command reached the vehicle and is not telemetry: "
             "engine_on_server is the only vehicle field it carries. "
-            "vehicle_telemetry reports gear, speed, position and ownership."
+            "For a car, vehicle_telemetry reports gear, speed, position and "
+            "ownership; it fills those fields only for a CarScript, so read a "
+            "motorbike's speed on the server with players_kinematics (the "
+            "rider's vel)."
         )
     )
     async def engine_set(mode: str, timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
@@ -12828,7 +12831,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "the front brake, and the kickstand goes up while it drives. The "
             "reply confirms the control reached the vehicle and is not "
             "telemetry: engine_on_server is the only vehicle field it carries. "
-            "vehicle_telemetry reports gear, speed, position and ownership."
+            "For a car, vehicle_telemetry reports gear, speed, position and "
+            "ownership; it fills those fields only for a CarScript, so read a "
+            "motorbike's speed on the server with players_kinematics (the "
+            "rider's vel)."
         )
     )
     async def vehicle_control(

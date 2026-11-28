@@ -33,9 +33,9 @@ modded class MotorbikeScript
 						EngineStart();
 					}
 				}
-				// Below idle a manual gearbox is not ready. An automatic is
-				// ready once its engine runs; a stall is engine on with rpm < 1.
-				if (GearboxGetType() == CarGearboxType.MANUAL || !EngineIsOn() || rpm < 1.0)
+				// Below idle a running engine is ready on every gearbox. SetThrottle
+				// has to run or the native input step keeps the driver's throttle at 0.
+				if (!EngineIsOn() || rpm < 1.0)
 				{
 					engineReady = false;
 				}
@@ -52,6 +52,8 @@ modded class MotorbikeScript
 				bool isManual = GearboxGetType() == CarGearboxType.MANUAL;
 				if (isManual)
 				{
+					// First gear is one above this bike's own neutral.
+					int firstGear = GetNeutralGear() + 1;
 					if (rpm > EngineGetRPMRedline() * 0.8)
 					{
 						if (throttle > 0.1)
@@ -65,9 +67,9 @@ modded class MotorbikeScript
 							}
 						}
 					}
-					else if (GetGear() < CarGear.FIRST || (throttle > 0.0 && spd < 5.0))
+					else if (GetGear() < firstGear || (throttle > 0.0 && spd < 5.0))
 					{
-						ShiftTo(CarGear.FIRST);
+						ShiftTo(firstGear);
 					}
 				}
 				// An automatic keeps its mode until shifted. In P, R or N it
