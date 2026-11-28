@@ -5448,7 +5448,7 @@ class ProcessLifecycle:
                 getattr(self.coordinator, "box_admit_start", None)
             ):
                 queue_reason = self.coordinator.box_admit_start(
-                    client, parsed.get("box_ticket")
+                    client, parsed.get("box_ticket"), operation_id=authority[1]
                 )
                 if queue_reason:
                     return self._start_rejection(
@@ -5768,7 +5768,10 @@ class ProcessLifecycle:
                     getattr(self.coordinator, "box_bind_run", None)
                 ):
                     bind_reason = self.coordinator.box_bind_run(
-                        client, parsed.get("box_ticket"), run_id
+                        client,
+                        parsed.get("box_ticket"),
+                        run_id,
+                        operation_id=authority[1],
                     )
                     if bind_reason:
                         audited = self._audit(

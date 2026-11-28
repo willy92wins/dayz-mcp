@@ -359,7 +359,7 @@ class SessionCoordinator:
         self._time_fn = time_fn
         self._wall_time_fn = wall_time_fn
         self._box_bound_ticket: dict[str, str] = {}
-        self._box_next_start_ticket: dict[str, str] = {}
+        self._box_next_start_ticket: dict[tuple[str, str], str] = {}
         self._token_fn = token_fn or (lambda: secrets.token_urlsafe(32))
         self._id_fn = id_fn or (lambda: uuid.uuid4().hex)
         self._fault_id_fn = fault_id_fn or (lambda: uuid.uuid4().hex)
@@ -2647,19 +2647,52 @@ class SessionCoordinator:
                 found.add(item[1])
         return found
 
-    def bind_next_start_ticket(self, client: ClientIdentity, ticket: object) -> None:
-        """Attach the exact ticket this start must use; not the session's last claim."""
+    @staticmethod
+    def _start_pin_key(
+        client: ClientIdentity, operation_id: object
+    ) -> tuple[str, str] | None:
+        session_id = getattr(client, "session_id", None)
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        if not isinstance(operation_id, str) or not operation_id:
+            return None
+        return (session_id, operation_id)
+
+    def bind_next_start_ticket(
+        self,
+        client: ClientIdentity,
+        ticket: object,
+        *,
+        operation_id: object = None,
+    ) -> None:
+        """Attach the exact ticket this operation's start must use."""
 
         with self._condition:
-            if isinstance(ticket, str) and ticket:
-                self._box_next_start_ticket[client.session_id] = ticket
+            key = self._start_pin_key(client, operation_id)
+            if key is not None and isinstance(ticket, str) and ticket:
+                self._box_next_start_ticket[key] = ticket
 
-    def _bound_ticket(self, client: ClientIdentity, ticket: object) -> object:
+    def _bound_ticket(
+        self,
+        client: ClientIdentity,
+        ticket: object,
+        *,
+        operation_id: object = None,
+    ) -> object:
         if isinstance(ticket, str) and ticket:
             return ticket
-        return self._box_next_start_ticket.get(client.session_id)
+        key = self._start_pin_key(client, operation_id)
+        if key is None:
+            return None
+        return self._box_next_start_ticket.get(key)
 
-    def box_admit_start(self, client: ClientIdentity, ticket: object) -> str | None:
+    def box_admit_start(
+        self,
+        client: ClientIdentity,
+        ticket: object,
+        *,
+        operation_id: object = None,
+    ) -> str | None:
         """Audit reason that refuses a new start, or None when it may proceed."""
 
         from dayz_mcp import shared_box_queue
@@ -2667,21 +2700,28 @@ class SessionCoordinator:
         with self._condition:
             reason = shared_box_queue.admit(
                 client.session_id,
-                self._bound_ticket(client, ticket),
+                self._bound_ticket(client, ticket, operation_id=operation_id),
                 now=self._wall_time_fn,
                 root=self._box_io_root(),
             )
             return reason
 
     def box_bind_run(
-        self, client: ClientIdentity, ticket: object, run_id: str
+        self,
+        client: ClientIdentity,
+        ticket: object,
+        run_id: str,
+        *,
+        operation_id: object = None,
     ) -> str | None:
         from dayz_mcp import shared_box_queue
 
-        supplied = self._bound_ticket(client, ticket)
+        supplied = self._bound_ticket(client, ticket, operation_id=operation_id)
         supplied = supplied if isinstance(supplied, str) and supplied else None
         with self._condition:
-            self._box_next_start_ticket.pop(client.session_id, None)
+            key = self._start_pin_key(client, operation_id)
+            if key is not None:
+                self._box_next_start_ticket.pop(key, None)
             return shared_box_queue.bind_run(
                 client.session_id,
                 supplied,
@@ -3938,6 +3978,8 @@ class SessionCoordinator:
         from dayz_mcp import shared_box_queue
 
         self._box_bound_ticket.pop(session_id, None)
+        for key in [item for item in self._box_next_start_ticket if item[0] == session_id]:
+            self._box_next_start_ticket.pop(key, None)
         result = shared_box_queue.leave_session(
             session_id, now=self._wall_time_fn(), root=self._box_io_root()
         )

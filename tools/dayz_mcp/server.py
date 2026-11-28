@@ -2891,12 +2891,16 @@ class ClientRuntime:
         )
 
     async def bind_next_start_ticket(self, ticket: str) -> dict[str, Any]:
-        """Pin the exact ticket the next start in this session must use."""
+        """Pin the exact ticket the next start of this operation must use."""
 
+        payload: dict[str, Any] = {"box_start_ticket": ticket}
+        lease_id = getattr(self._control, "active_lease_id", None)
+        if isinstance(lease_id, str) and lease_id:
+            payload["box_start_lease_id"] = lease_id
         return await self._control_with_lazy_spawn(
             self._control._session_call,
             "/session/status",
-            {"box_start_ticket": ticket},
+            payload,
         )
 
     async def reconcile_idle_session(self) -> dict[str, Any]:
@@ -7720,7 +7724,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async def execute(
             launch: dict[str, bool],
         ) -> tuple[dayz_test_tool.DayzTestToolError | None, dict[str, Any] | None]:
-            # The caller holds client.tool_lock.
+            # The caller holds client.tool_lock. Pin T here, not before
+            # the lock, so a sister start in this session cannot take it.
+            if box_ticket:
+                try:
+                    bound = client.bind_next_start_ticket(box_ticket)
+                    if hasattr(bound, "__await__"):
+                        await bound
+                except AttributeError:
+                    pass
+                except Exception:
+                    pass
             try:
                 with _typed_dayz_test_value_errors():
                     return None, await dayz_test_tool.execute_dayz_test_run(
@@ -7753,6 +7767,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         project_mod_override=project_mod_override,
                         connect_host=connect_host,
                         mod_dir=mod_dir,
+                        box_ticket=box_ticket,
                     )
             except dayz_test_tool.DayzTestToolError as error:
                 return error, None
@@ -7908,15 +7923,6 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             result: dict[str, Any] | None = None
             evicted_run_id: str | None = None
             requeued = False
-            if box_ticket:
-                try:
-                    bound = client.bind_next_start_ticket(box_ticket)
-                    if hasattr(bound, "__await__"):
-                        await bound
-                except AttributeError:
-                    pass
-                except Exception:
-                    pass
             async with client.tool_lock:
                 box: dict[str, Any] = {}
                 try:
@@ -8023,8 +8029,29 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         fresh = await client.session_status()
                     except Exception:
                         fresh = None
-                    if isinstance(fresh, dict):
-                        box = _box_from_status(fresh)
+                    if not isinstance(fresh, dict):
+                        return annotated(
+                            _failed_active_run_result(
+                                project=project,
+                                mode=mode,
+                                box=box,
+                                started=started,
+                                caller_session=caller_session,
+                                port=port,
+                            )
+                        )
+                    box = _box_from_status(fresh)
+                    if box.get("reason") == "box_queue_unreadable":
+                        return annotated(
+                            _failed_active_run_result(
+                                project=project,
+                                mode=mode,
+                                box=box,
+                                started=started,
+                                caller_session=caller_session,
+                                port=port,
+                            )
+                        )
                     queue_now = box.get("queue")
                     if isinstance(queue_now, list) and queue_now:
                         return annotated(

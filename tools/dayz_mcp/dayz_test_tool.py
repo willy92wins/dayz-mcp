@@ -3245,6 +3245,7 @@ async def execute_dayz_test_run(
     project_mod_override: bool = False,
     connect_host: str | None = None,
     mod_dir: str | None = None,
+    box_ticket: str | None = None,
 ) -> dict[str, object]:
     """Run or preflight a request, with explicit omissions in this adapter.
 
@@ -3254,6 +3255,8 @@ async def execute_dayz_test_run(
     Preflight success is not a free box and not a future launch.
     """
     started_at = time.monotonic()
+    if box_ticket is not None and (not isinstance(box_ticket, str) or not box_ticket):
+        box_ticket = None
     if progress_cb is not None:
         await progress_cb("validating", None)
     if mode not in _public_modes():
