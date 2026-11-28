@@ -1454,13 +1454,15 @@ class InvalidIdAnswerTest(SupervisorTestBase):
 
     def test_an_id_that_is_a_list_or_object_is_forwarded_not_tracked(self) -> None:
         worker = self.start()
-        for ident in ([], {}):
+        for ident in ([], {}, True, 1.5):
             self.supervisor.handle_host_line(
                 (json.dumps({"jsonrpc": "2.0", "id": ident, "method": "tools/call",
                              "params": {"name": "ping"}}) + "\n").encode()
             )
-        worker.wait_for_sent(lambda m: m.get("id") == [])
-        worker.wait_for_sent(lambda m: m.get("id") == {})
+            worker.wait_for_sent(
+                lambda m, ident=ident: "id" in m and m["id"] == ident
+                and type(m["id"]) is type(ident)
+            )
         self.assertEqual(self.supervisor._current.inflight, {})
 
 

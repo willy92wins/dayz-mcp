@@ -16,6 +16,7 @@ pipe are not isolated from each other; run one conversation per pipe.
 from __future__ import annotations
 
 import json
+import secrets
 import sys
 from pathlib import Path
 from typing import Any
@@ -57,9 +58,13 @@ _MODERN_ALLOWED_SERVER_NOTIFICATIONS = frozenset(
 _FRONT_CACHE_TTL_MS = 300_000
 _SYNTHETIC_INIT_ID = "__dayz_mcp_dual_era_init__"
 # JSON-RPC wants a null id for a request whose id cannot be read, but the pinned SDK
-# cannot encode one and answering with a real number (0) can collide with a valid
-# call that is still pending. Such errors carry a unique string that no client sent.
-_INVALID_ID_PREFIX = "dayz-mcp:invalid-request-id:"
+# cannot encode one, and answering with a real id can collide with a call still pending
+# under it. Such errors carry "<prefix><counter>", where the prefix holds a random
+# per-process nonce: a client cannot know it before it has been sent one. A client that
+# then uses an id inside that prefix as a request id is refused (under its own id), in
+# both eras, so no id is ever answered twice.
+_INVALID_ID_NONCE = secrets.token_hex(8)
+_INVALID_ID_PREFIX = f"dayz-mcp:invalid-request-id:{_INVALID_ID_NONCE}:"
 
 
 def is_modern(message: Any) -> bool:
@@ -153,6 +158,10 @@ def _id_key(request_id: Any) -> tuple[type, Any]:
 
 def _is_valid_request_id(request_id: Any) -> bool:
     return isinstance(request_id, (str, int)) and not isinstance(request_id, bool)
+
+
+def _is_reserved_request_id(request_id: Any) -> bool:
+    return isinstance(request_id, str) and request_id.startswith(_INVALID_ID_PREFIX)
 
 
 class _ClientGoneError(Exception):
@@ -551,6 +560,13 @@ async def serve(
                                         task_group.cancel_scope.cancel()
                                         return
                                     continue
+                                if _is_reserved_request_id(request_id):
+                                    if not await try_send_error(
+                                        request_id, -32600, "Invalid Request: reserved id"
+                                    ):
+                                        task_group.cancel_scope.cancel()
+                                        return
+                                    continue
                                 has_valid_id = True
                                 await handle_modern_request(request_id, method, params)
                             else:
@@ -570,6 +586,13 @@ async def serve(
 
                         # Legacy traffic: reject initialize if the synthetic handshake already ran.
                         method = raw.get("method")
+                        if method is not None and _is_reserved_request_id(raw.get("id")):
+                            if not await try_send_error(
+                                raw["id"], -32600, "Invalid Request: reserved id"
+                            ):
+                                task_group.cancel_scope.cancel()
+                                return
+                            continue
                         if method == "initialize" and "id" in raw:
                             if synthetic_initialized:
                                 reply_id = raw["id"] if _is_valid_request_id(raw["id"]) else next_invalid_id()

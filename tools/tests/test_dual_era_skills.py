@@ -492,6 +492,92 @@ class MalformedInputTest(_Base):
             self.assertEqual(result["result"]["content"][0]["text"], "done")
             self.assertEqual([m for m in wire.other if m.get("id") == 0], [])
 
+    def _blocking_tool(self) -> tuple[asyncio.Event, asyncio.Event]:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        @self.app.tool()
+        async def slow() -> str:
+            """Block until released."""
+            started.set()
+            await release.wait()
+            return "done"
+
+        return started, release
+
+    def _answers_for(self, wire: _Wire, request_id: str) -> list[dict[str, Any]]:
+        return [m for m in wire.other if m.get("id") == request_id]
+
+    async def test_two_invalid_lines_never_repeat_an_id_and_carry_a_process_nonce(self) -> None:
+        async with self.wire() as wire:
+            await wire._send(self._bad([], "skills/list"))
+            await wire._send(self._bad({}, "skills/list"))
+            await wire.call("skills/list")
+            ids = [m["id"] for m in wire.other if "error" in m]
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(len(set(ids)), 2)
+        for ident in ids:
+            self.assertTrue(ident.startswith(dual_era._INVALID_ID_PREFIX), ident)
+        self.assertNotEqual(dual_era._INVALID_ID_PREFIX, "dayz-mcp:invalid-request-id:")
+        self.assertGreaterEqual(len(dual_era._INVALID_ID_NONCE), 16)
+
+    async def test_a_client_id_equal_to_an_old_sentinel_gets_exactly_one_answer(self) -> None:
+        old = "dayz-mcp:invalid-request-id:1"
+        async with self.wire() as wire:
+            await wire._send(self._bad([], "skills/list"))  # the first sentinel goes out
+            await wire._send(
+                {"jsonrpc": "2.0", "id": old, "method": "skills/list", "params": {"_meta": dict(META)}}
+            )
+            answer = await wire.finish(old)
+            await wire.call("skills/list")
+            stray = self._answers_for(wire, old)
+        self.assertIn("result", answer)
+        self.assertEqual(stray, [], "the id must not be answered twice")
+
+    async def test_a_legacy_call_pending_under_an_old_sentinel_id_is_not_answered_twice(self) -> None:
+        old = "dayz-mcp:invalid-request-id:1"
+        started, release = self._blocking_tool()
+        async with self.wire() as wire:
+            await wire.legacy_initialize()
+            await wire._send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": old,
+                    "method": "tools/call",
+                    "params": {"name": "slow", "arguments": {}},
+                }
+            )
+            with anyio.fail_after(10):
+                await started.wait()
+            await wire._send(self._bad([], "skills/list"))
+            await wire.call("skills/list")
+            self.assertEqual(self._answers_for(wire, old), [], "nothing may answer it yet")
+            release.set()
+            result = await wire.finish(old)
+            await wire.call("skills/list")
+            stray = self._answers_for(wire, old)
+        self.assertIn("result", result)
+        self.assertEqual(stray, [])
+
+    async def test_a_request_using_an_id_inside_the_live_sentinel_prefix_is_refused_under_its_own_id(self) -> None:
+        reserved = f"{dual_era._INVALID_ID_PREFIX}1"
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                async with self.wire() as wire:
+                    if legacy:
+                        await wire.legacy_initialize()
+                    body: dict[str, Any] = {}
+                    if not legacy:
+                        body["_meta"] = dict(META)
+                    await wire._send(
+                        {"jsonrpc": "2.0", "id": reserved, "method": "skills/list", "params": body}
+                    )
+                    answer = await wire.finish(reserved)
+                    await wire.call("skills/list")
+                    stray = self._answers_for(wire, reserved)
+                self.assertEqual(answer["error"]["code"], -32600)
+                self.assertEqual(stray, [])
+
     async def test_a_legacy_initialize_refused_with_an_invalid_id_does_not_answer_as_zero(self) -> None:
         async with self.wire() as wire:
             await wire.call("tools/list")  # the modern era is now on this pipe

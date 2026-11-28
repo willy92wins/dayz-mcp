@@ -870,9 +870,11 @@ class Supervisor:
 
         method = message.get("method")
         ident = message.get("id")
-        if isinstance(ident, (list, dict)):
-            # Not a usable id (and not hashable): the worker answers it. Nothing here
-            # may track it.
+        if ident is not None and not (
+            isinstance(ident, (str, int)) and not isinstance(ident, bool)
+        ):
+            # Not a usable id (a list or object is not even hashable): the worker answers
+            # it under a sentinel id. Nothing here may track it.
             self._send_worker(generation, raw)
             return
 
