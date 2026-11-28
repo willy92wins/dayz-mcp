@@ -550,8 +550,10 @@ $stampBefore = try { (Get-Item -LiteralPath $pboPath -ErrorAction Stop).LastWrit
 # A shared dayz-pack-<mod> folder mixed files from an earlier build of another
 # tree into the PBO, because AddonBuilder empties that folder only with -clear.
 # tools/dev/pbo_provenance.py caught it on 2026-11-19 and 2026-11-27.
+$cleanupTemp = $false
 try {
   New-Item -ItemType Directory -Path $temp | Out-Null
+  $cleanupTemp = $true
   $previousPreference = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
 $builderLines = @()
@@ -597,9 +599,19 @@ if (Test-Path -LiteralPath $built) {
     }
     if ($why) {
       $stamp = try { (Get-Item -LiteralPath $pbo -ErrorAction Stop).LastWriteTime } catch { "unreadable" }
+      # The unique AddonBuilder temp folder is removed in finally. Move the
+      # fresh PBO to a persistent path under %TEMP% first, so the error names
+      # a file that still exists after this script exits.
+      $kept = Join-Path $env:TEMP ("dayz-pack-$ModName-undelivered-" + [guid]::NewGuid().ToString('N') + ".pbo")
+      try {
+        Move-Item -LiteralPath $built -Destination $kept -Force -ErrorAction Stop
+      } catch {
+        $kept = $built
+        $cleanupTemp = $false
+      }
       throw ("The PBO was BUILT but never reached the game -- the game keeps loading the old one, " +
              "and every in-game test measures that.`n" +
-             "  built      : $built`n" +
+             "  built      : $kept`n" +
              "  destination: $pbo (still $stamp)`n" +
              "  reason     : $why`n" +
              "Close every DayZ that has $ModName loaded, then copy the built file over the destination.")
@@ -623,10 +635,14 @@ if (Test-Path -LiteralPath $built) {
 }
 } finally {
   # A failed remove must not hide a good build or replace the error of a bad one.
-  try {
-    Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction Stop
-  } catch {
-    Write-Warning ("Could not remove AddonBuilder temp folder '$temp': " + $_.Exception.Message)
+  # Arm cleanup only after New-Item created this folder, so a GUID collision
+  # does not delete a directory we did not create.
+  if ($cleanupTemp) {
+    try {
+      Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction Stop
+    } catch {
+      Write-Warning -WarningAction Continue ("Could not remove AddonBuilder temp folder '$temp': " + $_.Exception.Message)
+    }
   }
 }
 

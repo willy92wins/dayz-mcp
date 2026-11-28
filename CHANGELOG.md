@@ -17,7 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- `tools/pack-addon.ps1` gives AddonBuilder a new, empty temp folder for every build (`dayz-pack-` plus the mod name and a new GUID, under `%TEMP%`) and removes it afterwards. The shared `dayz-pack-` folder of each mod, which AddonBuilder empties only with `-clear`, let files from an earlier build of another tree into the PBO; `tools/dev/pbo_provenance.py` caught it on 2026-11-19 and 2026-11-27.
+- `tools/pack-addon.ps1` gives AddonBuilder a new, empty temp folder for every build (`dayz-pack-` plus the mod name and a new GUID, under `%TEMP%`) and removes it afterwards. The shared `dayz-pack-` folder of each mod, which AddonBuilder empties only with `-clear`, let files from an earlier build of another tree into the PBO; `tools/dev/pbo_provenance.py` caught it on 2026-11-19 and 2026-11-27. If AddonBuilder leaves a fresh PBO in that folder and the copy to the destination fails, the script moves the PBO to a persistent `%TEMP%\dayz-pack-<mod>-undelivered-<GUID>.pbo` and puts that path in the error, so `finally` does not delete the only good copy. A failed `Remove-Item` of the temp folder uses `Write-Warning -WarningAction Continue`. Cleanup is armed only after the temp folder is created.
 
 ## [1.6] - 2026-11-28
 
