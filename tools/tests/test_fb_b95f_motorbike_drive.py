@@ -16,6 +16,10 @@ from the source and runs them against fakes of the vanilla calls they make.
 r2 (laptop run 86e11ba5, M5 red): a running motorbike gets throttle, steering and its kickstand up on every
 tick, below idle too, and its first gear is GetNeutralGear() + 1. MotorbikeBelowIdleDriveTest runs the shipped
 MotorbikeScript.OnInput on a fake bike; MotorbikeBelowIdleMutantTest shows the 2a2242d body fails it.
+
+r3 (laptop PT19, run 234abf17, M5 short of 5 m/s at 5 s): below 5 km/h with throttle, or below first gear, the
+bike shifts to first before any redline upshift, and it waits its own MCP_AUTO_SHIFT_SETTLE_S (at least its
+0.8 s clutch cycle) between automatic upshifts; the car keeps 0.3 s. MotorbikeShiftTest and MotorbikeShiftMutantTest.
 """
 from __future__ import annotations
 
@@ -895,6 +899,237 @@ class MotorbikeSpeedDocsTest(unittest.TestCase):
             "`vel`).",
             text,
         )
+
+
+# b95f r3: on the laptop (PT19, run 234abf17, PBO of fe8da13d) the bike drives, but M5 fell short twice: 4.15 and
+# 4.17 m/s at 5 s, 5 m/s at about 5.4 s (0.00, 0.44, 1.88, 3.02, 4.31, 5.69, 7.71 m/s second by second). At 416d4727
+# the ShiftUp branch above 0.8 x redline came first, so at launch, with the clutch slipping, the bike could shift up
+# below 5 km/h; and the bike waited the car's 0.3 s between automatic upshifts, shorter than its clutch cycle
+# (vehicles_singletrack Clutch: Motorbike_01 uncoupleTime 0.2 + coupleTime 0.6 = 0.8 s; Motorbike_02 0.3 + 0.2 = 0.5 s).
+BIKE_SETTLE_NAME = "MCP_AUTO_SHIFT_SETTLE_S"
+BIKE_CLUTCH_CYCLE_S = max(0.2 + 0.6, 0.3 + 0.2)
+FORCED_FIRST = "GetGear() < firstGear || (throttle > 0.0 && spd < 5.0)"
+BIKE_UPSHIFT_RPM = 5000.0  # above 0.8 x the 6000 rpm redline
+# MotorbikeScript.OnInput at 416d4727, verbatim.
+ON_INPUT_416D4727 = """
+override void OnInput(float dt)
+{
+	super.OnInput(dt);
+
+	bool applyControl = MCPCarDrive.s_Active && MCPCarDrive.s_Bike == this;
+	if (applyControl && GetGame().GetTickTime() > MCPCarDrive.s_DeadlineS)
+	{
+		MCPCarDrive.Clear();
+		applyControl = false;
+	}
+
+	if (applyControl)
+	{
+		float rpm = EngineGetRPM();
+		float spd = GetSpeedometerAbsolute();
+		bool engineReady = true;
+
+		// Engine management. Only a throttle request starts or restarts
+		// the engine; a brake-only command leaves the engine as it is.
+		if (rpm < EngineGetRPMIdle())
+		{
+			if (MCPCarDrive.s_Throttle > 0.0)
+			{
+				if (rpm < 1.0 && EngineIsOn())
+				{
+					EngineStop();
+				}
+				else if (!EngineIsOn())
+				{
+					EngineStart();
+				}
+			}
+			// Below idle a running engine is ready on every gearbox. SetThrottle
+			// has to run or the native input step keeps the driver's throttle at 0.
+			if (!EngineIsOn() || rpm < 1.0)
+			{
+				engineReady = false;
+			}
+		}
+
+		// Brakes do not wait for the engine. Rear brake, then front brake.
+		SetBrake(MCPCarDrive.s_Brake);
+		SetHandbrake(MCPCarDrive.s_Handbrake);
+
+		if (engineReady)
+		{
+			float throttle = MCPCarDrive.s_Throttle;
+
+			bool isManual = GearboxGetType() == CarGearboxType.MANUAL;
+			if (isManual)
+			{
+				// First gear is one above this bike's own neutral.
+				int firstGear = GetNeutralGear() + 1;
+				if (rpm > EngineGetRPMRedline() * 0.8)
+				{
+					if (throttle > 0.1)
+					{
+						float nowS = GetGame().GetTickTime();
+						// A stamp ahead of the clock is stale and never blocks.
+						if (MCPCarDrive.s_LastAutoShiftS < 0.0 || nowS < MCPCarDrive.s_LastAutoShiftS || nowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S)
+						{
+							ShiftUp();
+							MCPCarDrive.s_LastAutoShiftS = nowS;
+						}
+					}
+				}
+				else if (GetGear() < firstGear || (throttle > 0.0 && spd < 5.0))
+				{
+					ShiftTo(firstGear);
+				}
+			}
+			// An automatic keeps its mode until shifted. In P, R or N it
+			// shifts up behind the same settle interval and is asked for
+			// no throttle, so it gets throttle only once the mode reads D.
+			else if (throttle > 0.0 && GearboxGetMode() != CarAutomaticGearboxMode.D)
+			{
+				float modeNowS = GetGame().GetTickTime();
+				if (MCPCarDrive.s_LastAutoShiftS < 0.0 || modeNowS < MCPCarDrive.s_LastAutoShiftS || modeNowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S)
+				{
+					ShiftUp();
+					MCPCarDrive.s_LastAutoShiftS = modeNowS;
+				}
+
+				throttle = 0.0;
+			}
+
+			SetThrottle(throttle);
+			SetSteering(MCPCarDrive.s_Steer);
+			SetKickstand(0.0);
+		}
+	}
+}
+"""
+
+
+def _bike_settle_s(source: str) -> float | None:
+    """The bike's own settle interval, declared once as a static const float in its modded class."""
+    found = re.findall(r"static\s+const\s+float\s+" + BIKE_SETTLE_NAME + r"\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*;", source)
+    return float(found[0]) if len(found) == 1 else None
+
+
+class _ShiftingBike(_Bike):
+    """A _Bike whose ShiftUp moves it up one gear, so the next tick sees the new gear."""
+
+    def ShiftUp(self) -> None:
+        super().ShiftUp()
+        self.gear += 1
+
+
+class _BikeRig:
+    """One bike and one MCPCarDrive kept across ticks of one OnInput source, on a clock the test sets."""
+
+    def __init__(self, source: str, *, settle_s: float, gear: int, neutral: int = 1) -> None:
+        self.bike = _ShiftingBike(rpm=BIKE_UPSHIFT_RPM, gear=gear, neutral=neutral, speed=20.0)
+        self.now = 10.0
+        self.drive = SimpleNamespace(
+            s_Active=True,
+            s_Car=None,
+            s_Bike=self.bike,
+            s_DeadlineS=1.0e9,
+            s_Throttle=1.0,
+            s_Steer=0.0,
+            s_Brake=0.0,
+            s_Handbrake=0.0,
+            s_LastAutoShiftS=-1.0,
+            AUTO_SHIFT_SETTLE_S=0.3,
+            Clear=lambda: None,
+        )
+        namespace: dict = {
+            "super": SimpleNamespace(OnInput=lambda _dt: None),
+            "this": self.bike,
+            "MCPCarDrive": self.drive,
+            "GetGame": lambda: SimpleNamespace(GetTickTime=lambda: self.now),
+            "CarGearboxType": SimpleNamespace(MANUAL=BIKE_MANUAL, AUTOMATIC=BIKE_AUTOMATIC),
+            "CarAutomaticGearboxMode": SimpleNamespace(P=0, R=1, N=2, D=BIKE_MODE_D),
+            "CarGear": SimpleNamespace(REVERSE=0, NEUTRAL=1, FIRST=2),
+            BIKE_SETTLE_NAME: settle_s,
+        }
+        self.bike.bind(namespace)
+        self.on_input = translate(source, BIKE_ON_INPUT, namespace, members=(BIKE_SETTLE_NAME,))
+
+    def tick(self, now: float, *, rpm: float = BIKE_UPSHIFT_RPM, speed: float = 20.0, throttle: float = 1.0) -> list:
+        self.now = now
+        self.bike.rpm = rpm
+        self.bike.speed = speed
+        self.drive.s_Throttle = throttle
+        self.bike.calls.clear()
+        self.on_input(0.05)
+        return [call for call in self.bike.calls if call[0] in ("ShiftTo", "ShiftUp", "ShiftDown")]
+
+
+def _r3_contract_failures(source: str, settle_s: float | None) -> list[str]:
+    """What the r3 contract finds wrong in one MotorbikeScript.OnInput source: empty when it holds."""
+    if settle_s is None:
+        return [f"no single static const float {BIKE_SETTLE_NAME}"]
+    failures: list[str] = []
+    if settle_s < BIKE_CLUTCH_CYCLE_S:
+        failures.append(f"{BIKE_SETTLE_NAME} {settle_s} is shorter than the {BIKE_CLUTCH_CYCLE_S} s clutch cycle")
+    # Forced first gear wins over the redline upshift: below 5 km/h with throttle, and below first gear.
+    for neutral in (0, 1):
+        first = neutral + 1
+        for label, gear, speed in (("first gear at 3 km/h", first, 3.0), ("neutral at 20 km/h", neutral, 20.0)):
+            shifts = _BikeRig(source, settle_s=settle_s, gear=gear, neutral=neutral).tick(10.0, speed=speed)
+            if shifts != [("ShiftTo", first)]:
+                failures.append(f"{label}, neutral {neutral}, {BIKE_UPSHIFT_RPM} rpm: {shifts}")
+    # Above 5 km/h in first gear near the redline the bike shifts up, then waits settle_s before the next upshift.
+    rig = _BikeRig(source, settle_s=settle_s, gear=2, neutral=1)
+    shifts = rig.tick(10.0)
+    if shifts != [("ShiftUp",)]:
+        failures.append(f"first gear at 20 km/h, {BIKE_UPSHIFT_RPM} rpm: {shifts}")
+    for wait in (0.3, 0.5, settle_s - 0.01):
+        shifts = rig.tick(10.0 + wait)
+        if ("ShiftUp",) in shifts:
+            failures.append(f"a second upshift {wait:.2f} s after the first")
+    if rig.tick(10.0 + settle_s + 0.001) != [("ShiftUp",)]:
+        failures.append(f"no upshift {settle_s + 0.001:.3f} s after the first")
+    if rig.tick(10.0 + settle_s + 2.002) != [("ShiftUp",)]:
+        failures.append("no upshift 2 s after the second")
+    return failures
+
+
+class MotorbikeShiftTest(unittest.TestCase):
+    """b95f r3: the shipped MotorbikeScript.OnInput holds first gear at launch and spaces its upshifts."""
+
+    def test_the_shipped_on_input_meets_the_r3_contract(self) -> None:
+        source = BIKE_SCRIPT.read_text(encoding="utf-8")
+        self.assertEqual(_r3_contract_failures(source, _bike_settle_s(source)), [])
+
+    def test_the_settle_interval_covers_both_vanilla_clutch_cycles(self) -> None:
+        settle_s = _bike_settle_s(BIKE_SCRIPT.read_text(encoding="utf-8"))
+        self.assertIsNotNone(settle_s)
+        self.assertGreaterEqual(settle_s, BIKE_CLUTCH_CYCLE_S)
+
+    def test_the_car_keeps_its_settle_interval(self) -> None:
+        car = CAR_SCRIPT.read_text(encoding="utf-8")
+        self.assertEqual(car.count("static const float AUTO_SHIFT_SETTLE_S = 0.3;"), 1)
+        self.assertNotIn(BIKE_SETTLE_NAME, car)
+
+
+class MotorbikeShiftMutantTest(unittest.TestCase):
+    def test_the_old_order_the_car_interval_and_no_speed_check_are_caught(self) -> None:
+        source = BIKE_SCRIPT.read_text(encoding="utf-8")
+        settle_s = _bike_settle_s(source)
+        self.assertIsNotNone(settle_s, f"no single static const float {BIKE_SETTLE_NAME}")
+        self.assertEqual(source.count(FORCED_FIRST), 1)
+        head, signature, body = source.partition(BIKE_ON_INPUT)
+        self.assertIn(BIKE_SETTLE_NAME, body)
+        self.assertEqual(ON_INPUT_416D4727.count("MCPCarDrive.AUTO_SHIFT_SETTLE_S"), 2)
+        mutants = {
+            "old_order": ON_INPUT_416D4727.replace("MCPCarDrive.AUTO_SHIFT_SETTLE_S", BIKE_SETTLE_NAME),
+            "car_interval_on_the_bike": head + signature + body.replace(
+                BIKE_SETTLE_NAME, "MCPCarDrive.AUTO_SHIFT_SETTLE_S"
+            ),
+            "no_speed_check": source.replace(FORCED_FIRST, "GetGear() < firstGear"),
+        }
+        for label, mutant in mutants.items():
+            with self.subTest(mutant=label):
+                self.assertTrue(_r3_contract_failures(mutant, settle_s), f"{label} is not caught")
 
 
 if __name__ == "__main__":
