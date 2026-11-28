@@ -60,7 +60,9 @@ class V13DescriptionsTest(unittest.IsolatedAsyncioTestCase):
                     "engine_on_server is the only vehicle field it carries", description
                 )
                 self.assertIn(
-                    "vehicle_telemetry reports gear, speed, position and ownership",
+                    "For a car, vehicle_telemetry reports gear, speed, position and ownership; it fills "
+                    "those fields only for a CarScript, so read a motorbike's speed on the server with "
+                    "players_kinematics (the rider's vel).",
                     description,
                 )
 

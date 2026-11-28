@@ -12,6 +12,10 @@ the passenger drive and fails here.
 
 No Enforce runtime: tests.enforce_subset_helpers translates the bridge methods and MCPCarDrive's statics
 from the source and runs them against fakes of the vanilla calls they make.
+
+r2 (laptop run 86e11ba5, M5 red): a running motorbike gets throttle, steering and its kickstand up on every
+tick, below idle too, and its first gear is GetNeutralGear() + 1. MotorbikeBelowIdleDriveTest runs the shipped
+MotorbikeScript.OnInput on a fake bike; MotorbikeBelowIdleMutantTest shows the 2a2242d body fails it.
 """
 from __future__ import annotations
 
@@ -512,6 +516,384 @@ class MotorbikeDocsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "For a motorbike, ownership comes from the vanilla get-in (action_use ActionGetInTransport).",
             description,
+        )
+
+
+# b95f r2: on the laptop (run 86e11ba5, 6565d71, Motorbike_01_Blue) engine_set started the engine, but with throttle 1
+# for 5 s the bike moved 15 and 19 cm and stopped (0.05 m/s at most on the server). Transport.OnInput is empty and
+# runs after the native input step (transport.c:349-356): a tick without SetThrottle keeps the driver's own throttle,
+# 0 for an agent. At 2a2242d a manual gearbox was never ready below idle, a rule vanilla's DIAG autopilot also has
+# (motorbikescript.c:860-874), and an engine at idle can sit just under its configured idle (616.5 against 625 on a
+# car, test_fb_3efe_automatic_gearbox). First gear was CarGear.FIRST, while the bike numbers its gears from
+# GetNeutralGear() (motorbike.c:184; the vanilla HUD labels neutral + 1 as "1", motorbikehud.c:77-88).
+BIKE_ON_INPUT = "override void OnInput(float dt)"
+BIKE_MANUAL = 0
+BIKE_AUTOMATIC = 1
+BIKE_MODE_D = 3
+# Motorbike_01_ColorBase: Engine rpmIdle 1200, rpmRedline 6000 (vehicles_singletrack config).
+BIKE_IDLE_RPM = 1200.0
+BIKE_REDLINE_RPM = 6000.0
+MANUAL_GUARD_2A2242D = "if (GearboxGetType() == CarGearboxType.MANUAL || !EngineIsOn() || rpm < 1.0)"
+# MotorbikeScript.OnInput at 2a2242d, verbatim.
+ON_INPUT_2A2242D = """
+override void OnInput(float dt)
+{
+	super.OnInput(dt);
+
+	bool applyControl = MCPCarDrive.s_Active && MCPCarDrive.s_Bike == this;
+	if (applyControl && GetGame().GetTickTime() > MCPCarDrive.s_DeadlineS)
+	{
+		MCPCarDrive.Clear();
+		applyControl = false;
+	}
+
+	if (applyControl)
+	{
+		float rpm = EngineGetRPM();
+		float spd = GetSpeedometerAbsolute();
+		bool engineReady = true;
+
+		// Engine management. Only a throttle request starts or restarts
+		// the engine; a brake-only command leaves the engine as it is.
+		if (rpm < EngineGetRPMIdle())
+		{
+			if (MCPCarDrive.s_Throttle > 0.0)
+			{
+				if (rpm < 1.0 && EngineIsOn())
+				{
+					EngineStop();
+				}
+				else if (!EngineIsOn())
+				{
+					EngineStart();
+				}
+			}
+			// Below idle a manual gearbox is not ready. An automatic is
+			// ready once its engine runs; a stall is engine on with rpm < 1.
+			if (GearboxGetType() == CarGearboxType.MANUAL || !EngineIsOn() || rpm < 1.0)
+			{
+				engineReady = false;
+			}
+		}
+
+		// Brakes do not wait for the engine. Rear brake, then front brake.
+		SetBrake(MCPCarDrive.s_Brake);
+		SetHandbrake(MCPCarDrive.s_Handbrake);
+
+		if (engineReady)
+		{
+			float throttle = MCPCarDrive.s_Throttle;
+
+			bool isManual = GearboxGetType() == CarGearboxType.MANUAL;
+			if (isManual)
+			{
+				if (rpm > EngineGetRPMRedline() * 0.8)
+				{
+					if (throttle > 0.1)
+					{
+						float nowS = GetGame().GetTickTime();
+						// A stamp ahead of the clock is stale and never blocks.
+						if (MCPCarDrive.s_LastAutoShiftS < 0.0 || nowS < MCPCarDrive.s_LastAutoShiftS || nowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S)
+						{
+							ShiftUp();
+							MCPCarDrive.s_LastAutoShiftS = nowS;
+						}
+					}
+				}
+				else if (GetGear() < CarGear.FIRST || (throttle > 0.0 && spd < 5.0))
+				{
+					ShiftTo(CarGear.FIRST);
+				}
+			}
+			// An automatic keeps its mode until shifted. In P, R or N it
+			// shifts up behind the same settle interval and is asked for
+			// no throttle, so it gets throttle only once the mode reads D.
+			else if (throttle > 0.0 && GearboxGetMode() != CarAutomaticGearboxMode.D)
+			{
+				float modeNowS = GetGame().GetTickTime();
+				if (MCPCarDrive.s_LastAutoShiftS < 0.0 || modeNowS < MCPCarDrive.s_LastAutoShiftS || modeNowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S)
+				{
+					ShiftUp();
+					MCPCarDrive.s_LastAutoShiftS = modeNowS;
+				}
+
+				throttle = 0.0;
+			}
+
+			SetThrottle(throttle);
+			SetSteering(MCPCarDrive.s_Steer);
+			SetKickstand(0.0);
+		}
+	}
+}
+"""
+
+
+class _Bike:
+    """A MotorbikeScript as its OnInput reads and drives it. Every setter, shift and engine call is recorded."""
+
+    def __init__(
+        self,
+        *,
+        rpm: float,
+        engine_on: bool = True,
+        gear: int = 1,
+        neutral: int = 1,
+        gearbox: int = BIKE_MANUAL,
+        speed: float = 0.0,
+    ) -> None:
+        self.rpm = rpm
+        self.engine_on = engine_on
+        self.gear = gear
+        self.neutral = neutral
+        self.gearbox = gearbox
+        self.speed = speed
+        self.calls: list[tuple] = []
+
+    def bind(self, namespace: dict) -> None:
+        for name in (
+            "EngineGetRPM",
+            "EngineGetRPMIdle",
+            "EngineGetRPMRedline",
+            "EngineIsOn",
+            "EngineStart",
+            "EngineStop",
+            "GetSpeedometerAbsolute",
+            "GearboxGetType",
+            "GearboxGetMode",
+            "GetGear",
+            "GetNeutralGear",
+            "GetGearCount",
+            "ShiftUp",
+            "ShiftDown",
+            "ShiftTo",
+            "SetThrottle",
+            "SetSteering",
+            "SetBrake",
+            "SetHandbrake",
+            "SetKickstand",
+            "SetClutch",
+            "GetClutch",
+            "GetThrottle",
+        ):
+            namespace[name] = getattr(self, name)
+
+    def EngineGetRPM(self) -> float:
+        return self.rpm
+
+    def EngineGetRPMIdle(self) -> float:
+        return BIKE_IDLE_RPM
+
+    def EngineGetRPMRedline(self) -> float:
+        return BIKE_REDLINE_RPM
+
+    def EngineIsOn(self) -> bool:
+        return self.engine_on
+
+    def EngineStart(self) -> None:
+        self.calls.append(("EngineStart",))
+        self.engine_on = True
+
+    def EngineStop(self) -> None:
+        self.calls.append(("EngineStop",))
+        self.engine_on = False
+
+    def GetSpeedometerAbsolute(self) -> float:
+        return self.speed
+
+    def GearboxGetType(self) -> int:
+        return self.gearbox
+
+    def GearboxGetMode(self) -> int:
+        return BIKE_MODE_D
+
+    def GetGear(self) -> int:
+        return self.gear
+
+    def GetNeutralGear(self) -> int:
+        return self.neutral
+
+    def GetGearCount(self) -> int:
+        return self.neutral + 4
+
+    def ShiftUp(self) -> None:
+        self.calls.append(("ShiftUp",))
+
+    def ShiftDown(self) -> None:
+        self.calls.append(("ShiftDown",))
+
+    def ShiftTo(self, gear: int) -> None:
+        self.calls.append(("ShiftTo", gear))
+        self.gear = gear
+
+    def SetThrottle(self, value: float) -> None:
+        self.calls.append(("SetThrottle", value))
+
+    def SetSteering(self, value: float) -> None:
+        self.calls.append(("SetSteering", value))
+
+    def SetBrake(self, value: float) -> None:
+        self.calls.append(("SetBrake", value))
+
+    def SetHandbrake(self, value: float) -> None:
+        self.calls.append(("SetHandbrake", value))
+
+    def SetKickstand(self, value: float) -> None:
+        self.calls.append(("SetKickstand", value))
+
+    def SetClutch(self, value: float) -> None:
+        self.calls.append(("SetClutch", value))
+
+    def GetClutch(self) -> int:
+        return 0
+
+    def GetThrottle(self) -> float:
+        return 0.0
+
+
+def _bike_tick(
+    bike: _Bike,
+    *,
+    throttle: float = 1.0,
+    steer: float = 0.3,
+    brake: float = 0.0,
+    handbrake: float = 0.0,
+    source: str | None = None,
+) -> _Bike:
+    """One OnInput tick of `source` (the shipped MotorbikeScript by default) with vehicle_control held."""
+    if source is None:
+        source = BIKE_SCRIPT.read_text(encoding="utf-8")
+    drive = SimpleNamespace(
+        s_Active=True,
+        s_Car=None,
+        s_Bike=bike,
+        s_DeadlineS=TICK_TIME + 5.0,
+        s_Throttle=throttle,
+        s_Steer=steer,
+        s_Brake=brake,
+        s_Handbrake=handbrake,
+        s_LastAutoShiftS=-1.0,
+        AUTO_SHIFT_SETTLE_S=0.3,
+        Clear=lambda: None,
+    )
+    namespace: dict = {
+        "super": SimpleNamespace(OnInput=lambda _dt: None),
+        "this": bike,
+        "MCPCarDrive": drive,
+        "GetGame": lambda: SimpleNamespace(GetTickTime=lambda: TICK_TIME),
+        "CarGearboxType": SimpleNamespace(MANUAL=BIKE_MANUAL, AUTOMATIC=BIKE_AUTOMATIC),
+        "CarAutomaticGearboxMode": SimpleNamespace(P=0, R=1, N=2, D=BIKE_MODE_D),
+        "CarGear": SimpleNamespace(REVERSE=0, NEUTRAL=1, FIRST=2),
+    }
+    bike.bind(namespace)
+    translate(source, BIKE_ON_INPUT, namespace)(0.05)
+    return bike
+
+
+def _bike_contract_failures(source: str) -> list[str]:
+    """What the r2 contract finds wrong in one MotorbikeScript.OnInput source: empty when it holds."""
+    failures: list[str] = []
+    bike = _Bike(rpm=BIKE_IDLE_RPM - 20.0)
+    for rpm in (BIKE_IDLE_RPM - 20.0, BIKE_IDLE_RPM - 50.0, BIKE_IDLE_RPM - 10.0):
+        bike.rpm = rpm
+        bike.calls.clear()
+        _bike_tick(bike, throttle=1.0, steer=0.3, source=source)
+        for call in (("SetThrottle", 1.0), ("SetSteering", 0.3), ("SetKickstand", 0.0)):
+            if call not in bike.calls:
+                failures.append(f"no {call[0]} at {rpm} rpm")
+    for neutral in (0, 1):
+        for rpm in (BIKE_IDLE_RPM + 300.0, BIKE_IDLE_RPM - 20.0):
+            bike = _Bike(rpm=rpm, gear=neutral, neutral=neutral)
+            _bike_tick(bike, source=source)
+            shifts = [call for call in bike.calls if call[0] == "ShiftTo"]
+            if shifts != [("ShiftTo", neutral + 1)]:
+                failures.append(f"neutral {neutral} at {rpm} rpm shifted {shifts}")
+    return failures
+
+
+def _engine_calls(bike: _Bike) -> list[tuple]:
+    return [call for call in bike.calls if call[0] in ("EngineStart", "EngineStop")]
+
+
+class MotorbikeBelowIdleDriveTest(unittest.TestCase):
+    """b95f r2: the shipped MotorbikeScript.OnInput, one tick at a time, on a fake Motorbike_01 (idle 1200 rpm)."""
+
+    def test_a_running_bike_below_idle_gets_throttle_steering_and_kickstand_on_every_tick(self) -> None:
+        bike = _Bike(rpm=1180.0)
+        for rpm in (1180.0, 1150.0, 1190.0):
+            with self.subTest(rpm=rpm):
+                bike.rpm = rpm
+                bike.calls.clear()
+                _bike_tick(bike, throttle=1.0, steer=0.3)
+                for call in (
+                    ("SetThrottle", 1.0),
+                    ("SetSteering", 0.3),
+                    ("SetKickstand", 0.0),
+                    ("SetBrake", 0.0),
+                    ("SetHandbrake", 0.0),
+                ):
+                    self.assertIn(call, bike.calls)
+                self.assertEqual(_engine_calls(bike), [])
+
+    def test_first_gear_counts_from_the_bikes_neutral(self) -> None:
+        for neutral in (0, 1):
+            for rpm in (1500.0, 1180.0):
+                with self.subTest(neutral=neutral, rpm=rpm):
+                    bike = _Bike(rpm=rpm, gear=neutral, neutral=neutral)
+                    _bike_tick(bike)
+                    shifts = [call for call in bike.calls if call[0] == "ShiftTo"]
+                    self.assertEqual(shifts, [("ShiftTo", neutral + 1)])
+
+    def test_a_stalled_engine_is_stopped_and_a_stopped_one_started_without_throttle(self) -> None:
+        stalled = _bike_tick(_Bike(rpm=0.5, engine_on=True))
+        self.assertEqual(_engine_calls(stalled), [("EngineStop",)])
+        self.assertFalse([call for call in stalled.calls if call[0] == "SetThrottle"])
+        stopped = _bike_tick(_Bike(rpm=0.0, engine_on=False))
+        self.assertEqual(_engine_calls(stopped), [("EngineStart",)])
+        self.assertFalse([call for call in stopped.calls if call[0] == "SetThrottle"])
+
+    def test_a_brake_only_command_brakes_and_starts_nothing(self) -> None:
+        bike = _bike_tick(_Bike(rpm=0.0, engine_on=False), throttle=0.0, brake=1.0, handbrake=0.5)
+        self.assertIn(("SetBrake", 1.0), bike.calls)
+        self.assertIn(("SetHandbrake", 0.5), bike.calls)
+        self.assertEqual(_engine_calls(bike), [])
+
+    def test_the_clutch_is_left_to_the_game(self) -> None:
+        # Vanilla's DIAG autopilot never calls SetClutch either (motorbikescript.c:852-932).
+        for rpm in (1180.0, 1500.0):
+            with self.subTest(rpm=rpm):
+                bike = _bike_tick(_Bike(rpm=rpm))
+                self.assertFalse([call for call in bike.calls if call[0] == "SetClutch"])
+
+    def test_the_shipped_on_input_meets_the_contract(self) -> None:
+        self.assertEqual(_bike_contract_failures(BIKE_SCRIPT.read_text(encoding="utf-8")), [])
+
+
+class MotorbikeBelowIdleMutantTest(unittest.TestCase):
+    def test_the_2a2242d_rule_and_each_half_fix_fail_the_contract(self) -> None:
+        self.assertEqual(ON_INPUT_2A2242D.count(MANUAL_GUARD_2A2242D), 1)
+        self.assertEqual(ON_INPUT_2A2242D.count("CarGear.FIRST"), 2)
+        mutants = {
+            "2a2242d": ON_INPUT_2A2242D,
+            "guard_fixed_first_gear_from_cargear": ON_INPUT_2A2242D.replace(
+                MANUAL_GUARD_2A2242D, "if (!EngineIsOn() || rpm < 1.0)"
+            ),
+            "first_gear_fixed_guard_kept": ON_INPUT_2A2242D.replace("CarGear.FIRST", "GetNeutralGear() + 1"),
+        }
+        for label, source in mutants.items():
+            with self.subTest(mutant=label):
+                self.assertTrue(_bike_contract_failures(source), f"{label} is not caught")
+
+
+class MotorbikeSpeedDocsTest(unittest.TestCase):
+    def test_vehicle_testing_says_where_a_motorbike_speed_is_read(self) -> None:
+        doc = addon_root().parent / "docs" / "VEHICLE_TESTING.md"
+        text = " ".join(doc.read_text(encoding="utf-8").split())
+        self.assertIn(
+            "so read a car's gear, speed, position and ownership with `vehicle_telemetry`, which fills them only "
+            "for a `CarScript`; a motorbike's speed is read on the server with `players_kinematics` (the rider's "
+            "`vel`).",
+            text,
         )
 
 
