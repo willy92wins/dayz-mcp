@@ -1,6 +1,9 @@
 // fb-20261127-181405-b95f: applies vehicle_control to the motorbike the local driver owns, as CarScript.OnInput does for a car.
 modded class MotorbikeScript
 {
+	// Longest vanilla clutch cycle: Motorbike_01 uncouple 0.2 s plus couple 0.6 s.
+	static const float MCP_AUTO_SHIFT_SETTLE_S = 0.8;
+
 	override void OnInput(float dt)
 	{
 		super.OnInput(dt);
@@ -54,31 +57,32 @@ modded class MotorbikeScript
 				{
 					// First gear is one above this bike's own neutral.
 					int firstGear = GetNeutralGear() + 1;
-					if (rpm > EngineGetRPMRedline() * 0.8)
+					// Below 5 km/h, or below first gear, stay in first even near the redline: the clutch is still coupling.
+					if (GetGear() < firstGear || (throttle > 0.0 && spd < 5.0))
+					{
+						ShiftTo(firstGear);
+					}
+					else if (rpm > EngineGetRPMRedline() * 0.8)
 					{
 						if (throttle > 0.1)
 						{
 							float nowS = GetGame().GetTickTime();
-							// A stamp ahead of the clock is stale and never blocks.
-							if (MCPCarDrive.s_LastAutoShiftS < 0.0 || nowS < MCPCarDrive.s_LastAutoShiftS || nowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S)
+							// A stamp ahead of the clock is stale and never blocks. An upshift waits one clutch cycle.
+							if (MCPCarDrive.s_LastAutoShiftS < 0.0 || nowS < MCPCarDrive.s_LastAutoShiftS || nowS - MCPCarDrive.s_LastAutoShiftS >= MCP_AUTO_SHIFT_SETTLE_S)
 							{
 								ShiftUp();
 								MCPCarDrive.s_LastAutoShiftS = nowS;
 							}
 						}
 					}
-					else if (GetGear() < firstGear || (throttle > 0.0 && spd < 5.0))
-					{
-						ShiftTo(firstGear);
-					}
 				}
 				// An automatic keeps its mode until shifted. In P, R or N it
-				// shifts up behind the same settle interval and is asked for
+				// shifts up after one clutch cycle and is asked for
 				// no throttle, so it gets throttle only once the mode reads D.
 				else if (throttle > 0.0 && GearboxGetMode() != CarAutomaticGearboxMode.D)
 				{
 					float modeNowS = GetGame().GetTickTime();
-					if (MCPCarDrive.s_LastAutoShiftS < 0.0 || modeNowS < MCPCarDrive.s_LastAutoShiftS || modeNowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S)
+					if (MCPCarDrive.s_LastAutoShiftS < 0.0 || modeNowS < MCPCarDrive.s_LastAutoShiftS || modeNowS - MCPCarDrive.s_LastAutoShiftS >= MCP_AUTO_SHIFT_SETTLE_S)
 					{
 						ShiftUp();
 						MCPCarDrive.s_LastAutoShiftS = modeNowS;
