@@ -37,7 +37,7 @@ python tools/dev/anim_fk.py --dz <vanilla root> --dayzatool <DayZATool.exe> --ik
 - `--ikpose REL` — ikpose `.anm` under `--dz`. Required. Supplies the item frame.
 - `--anm REL` — one action clip under `--dz`. Repeat the flag once per segment. At least one is required. Segment order follows the flags.
 - `--bone NAME` — include this bone's curve. Repeat for several bones. With no `--bone`, `bones` is `{}` and notes, wrist span, and left-wrist offset are still reported.
-- `--work DIR` — cache directory. Default is a folder named `anim_fk` under the system temporary directory. A path that resolves under `--dz` is rejected before any write.
+- `--work DIR` — cache directory. Default is a folder named `anim_fk` under the process temporary directory (`TMPDIR`, `TEMP` or `TMP`; no `tempfile.gettempdir()` probe is written). A path that resolves under `--dz`, including a cache folder that is a junction or symlink into `--dz`, is rejected before any write.
 - `--timeout SEC` — seconds allowed for one DayZATool invocation. Default `120`. A value that is not a finite number greater than zero is rejected.
 
 Each `REL` is resolved against `--dz` and must be an existing file inside that
@@ -46,11 +46,14 @@ Paths in the JSON are the `REL` strings as they were passed, separators included
 
 The cache key is the SHA-256 of the source bytes. After the copy is made,
 its SHA-256 is checked against the source; a mismatch is rewritten
-atomically (a temporary file in the same folder, then replace). DayZATool is
-not started again when the `.semodel` or `.seanim` output is already beside
-the verified copy. A path is treated as inside `--dz` only if it resolves
-there and, when both sides exist, is the same physical tree (`os.path.samefile`
-or inode and device).
+atomically (a temporary file in the same folder, then replace). When the
+copy was missing or rewritten, leftover `.semodel` and `.seanim` files
+beside it are removed and DayZATool is started again. DayZATool is not
+started again when the copy already matched and the output is already
+beside it. A path is treated as inside `--dz` only if it is the same
+physical tree (`os.path.samefile` or inode and device) when that can be
+decided; a case-folded `Path.resolve()` / `relative_to` match is not
+enough when both sides exist and are different inodes.
 
 ## Exit codes
 

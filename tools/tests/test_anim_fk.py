@@ -502,6 +502,19 @@ class WorkUnderDzTest(AnimFkCase):
         return {str(p.relative_to(self.dz)): (p.stat().st_size, p.stat().st_mtime_ns)
                 for p in sorted(self.dz.rglob("*")) if p.is_file()}
 
+    @staticmethod
+    def _link_dir(target: Path, link: Path) -> None:
+        if os.name == "nt":
+            completed = subprocess.run(
+                ["cmd.exe", "/c", "mklink", "/J", str(link), str(target)],
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0:
+                raise OSError(completed.stderr or completed.stdout or "mklink /J failed")
+            return
+        os.symlink(target, link, target_is_directory=True)
+
     def test_work_under_dz_answers_2_and_writes_nothing(self) -> None:
         before = self._dz_snapshot()
         work = self.dz / "cache"
@@ -518,12 +531,51 @@ class WorkUnderDzTest(AnimFkCase):
         args = self.base_args(STILL_REL)
         i = args.index("--work")
         del args[i:i + 2]
-        with mock.patch.object(self.tool.tempfile, "gettempdir", return_value=str(self.dz)):
+        for key in ("TMPDIR", "TEMP", "TMP"):
+            os.environ[key] = str(self.dz)
+        with mock.patch.object(
+            self.tool.tempfile, "gettempdir", side_effect=AssertionError("gettempdir must not be called")
+        ):
             code, out, _err = self.run_tool(args)
         self.assertEqual((code, out), (2, ""))
         self.assertFalse((self.dz / "anim_fk").exists())
         self.assertEqual(self._dz_snapshot(), before)
         self.assertEqual(self.launches(), 0)
+
+    def test_a_cache_folder_that_points_into_dz_answers_2(self) -> None:
+        target = self.dz / "leaked_cache"
+        target.mkdir()
+        self.work.mkdir(parents=True, exist_ok=True)
+        try:
+            for rel in (SKELETON_REL, IKPOSE_REL, STILL_REL):
+                digest = hashlib.sha256((self.dz / rel).read_bytes()).hexdigest()
+                self._link_dir(target, self.work / digest)
+        except OSError as exc:
+            self.skipTest(f"cannot create a directory link: {exc}")
+        before = self._dz_snapshot()
+        code, out, _err = self.run_tool(self.base_args(STILL_REL))
+        self.assertEqual((code, out), (2, ""))
+        self.assertEqual(self._dz_snapshot(), before)
+        self.assertEqual(self.launches(), 0)
+        self.assertFalse(any(target.iterdir()), "no cache files written through the link")
+
+    def test_work_in_a_distinct_sibling_is_kept_when_relative_to_folds_case(self) -> None:
+        sibling_work = self.root / "other_work"
+        sibling_work.mkdir()
+        real = Path.relative_to
+
+        def folded(self_path, other):
+            try:
+                return real(self_path, other)
+            except ValueError:
+                return real(self_path, sibling_work.resolve())
+
+        args = self.base_args(STILL_REL)
+        args[args.index("--work") + 1] = str(sibling_work)
+        with mock.patch.object(Path, "relative_to", folded):
+            doc = self.ok_json(args)
+        self.assertEqual(doc["schema"], "anim_fk_v1")
+        self.assertGreater(self.launches(), 0)
 
 
 class CacheHashTest(AnimFkCase):
@@ -540,12 +592,27 @@ class CacheHashTest(AnimFkCase):
         self.assertEqual(hashlib.sha256(stale.read_bytes()).digest(), hashlib.sha256(src).digest())
         self.assertEqual(doc["segments"][0]["notes"], [{"frame": 2, "name": "mark"}])
 
+    def test_a_stale_copy_with_a_leftover_output_is_reextracted(self) -> None:
+        src = (self.dz / STILL_REL).read_bytes()
+        digest = hashlib.sha256(src).hexdigest()
+        folder = self.work / digest
+        folder.mkdir(parents=True)
+        stale = folder / Path(STILL_REL).name
+        stale.write_bytes(b"STALE" + src)
+        leftover = stale.with_suffix(".seanim")
+        leftover.write_bytes(seanim_bytes(STILL, 4, notes=[(1, "other")]))
+        self.assertEqual(self.launches(), 0)
+        doc = self.ok_json(self.base_args(STILL_REL))
+        self.assertEqual(doc["segments"][0]["notes"], [{"frame": 2, "name": "mark"}])
+        self.assertEqual(self.launches(), 3)
+        self.assertEqual(hashlib.sha256(stale.read_bytes()).digest(), hashlib.sha256(src).digest())
+
 
 class PhysicalMembershipTest(AnimFkCase):
     """A sibling tree is not inside --dz just because Path.relative_to folds case (NTFS)."""
 
     def test_a_sibling_tree_is_refused_even_if_relative_to_accepts_it(self) -> None:
-        sibling = self.root / "DZ"
+        sibling = self.root / "other_tree"
         path = sibling / STILL_REL
         path.parent.mkdir(parents=True)
         path.write_bytes((self.dz / STILL_REL).read_bytes())
@@ -580,13 +647,19 @@ class FiniteOutputTest(AnimFkCase):
 
     def test_an_unreadable_cached_output_answers_5(self) -> None:
         self.ok_json(self.base_args(STILL_REL))
-        seanim = next(self.work.rglob("still.seanim"))
-        os.chmod(seanim, 0)
-        self.addCleanup(os.chmod, seanim, 0o644)
-        try:
-            code, out, _err = self.run_tool(self.base_args(STILL_REL))
-        except OSError:
-            self.fail("OSError escaped main; expected exit 5")
+        seanim = next(self.work.rglob("still.seanim")).resolve()
+        real_read = Path.read_bytes
+
+        def injected(self_path):
+            if Path(self_path).resolve() == seanim:
+                raise PermissionError("injected")
+            return real_read(self_path)
+
+        with mock.patch.object(Path, "read_bytes", injected):
+            try:
+                code, out, _err = self.run_tool(self.base_args(STILL_REL))
+            except OSError:
+                self.fail("OSError escaped main; expected exit 5")
         self.assertEqual((code, out), (5, ""))
 
 

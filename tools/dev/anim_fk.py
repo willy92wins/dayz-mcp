@@ -113,14 +113,60 @@ def _resolves_under(root: Path, path: Path) -> bool:
         return False
 
 
-def _writes_under_dz(dz: Path, work: Path) -> bool:
-    """True if the cache would resolve, or physically sit, under --dz."""
-    if _resolves_under(dz, work) or _physically_under(dz, work):
-        return True
+def _physical_under_conclusive(root: Path, path: Path) -> bool | None:
+    """True/False when root and an existing ancestor of path can be statted; otherwise None."""
     try:
-        return _resolves_under(dz.resolve(), work.resolve()) or _physically_under(dz.resolve(), work.resolve())
+        os.stat(root)
     except OSError:
+        return None
+    if _physically_under(root, path):
+        return True
+    cur = path
+    while True:
+        try:
+            os.stat(cur)
+            return False
+        except OSError:
+            parent = cur.parent
+            if parent == cur:
+                return None
+            cur = parent
+
+
+def _writes_under_dz(dz: Path, work: Path) -> bool:
+    """True if the cache would physically sit under --dz.
+
+    Junctions and symlinks are followed, so a cache folder that points into
+    --dz is refused even when the link itself sits outside. A case-folded
+    Path.resolve()/relative_to match is not enough when both sides exist
+    and are different inodes (a sibling dz/DZ tree).
+    """
+    try:
+        resolved_dz = dz.resolve()
+        resolved_work = work.resolve()
+    except OSError:
+        resolved_dz = None
+        resolved_work = None
+    if resolved_dz is not None and resolved_work is not None:
+        verdict = _physical_under_conclusive(resolved_dz, resolved_work)
+        if verdict is True:
+            return True
+        if verdict is False:
+            lexical = _physical_under_conclusive(dz, work)
+            return lexical is True
+    lexical = _physical_under_conclusive(dz, work)
+    if lexical is True:
+        return True
+    if lexical is False:
         return False
+    try:
+        return _resolves_under(dz, work) or (
+            resolved_dz is not None
+            and resolved_work is not None
+            and _resolves_under(resolved_dz, resolved_work)
+        )
+    except OSError:
+        return _resolves_under(dz, work)
 
 
 def _under_dz(dz: Path, rel: str) -> Path | None:
@@ -145,8 +191,13 @@ def _under_dz(dz: Path, rel: str) -> Path | None:
     return path
 
 
-def _ensure_cache_copy(data: bytes, dest: Path) -> None:
-    """Leave dest as an exact copy of data, rewriting atomically when the hash does not match."""
+def _ensure_cache_copy(data: bytes, dest: Path) -> bool:
+    """Leave dest as an exact copy of data. Return True if it already matched.
+
+    When the hash does not match, dest is rewritten atomically (a temporary
+    file in the same folder, then replace). The caller must then invalidate
+    any sibling DayZATool output and run the converter again.
+    """
     expected = hashlib.sha256(data).digest()
 
     def current_ok() -> bool:
@@ -156,7 +207,7 @@ def _ensure_cache_copy(data: bytes, dest: Path) -> None:
             return False
 
     if current_ok():
-        return
+        return True
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=dest.name + ".", suffix=".tmp", dir=str(dest.parent))
     try:
@@ -177,17 +228,39 @@ def _ensure_cache_copy(data: bytes, dest: Path) -> None:
         raise
     if not current_ok():
         raise ToolFailure(5, f"cached copy does not match the source: {dest.name}")
+    return False
 
 
-def _extract(src: Path, rel: str, flag: str, work: Path, exe: str, timeout: float) -> bytes:
+def _invalidate_sibling_outputs(copy: Path) -> None:
+    """Remove leftover .seanim/.semodel next to a rewritten (or newly written) copy."""
+    for suffix in (".seanim", ".semodel"):
+        leftover = copy.with_suffix(suffix)
+        try:
+            leftover.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ToolFailure(5, f"cannot invalidate cached output {leftover.name}: {exc}") from exc
+
+
+def _extract(src: Path, rel: str, flag: str, work: Path, exe: str, timeout: float, dz: Path) -> bytes:
     """Copy src into work/<sha256>/ and return DayZATool's sibling output. Launch is skipped when it exists."""
     data = src.read_bytes()
     folder = work / hashlib.sha256(data).hexdigest()
+    try:
+        folder.lstat()
+        folder_present = True
+    except OSError:
+        folder_present = False
+    if folder_present and _writes_under_dz(dz, folder):
+        raise ToolFailure(2, "cache folder resolves under --dz")
     folder.mkdir(parents=True, exist_ok=True)
+    if _writes_under_dz(dz, folder):
+        raise ToolFailure(2, "cache folder resolves under --dz")
     copy = folder / src.name
-    _ensure_cache_copy(data, copy)
+    matched = _ensure_cache_copy(data, copy)
     suffix = ".semodel" if flag == "--extract-mdl" else ".seanim"
     output = copy.with_suffix(suffix)
+    if not matched:
+        _invalidate_sibling_outputs(copy)
     if not output.is_file():
         try:
             subprocess.run(
@@ -248,6 +321,21 @@ def _segment(rel: str, clip, skeleton, bone_names: list[str], grip) -> dict:
     }
 
 
+def _default_work_dir() -> Path:
+    """Default cache folder, without calling tempfile.gettempdir() (it may write a probe)."""
+    for key in ("TMPDIR", "TEMP", "TMP"):
+        value = os.environ.get(key)
+        if value:
+            return Path(value) / "anim_fk"
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            return Path(local) / "Temp" / "anim_fk"
+        windir = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
+        return Path(windir) / "Temp" / "anim_fk"
+    return Path("/tmp") / "anim_fk"
+
+
 def _run(args: argparse.Namespace) -> int:
     dz_text = args.dz or os.environ.get("DZ_ROOT") or ""
     if not dz_text:
@@ -272,7 +360,7 @@ def _run(args: argparse.Namespace) -> int:
             _err(f"path is outside --dz or is not a file: {rel}")
             return 2
         paths.append(path)
-    work = Path(args.work) if args.work else Path(tempfile.gettempdir()) / "anim_fk"
+    work = Path(args.work) if args.work else _default_work_dir()
     if _writes_under_dz(dz, work):
         _err("--work resolves under --dz and would write in the vanilla tree")
         return 2
@@ -285,7 +373,7 @@ def _run(args: argparse.Namespace) -> int:
         return 3
     skel_path, ik_path, *anm_paths = paths
     skeleton = anim_fk_math.load_semodel(
-        _extract(skel_path, args.skeleton, "--extract-mdl", work, exe, args.timeout)
+        _extract(skel_path, args.skeleton, "--extract-mdl", work, exe, args.timeout, dz)
     )
     bone_names = list(args.bones or [])
     for name in ("LeftHand", "RightHand", *bone_names):
@@ -293,12 +381,12 @@ def _run(args: argparse.Namespace) -> int:
             _err(f"bone is not in the skeleton: {name}")
             return 6
     ik_clip = anim_fk_math.load_seanim(
-        _extract(ik_path, args.ikpose, "--extract-anim", work, exe, args.timeout)
+        _extract(ik_path, args.ikpose, "--extract-anim", work, exe, args.timeout, dz)
     )
     grip = anim_fk_math.grip_frame(ik_clip, skeleton)
     segments = []
     for rel, path in zip(anms, anm_paths):
-        clip = anim_fk_math.load_seanim(_extract(path, rel, "--extract-anim", work, exe, args.timeout))
+        clip = anim_fk_math.load_seanim(_extract(path, rel, "--extract-anim", work, exe, args.timeout, dz))
         segments.append(_segment(rel, clip, skeleton, bone_names, grip))
     origin, origin_rot, target = grip
     document = {
