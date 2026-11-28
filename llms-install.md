@@ -16,13 +16,13 @@ No repository clone and no pre-installed Python are needed.
 
 ```powershell
 winget install --id astral-sh.uv -e
-uv python install 3.14 --no-bin --no-registry
-& (uv python find --managed-python 3.14) -c "import os, subprocess, sys; subprocess.run([os.path.realpath(sys.executable), '-m', 'venv', '--without-pip', sys.argv[1]], check=True)" "$env:LOCALAPPDATA\DayZ_MCP\venv-1.6"
-uv pip install --python "$env:LOCALAPPDATA\DayZ_MCP\venv-1.6\Scripts\python.exe" --link-mode=copy --require-hashes -r https://github.com/willy92wins/dayz-mcp/releases/download/v1.6/dayz-mcp-requirements.txt
+$env:Path += ';' + [Environment]::GetEnvironmentVariable('Path', 'User'); uv python install 3.14 --no-bin --no-registry
+$env:Path += ';' + [Environment]::GetEnvironmentVariable('Path', 'User'); & (uv python find --managed-python 3.14) -c "import os, subprocess, sys; subprocess.run([os.path.realpath(sys.executable), '-m', 'venv', '--without-pip', sys.argv[1]], check=True)" "$env:LOCALAPPDATA\DayZ_MCP\venv-1.6"
+$env:Path += ';' + [Environment]::GetEnvironmentVariable('Path', 'User'); uv pip install --python "$env:LOCALAPPDATA\DayZ_MCP\venv-1.6\Scripts\python.exe" --link-mode=copy --require-hashes -r https://github.com/willy92wins/dayz-mcp/releases/download/v1.6/dayz-mcp-requirements.txt
 & "$env:LOCALAPPDATA\DayZ_MCP\venv-1.6\Scripts\dayz-mcp.exe" setup --json
 ```
 
-Run the first line only if `uv` is not already on `PATH`, and use a new shell afterwards because `winget` puts `uv` on the `PATH` of new shells.
+Run the first line only if `uv` is not already on `PATH`. The next three lines first add the user `PATH` to the shell's own: `winget` puts `uv` on the user `PATH`, and the shell you run commands in may still have the `PATH` it had before.
 The virtual environment is created from the real path of uv's Python rather than with `uv venv`, because the `python.exe` that `uv venv` makes is a launcher that runs from another folder: while a daemon started through it runs, any other DayZ-MCP daemon on the machine waits 30 s and exits.
 The requirements file pins the wheel and every dependency by hash, so if even one byte changes, `uv` installs nothing.
 The venv folder carries the release version (`venv-1.6` for this release), so an upgrade runs the same commands with the new version into a new folder.

@@ -318,6 +318,38 @@ class LlmsInstallDocsTest(unittest.TestCase):
         self.assertNotIn("git clone", block_text)
         self.assertNotIn("install-mcp.ps1", block_text)
 
+    def test_uv_lines_add_the_user_path_first(self) -> None:
+        """After winget, the agent shell may not see uv: it keeps the PATH it had before."""
+        why = (
+            "after winget, the agent shell may not see uv because it keeps "
+            "the PATH it had before winget updated the user PATH"
+        )
+        prefix = (
+            "$env:Path += ';' + [Environment]::GetEnvironmentVariable('Path', 'User');"
+        )
+        block_text = self._commands_block_text()
+        uv_lines = [
+            line
+            for line in block_text.splitlines()
+            if re.search(r"(?:^|[\s(])uv\s", line)
+        ]
+        self.assertGreaterEqual(
+            len(uv_lines),
+            3,
+            f"{why}; expected at least 3 uv-calling lines, found {len(uv_lines)}",
+        )
+        for line in uv_lines:
+            self.assertTrue(
+                line.startswith(prefix + " "),
+                f"{why}; uv line does not start with the user-PATH prefix: {line!r}",
+            )
+        guide = _read("llms-install.md")
+        self.assertNotIn(
+            "new shell",
+            guide,
+            f"{why}; llms-install.md still tells the reader to open a new shell",
+        )
+
     def test_guide_versions_agree_and_do_not_pass_pyproject(self) -> None:
         why = (
             "llms-install.md installs the last published release, which trails "
