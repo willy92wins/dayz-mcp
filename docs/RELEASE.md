@@ -50,7 +50,7 @@ its root, so a PBO says which commit built it. Enforce never reads it:
 `addon/config.cpp` compiles only `scripts/4_World` and `scripts/5_Mission`.
 The script prints the resulting `DayZ_MCP.pbo` path and byte size after
 AddonBuilder succeeds
-([`tools/pack-addon.ps1:620-620`](../tools/pack-addon.ps1#L620-L620)). Record that
+([`tools/pack-addon.ps1:633-633`](../tools/pack-addon.ps1#L633-L633)). Record that
 printed path; do not substitute a source-tree file or an older deployed PBO.
 
 Sign that PBO with `DSSignFile.exe` from `Bin\DsUtils` in DayZ Tools. The
