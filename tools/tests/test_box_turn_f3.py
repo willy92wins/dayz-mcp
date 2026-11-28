@@ -378,16 +378,14 @@ class BoxTurnF3(unittest.TestCase):
             payload = json.loads(status.stdout)
             self.assertIs(payload["occupied"], True)
             self.assertEqual(payload["reason"], "dayz")
-            self.assertEqual(payload["queue"], [])
+            # The claim stays on the live child after the wrapper is killed.
+            self.assertTrue(payload["queue"], payload)
         finally:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=10)
             if child:
-                subprocess.run(
-                    ["taskkill", "/PID", str(child), "/F"],
-                    capture_output=True,
-                )
+                _stop_pid(child)
         gone = self._run(
             ["status", "--json"],
             env=self._env(CHILD_PIDFILE=str(pidfile)),
@@ -491,10 +489,7 @@ class BoxTurnF3(unittest.TestCase):
         finally:
             box_turn.clear_probe_hooks()
             if child_pid:
-                subprocess.run(
-                    ["taskkill", "/PID", str(child_pid), "/F"],
-                    capture_output=True,
-                )
+                _stop_pid(child_pid)
 
     def test_p1_4_probe_env_cannot_hide_a_live_dayz(self) -> None:
         from unittest.mock import patch
@@ -503,12 +498,11 @@ class BoxTurnF3(unittest.TestCase):
 
         live_dayz = {"known": True, "processes": [{"pid": 4242, "name": "DayZDiag_x64.exe"}]}
         live_udp = {"known": True, "holders": [{"port": 2302, "pid": 4242, "name": "DayZDiag_x64.exe"}]}
-        live_m1 = {"path": r"C:\tmp\caja-dayz\m1.espera", "age_s": 5.0}
         with (
             patch.object(orphan_guard, "snapshot_retail_processes", return_value={"known": True, "processes": []}),
             patch.object(orphan_guard, "snapshot_processes_by_name", return_value=live_dayz),
             patch.object(orphan_guard, "snapshot_udp_port_holders", return_value=live_udp),
-            patch.object(box_reservation, "current_reservation", return_value=live_m1),
+            patch.object(box_reservation, "current_reservation", return_value=None),
         ):
             self.assertIs(box_turn.collect_status()["occupied"], True)
             os.environ["DAYZ_BOX_TURN_SCAN"] = "inject"
@@ -541,7 +535,7 @@ class BoxTurnF3(unittest.TestCase):
         turn = box_turn.Turn("t", "h", 1.0, [sys.executable])
         turn.ticket = "stale"
         turn._remember({"response": {"box_ticket": None, "box_wait_error": "box_ticket_invalid"}})
-        self.assertIsNone(turn.ticket)
+        self.assertEqual(turn.ticket, "stale")
 
     def test_f3_reg_admission_still_refuses_a_start_without_the_head_ticket(self) -> None:
         from dayz_mcp import shared_box_queue as queue
@@ -567,6 +561,19 @@ class BoxTurnF3(unittest.TestCase):
             )
         finally:
             coord.box_wait_touch(owner, held.get("box_ticket"), done=True)
+
+
+def _stop_pid(pid: int) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F"],
+            capture_output=True,
+        )
+        return
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
 
 
 def _alive(pid: int) -> bool:

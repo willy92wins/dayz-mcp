@@ -1,0 +1,11 @@
+roundtrip_bone.seanim: DayZATool v1.3 output for synthetic data only, recorded once on the owner's PC on 2026-11-28.
+
+A synthetic SEAnim built with tools/tests/anim_fk_helpers.py (one bone "Bone", 3 frames at 30 fps, location keys
+(1, 2, 3) at frame 0 and (4, 5, 6) at frame 2, rotation keys identity at frame 0 and 45 degrees about Z at frame 2,
+one note "hit" at frame 1) went through "DayZATool.exe --generate-anim <file>.seanim 100" and the resulting .anm
+through "DayZATool.exe --extract-anim <file>.anm 100". Only the extracted .seanim is kept (104 bytes). It holds
+no byte of any Bohemia Interactive file, and the intermediate .anm is not committed.
+
+What DayZATool wrote: version 1, header size 28, anim type 0, presence flags 0x03 (location and rotation),
+property flags 0, 30 fps, 3 frames, 1 bone, no notes (the round trip dropped the note), the same location keys and
+the rotation key (0, 0, 0.38268, 0.92387) at frame 2.

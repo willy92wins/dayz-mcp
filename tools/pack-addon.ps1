@@ -485,7 +485,7 @@ $builder = Resolve-AddonBuilder -Explicit $ToolsPath
 # It is derived from the resolved builder, whichever origin found it
 # (-ToolsPath, DAYZ_TOOLS_PATH or the default Steam path).
 $toolsRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $builder))
-$temp = Join-Path $env:TEMP "dayz-pack-$ModName"
+$temp = Join-Path $env:TEMP ("dayz-pack-$ModName-" + [guid]::NewGuid().ToString('N'))
 if (-not (Test-Path -LiteralPath $Destination)) {
   New-Item -ItemType Directory -Force -Path $Destination | Out-Null
 }
@@ -547,8 +547,15 @@ Write-Host "  destination: $Destination"
 $pboPath = Join-Path $Destination "$ModName.pbo"
 $stampBefore = try { (Get-Item -LiteralPath $pboPath -ErrorAction Stop).LastWriteTimeUtc } catch { [datetime]::MinValue }
 
-$previousPreference = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
+# A shared dayz-pack-<mod> folder mixed files from an earlier build of another
+# tree into the PBO, because AddonBuilder empties that folder only with -clear.
+# tools/dev/pbo_provenance.py caught it on 2026-11-19 and 2026-11-27.
+$cleanupTemp = $false
+try {
+  New-Item -ItemType Directory -Path $temp | Out-Null
+  $cleanupTemp = $true
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
 $builderLines = @()
 try { & $builder @args 2>&1 | Tee-Object -Variable builderLines | Out-Host } finally { $ErrorActionPreference = $previousPreference }
 if ($LASTEXITCODE -ne 0) { throw "AddonBuilder failed with exit code $LASTEXITCODE" }
@@ -592,9 +599,19 @@ if (Test-Path -LiteralPath $built) {
     }
     if ($why) {
       $stamp = try { (Get-Item -LiteralPath $pbo -ErrorAction Stop).LastWriteTime } catch { "unreadable" }
+      # The unique AddonBuilder temp folder is removed in finally. Move the
+      # fresh PBO to a persistent path under %TEMP% first, so the error names
+      # a file that still exists after this script exits.
+      $kept = Join-Path $env:TEMP ("dayz-pack-$ModName-undelivered-" + [guid]::NewGuid().ToString('N') + ".pbo")
+      try {
+        Move-Item -LiteralPath $built -Destination $kept -Force -ErrorAction Stop
+      } catch {
+        $kept = $built
+        $cleanupTemp = $false
+      }
       throw ("The PBO was BUILT but never reached the game -- the game keeps loading the old one, " +
              "and every in-game test measures that.`n" +
-             "  built      : $built`n" +
+             "  built      : $kept`n" +
              "  destination: $pbo (still $stamp)`n" +
              "  reason     : $why`n" +
              "Close every DayZ that has $ModName loaded, then copy the built file over the destination.")
@@ -615,6 +632,18 @@ if (Test-Path -LiteralPath $built) {
   }
   Write-Host ("  verified   : destination written by this build ($($stampAfter.ToString('yyyy-MM-dd HH:mm:ss')) UTC, " +
               "$((Get-FileHash -LiteralPath $pbo -Algorithm SHA256).Hash.Substring(0, 16)))")
+}
+} finally {
+  # A failed remove must not hide a good build or replace the error of a bad one.
+  # Arm cleanup only after New-Item created this folder, so a GUID collision
+  # does not delete a directory we did not create.
+  if ($cleanupTemp) {
+    try {
+      Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction Stop
+    } catch {
+      Write-Warning -WarningAction Continue ("Could not remove AddonBuilder temp folder '$temp': " + $_.Exception.Message)
+    }
+  }
 }
 
 "{0}  ({1:N0} bytes)" -f $pbo, (Get-Item -LiteralPath $pbo).Length
