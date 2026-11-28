@@ -456,6 +456,16 @@ class ServerCatalogLoadingTest(unittest.IsolatedAsyncioTestCase):
         (root / "broken" / "references" / "blob.bin").write_bytes(b"\x00\x01")
         return root
 
+    def test_an_unreadable_skills_folder_degrades_the_same_way(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch.object(
+            skills_catalog.SkillCatalog, "load", side_effect=PermissionError("denied")
+        ):
+            with contextlib.redirect_stderr(stderr):
+                catalog = skills_catalog.load_or_empty()
+        self.assertEqual(catalog.list_entries(), [])
+        self.assertIn("warning", stderr.getvalue())
+
     async def test_an_invalid_skills_folder_degrades_to_an_empty_catalog_with_a_warning(self) -> None:
         root = self._bad_root()
         stderr = io.StringIO()

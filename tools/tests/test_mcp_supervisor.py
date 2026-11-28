@@ -967,6 +967,19 @@ class IdleRetirementTest(SupervisorTestBase):
         self.assertTrue(self.supervisor.park_if_idle())
         self.assertTrue(second.stdin_closed.is_set())
 
+    def test_a_modern_reload_does_not_wake_a_parked_worker(self) -> None:
+        self.start()
+        self._handshake()
+        self.ahead_s += 60.0
+        self.assertTrue(self.supervisor.park_if_idle())
+        self.supervisor.handle_host_line(_reload(11, {_VERSION_KEY: "2026-07-28"}))
+        message = self.host.wait_for(lambda m: m.get("id") == 11)
+        self.assertEqual(result_text(message)["error"], "modern_protocol_unsupported")
+        self.assertEqual(len(self.workers), 1, "refusing must not start a worker")
+        # still parked: the next ordinary line is what starts one
+        self.supervisor.handle_host_line(self._call(12))
+        self.assertEqual(len(self.workers), 2)
+
     def test_a_call_in_flight_keeps_the_worker_and_idle_counts_from_its_answer(self) -> None:
         worker = self.start()
         self._handshake()
@@ -1413,6 +1426,42 @@ class ModernReloadTest(SupervisorTestBase):
         self.supervisor.handle_host_line(reload_call(8))
         message = self.host.wait_for(lambda m: m.get("id") == 8)
         self.assertEqual(result_text(message)["status"], "recycled")
+
+
+class InvalidIdAnswerTest(SupervisorTestBase):
+    def test_an_invalid_request_error_does_not_end_a_pending_id_zero(self) -> None:
+        worker = self.start()
+        self.handshake()
+        self.supervisor.handle_host_line(
+            b'{"jsonrpc":"2.0","id":0,"method":"tools/call","params":{"name":"ping"}}\n'
+        )
+        worker.wait_for_sent(lambda m: m.get("id") == 0)
+        sentinel = "dayz-mcp:invalid-request-id:1"
+        worker.push_raw(
+            (json.dumps({"jsonrpc": "2.0", "id": sentinel,
+                         "error": {"code": -32600, "message": "Invalid Request"}}) + "\n").encode()
+        )
+        self.host.wait_for(lambda m: m.get("id") == sentinel)
+        self.assertIn(0, self.supervisor._current.inflight, "the pending 0 must survive")
+        worker.answer(0, {"ok": True})
+        self.host.wait_for(lambda m: m.get("id") == 0 and "result" in m)
+        self.assertNotIn(0, self.supervisor._current.inflight)
+        zero_answers = [
+            m for m in map(json.loads, self.host.lines) if m.get("id") == 0 and "id" in m
+            and not isinstance(m["id"], str)
+        ]
+        self.assertEqual(len(zero_answers), 1, zero_answers)
+
+    def test_an_id_that_is_a_list_or_object_is_forwarded_not_tracked(self) -> None:
+        worker = self.start()
+        for ident in ([], {}):
+            self.supervisor.handle_host_line(
+                (json.dumps({"jsonrpc": "2.0", "id": ident, "method": "tools/call",
+                             "params": {"name": "ping"}}) + "\n").encode()
+            )
+        worker.wait_for_sent(lambda m: m.get("id") == [])
+        worker.wait_for_sent(lambda m: m.get("id") == {})
+        self.assertEqual(self.supervisor._current.inflight, {})
 
 
 if __name__ == "__main__":

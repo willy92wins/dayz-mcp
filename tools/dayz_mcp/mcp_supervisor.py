@@ -811,11 +811,48 @@ class Supervisor:
             self._routing += 1
         try:
             if parked:
+                # A modern reload is refused whatever the worker's state: do not start
+                # one only to refuse it.
+                if self._refused_modern_reload(raw):
+                    return
                 self._wake()
             self._route_host_line(raw)
         finally:
             with self._state:
                 self._routing -= 1
+
+    @staticmethod
+    def _is_modern_reload(message: dict) -> bool:
+        params = message.get("params")
+        if message.get("method") != "tools/call" or not isinstance(params, dict):
+            return False
+        if params.get("name") != RELOAD_TOOL_NAME:
+            return False
+        meta = params.get("_meta")
+        return isinstance(meta, dict) and _MODERN_PROTOCOL_VERSION_KEY in meta
+
+    def _reply_modern_reload_unsupported(self, ident: object) -> None:
+        self._reply(
+            ident,
+            {
+                "error": "modern_protocol_unsupported",
+                "hint": (
+                    "server_reload needs a client that sent initialize; "
+                    "restart the server process instead."
+                ),
+            },
+            is_error=True,
+        )
+
+    def _refused_modern_reload(self, raw: bytes) -> bool:
+        try:
+            message = json.loads(raw)
+        except ValueError:
+            return False
+        if not isinstance(message, dict) or not self._is_modern_reload(message):
+            return False
+        self._reply_modern_reload_unsupported(message.get("id"))
+        return True
 
     def _route_host_line(self, raw: bytes) -> None:
         with self._state:
@@ -833,6 +870,11 @@ class Supervisor:
 
         method = message.get("method")
         ident = message.get("id")
+        if isinstance(ident, (list, dict)):
+            # Not a usable id (and not hashable): the worker answers it. Nothing here
+            # may track it.
+            self._send_worker(generation, raw)
+            return
 
         if method == "initialize":
             self._initialize_line = raw
@@ -851,19 +893,8 @@ class Supervisor:
             and isinstance(params, dict)
             and params.get("name") == RELOAD_TOOL_NAME
         ):
-            meta = params.get("_meta")
-            if isinstance(meta, dict) and _MODERN_PROTOCOL_VERSION_KEY in meta:
-                self._reply(
-                    ident,
-                    {
-                        "error": "modern_protocol_unsupported",
-                        "hint": (
-                            "server_reload needs a client that sent initialize; "
-                            "restart the server process instead."
-                        ),
-                    },
-                    is_error=True,
-                )
+            if self._is_modern_reload(message):
+                self._reply_modern_reload_unsupported(ident)
                 return
             if self._reserve_recycle(ident):
                 try:

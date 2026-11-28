@@ -446,8 +446,80 @@ class MalformedInputTest(_Base):
                         error = await self._error_for_bad_line(wire)
                     self.assertEqual(good["result"]["skills"], self.catalog.list_entries())
                     self.assertEqual(error["error"]["code"], -32600)
-                    # The SDK cannot encode a null id, so an unusable id is answered with 0.
-                    self.assertEqual(error["id"], 0)
+                    # Never a number: a valid call with that number may still be pending.
+                    self.assertIsInstance(error["id"], str)
+                    self.assertTrue(error["id"].startswith("dayz-mcp:invalid-request-id:"))
+
+    async def test_an_invalid_id_error_never_uses_the_id_of_a_pending_call(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        @self.app.tool()
+        async def slow() -> str:
+            """Block until released."""
+            started.set()
+            await release.wait()
+            return "done"
+
+        async with self.wire() as wire:
+            await wire._send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "method": "tools/call",
+                    "params": {"name": "slow", "arguments": {}, "_meta": dict(META)},
+                }
+            )
+            with anyio.fail_after(10):
+                await started.wait()
+            await wire._send(self._bad([], "skills/list"))
+            await wire._send(self._bad({}, "tools/list"))
+            first = await self._error_for_bad_line(wire)
+            self.assertEqual(first["error"]["code"], -32600)
+            self.assertIsInstance(first["id"], str)
+            await wire.call("skills/list")  # the second bad line was handled before this
+            errors = [m for m in wire.other if "error" in m]
+            self.assertEqual(len(errors), 2, wire.other)
+            self.assertEqual(len({m["id"] for m in errors}), 2, "each error gets its own id")
+            self.assertEqual(
+                [m for m in wire.other if m.get("id") == 0 and not isinstance(m["id"], str)],
+                [],
+                "nothing may answer id 0 before its own result",
+            )
+            release.set()
+            result = await wire.finish(0)
+            self.assertIn("result", result)
+            self.assertEqual(result["result"]["content"][0]["text"], "done")
+            self.assertEqual([m for m in wire.other if m.get("id") == 0], [])
+
+    async def test_a_legacy_initialize_refused_with_an_invalid_id_does_not_answer_as_zero(self) -> None:
+        async with self.wire() as wire:
+            await wire.call("tools/list")  # the modern era is now on this pipe
+            await wire._send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": [],
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": LEGACY,
+                        "capabilities": {},
+                        "clientInfo": {"name": "x", "version": "1"},
+                    },
+                }
+            )
+            error = await self._error_for_bad_line(wire)
+        self.assertEqual(error["error"]["code"], -32600)
+        self.assertIsInstance(error["id"], str)
+
+    async def test_a_result_that_cannot_be_serialized_is_answered_as_internal_error(self) -> None:
+        # The SDK writer serializes after the front; an unserializable result used to end
+        # the whole process there.
+        with mock.patch.object(self.catalog, "list_entries", return_value=[{"uri": object()}]):
+            async with self.wire() as wire:
+                failed = await wire.call("skills/list")
+                after = await wire.call("tools/list")
+        self.assertEqual(failed["error"]["code"], -32603)
+        self.assertIn("result", after)
 
     async def test_an_exception_in_a_local_skills_handler_is_answered_as_internal_error(self) -> None:
         cases = (
@@ -607,10 +679,46 @@ class SubprocessStdioTest(unittest.TestCase):
         out = [json.loads(line) for line in done.stdout.decode().splitlines() if line.strip()]
         errors = [item for item in out if "error" in item]
         self.assertEqual(sorted(item["error"]["code"] for item in errors), [-32600, -32600])
+        self.assertTrue(all(isinstance(item["id"], str) for item in errors), errors)
         good = [item for item in out if item.get("id") == 2]
         self.assertEqual(len(good), 1)
         self.assertTrue(good[0]["result"]["skills"])
         self.assertNotIn(b"Traceback", done.stderr)
+
+
+    @slow_test
+    def test_an_unserializable_result_does_not_end_the_real_stdio_process(self) -> None:
+        script = textwrap.dedent(
+            """
+            import anyio
+            from mcp.server.fastmcp import FastMCP
+            from dayz_mcp import dual_era, skills_catalog
+
+            catalog = skills_catalog.SkillCatalog.load()
+            app = FastMCP("sub", instructions="x")
+            skills_catalog.install(app, catalog)
+            catalog.list_entries = lambda: [{"uri": object()}]
+            anyio.run(dual_era.run_stdio, app, catalog)
+            """
+        )
+        meta = json.dumps({"_meta": dict(META)})
+        lines = [
+            '{"jsonrpc":"2.0","id":1,"method":"skills/list","params":%s}' % meta,
+            '{"jsonrpc":"2.0","id":2,"method":"server/discover","params":%s}' % meta,
+        ]
+        env = dict(os.environ, PYTHONPATH=str(self.TOOLS_DIR), PYTHONDONTWRITEBYTECODE="1")
+        done = subprocess.run(
+            [sys.executable, "-B", "-c", script],
+            input=("\n".join(lines) + "\n").encode(),
+            capture_output=True,
+            timeout=60,
+            cwd=self.TOOLS_DIR,
+            env=env,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr.decode(errors="replace")[-2000:])
+        out = {item["id"]: item for item in map(json.loads, done.stdout.decode().splitlines()) if "id" in item}
+        self.assertEqual(out[1]["error"]["code"], -32603)
+        self.assertIn("result", out[2])
 
 
 class LegacyEraTest(_Base):

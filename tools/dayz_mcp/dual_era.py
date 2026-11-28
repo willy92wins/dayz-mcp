@@ -56,6 +56,10 @@ _MODERN_ALLOWED_SERVER_NOTIFICATIONS = frozenset(
 )
 _FRONT_CACHE_TTL_MS = 300_000
 _SYNTHETIC_INIT_ID = "__dayz_mcp_dual_era_init__"
+# JSON-RPC wants a null id for a request whose id cannot be read, but the pinned SDK
+# cannot encode one and answering with a real number (0) can collide with a valid
+# call that is still pending. Such errors carry a unique string that no client sent.
+_INVALID_ID_PREFIX = "dayz-mcp:invalid-request-id:"
 
 
 def is_modern(message: Any) -> bool:
@@ -238,13 +242,29 @@ async def serve(
         legacy_initialized = False
         client_eof = False
         pending_modern: dict[tuple[type, Any], str] = {}
+        invalid_id_count = 0
 
-        async def send_client(message: SessionMessage) -> None:
+        def next_invalid_id() -> str:
+            nonlocal invalid_id_count
+            while True:
+                invalid_id_count += 1
+                candidate = f"{_INVALID_ID_PREFIX}{invalid_id_count}"
+                if _id_key(candidate) not in pending_modern:
+                    return candidate
+
+        async def send_client(message: SessionMessage, *, check: bool = False) -> None:
+            if check:
+                # The SDK writer serializes later and dies on what it cannot serialize,
+                # which would end the whole process: fail this one answer instead.
+                message.message.model_dump_json(by_alias=True, exclude_none=True)
             try:
                 async with write_lock:
                     await write_stream.send(message)
             except (anyio.ClosedResourceError, anyio.BrokenResourceError) as exc:
                 raise _ClientGoneError() from exc
+
+        async def send_checked(message: SessionMessage) -> None:
+            await send_client(message, check=True)
 
         async def try_send_error(
             request_id: str | int,
@@ -323,7 +343,8 @@ async def serve(
                             if method is not None:
                                 if "result" in raw and isinstance(raw["result"], dict):
                                     shaped = modern_result(method, raw["result"])
-                                    await send_client(_result_message(msg_id, shaped))
+                                    await send_checked(
+                                        _result_message(msg_id, shaped))
                                 else:
                                     await send_client(item)
                                 continue
@@ -396,7 +417,8 @@ async def serve(
                 return
 
             if method == "server/discover":
-                await send_client(_result_message(request_id, _discover_result(app, init_options)))
+                await send_checked(
+                    _result_message(request_id, _discover_result(app, init_options)))
                 return
 
             if method == "skills/list":
@@ -406,7 +428,7 @@ async def serve(
                         _error_message(request_id, -32602, "Invalid params: unknown cursor")
                     )
                     return
-                await send_client(
+                await send_checked(
                     _result_message(
                         request_id,
                         {
@@ -435,7 +457,7 @@ async def serve(
                         _error_message(request_id, -32602, f"Unknown skill uri: {uri}")
                     )
                     return
-                await send_client(
+                await send_checked(
                     _result_message(
                         request_id,
                         {
@@ -460,7 +482,7 @@ async def serve(
                             )
                         )
                         return
-                    await send_client(
+                    await send_checked(
                         _result_message(
                             request_id,
                             {
@@ -521,9 +543,11 @@ async def serve(
                                     request_id = raw_all["id"]
                             if has_id:
                                 if not _is_valid_request_id(request_id):
-                                    # mcp==1.27.2 JSONRPCError cannot encode a null id,
-                                    # so answer invalid ids with 0 and do not bridge them.
-                                    if not await try_send_error(0, -32600, "Invalid Request"):
+                                    # Not bridged. The answer carries a unique string id,
+                                    # never a number a pending call could own.
+                                    if not await try_send_error(
+                                        next_invalid_id(), -32600, "Invalid Request"
+                                    ):
                                         task_group.cancel_scope.cancel()
                                         return
                                     continue
@@ -548,7 +572,7 @@ async def serve(
                         method = raw.get("method")
                         if method == "initialize" and "id" in raw:
                             if synthetic_initialized:
-                                reply_id = raw["id"] if _is_valid_request_id(raw["id"]) else 0
+                                reply_id = raw["id"] if _is_valid_request_id(raw["id"]) else next_invalid_id()
                                 await send_client(
                                     _error_message(
                                         reply_id,

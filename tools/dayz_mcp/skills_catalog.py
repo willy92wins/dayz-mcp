@@ -349,12 +349,12 @@ class SkillCatalog:
 
 
 def load_or_empty(root: str | Path | None = None) -> SkillCatalog:
-    """Load the catalog, degrading to an empty catalog with a stderr warning on SkillError."""
+    """Load the catalog, degrading to an empty catalog with a stderr warning on SkillError or an unreadable folder."""
     try:
         return SkillCatalog.load(root)
-    except SkillError as exc:
+    except (SkillError, OSError, UnicodeError) as exc:
         print(
-            f"[dayz-mcp] warning: skills catalog disabled ({exc})",
+            f"[dayz-mcp] warning: skills catalog disabled ({type(exc).__name__}: {exc})",
             file=sys.stderr,
             flush=True,
         )
