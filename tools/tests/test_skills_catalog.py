@@ -307,6 +307,34 @@ class ShippedSkillsTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(entry["resources"][0]["size"], 6000)
         self.assertEqual(entry["resources"][0]["uri"], self.SKILL_URI)
 
+    def test_wheel_staging_ships_every_skill_file_byte_for_byte(self) -> None:
+        # stage_wheel_tree copies the package by hand; the package-data globs only work on
+        # what it stages, so a skill left out of the stage is missing from the release wheel.
+        import build_wheel
+
+        tools = REPO_ROOT / "tools"
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = Path(tmp) / "stage"
+            build_wheel.stage_wheel_tree(tools, REPO_ROOT / "playbooks", stage, b"{}")
+            src = tools / "dayz_mcp" / "skills"
+            dst = stage / "dayz_mcp" / "skills"
+            wanted = {
+                path.relative_to(src): path.read_bytes()
+                for path in src.rglob("*")
+                if path.is_file() and "__pycache__" not in path.parts
+            }
+            self.assertTrue(wanted)
+            got = {
+                path.relative_to(dst): path.read_bytes()
+                for path in dst.rglob("*")
+                if path.is_file()
+            } if dst.is_dir() else {}
+            self.assertEqual(got, wanted)
+            # and a catalog loaded from the staged tree serves the same skills
+            staged = skills_catalog.SkillCatalog.load(dst)
+            shipped = skills_catalog.SkillCatalog.load(src)
+            self.assertEqual(staged.list_entries(), shipped.list_entries())
+
     def test_relative_references_resolve_inside_the_manifest(self) -> None:
         text = self.catalog.read(self.SKILL_URI)[0].decode("utf-8")
         listed = {item["uri"] for item in self.catalog.get_entry(self.SKILL_URI)["resources"]}

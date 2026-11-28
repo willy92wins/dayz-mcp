@@ -5,7 +5,7 @@ description: "Use when starting, reattaching, stopping, or closing a DayZ test r
 
 # DayZ Test Run Protocol
 
-Follow this sequence whenever you launch, adopt, stop, or hand off a DayZ test run on the shared box. Read references/box-queue.md before retrying a busy box or interpreting `queue_offer` refusals.
+Follow this sequence whenever you launch, adopt, stop, or hand off a DayZ test run on the shared box. Read references/box-queue.md before retrying a busy box or interpreting `queue_offer` refusals. This protocol needs a tool pack that exposes `dayz_test_run`, `dayz_test_close` and `dayz_test_stop`; the `admin` pack does not, and calling them there returns `Unknown tool`, so report that instead of improvising.
 
 ## Standard Cycle
 
@@ -17,8 +17,8 @@ Follow this sequence whenever you launch, adopt, stop, or hand off a DayZ test r
    - `build=false` never builds even with `clean=true`; `pack_only=true` requires `build=true`.
    - `preflight=true` validates the request without taking the box; success is advisory and does not reserve the box.
 4. Adopt the ownerless `RUNNING_IDLE` run with `session_acquire_wait` (this grants your lease and reports `adopted_run`; with several idle runs it reports `multiple_idle_runs` and adopts none).
-5. Verify `bridge_status` reports `ready: true` before mutating tools. If not ready, read `reason`: `no_run`, `binding_not_ready`, `server_poll_stale`, or `version_mismatch`. For `mode="all"`, wait for a player with `wait_for(condition="players_at_least", value=1)`.
-6. Keep the lease alive across long pauses (TTL is 120 s; heartbeat every 45 s with `session_heartbeat`). Mutating bridge calls, `dayz_test_run`, `dayz_test_stop`, `session_heartbeat`, and `wait_for(file_matches)` renew; pure reads and `session_status` do not.
+5. Verify `bridge_status` reports `ready: true` before mutating tools. If not ready, read `reason` (for example `no_run`, `binding_not_ready`, `server_poll_stale` or `version_mismatch`; treat any other reason as not ready too). For `mode="all"`, wait for a player with `wait_for(condition="players_at_least", value=1)`.
+6. Keep the lease alive across long pauses (TTL is 120 s; heartbeat every 45 s with `session_heartbeat`). Mutating bridge calls, `dayz_test_run`, `dayz_test_stop`, `session_heartbeat`, and `wait_for(file_matches)` renew; pure reads and `session_status` do not. A heartbeat only extends a lease while there is real work or human input: after about 30 minutes of an idle run the renewal is refused and the lease lapses, so do not rely on heartbeats to hold an idle run.
 7. Shut down cleanly when done:
    - For orderly teardown and valid RPT exit metrics, call `dayz_test_close` while still holding the lease. If the reply carries `stop_required=true`, release the lease and fall back to `dayz_test_stop`.
    - For forced termination (or cancelling a `STARTING` launch), call `session_release` if holding a lease, then `dayz_test_stop(run_id)`. `dayz_test_stop` kills processes directly (`exit_metrics_valid` is false).
