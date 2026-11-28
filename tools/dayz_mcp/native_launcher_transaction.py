@@ -876,6 +876,30 @@ def _accredit_runtime_paths(
     )
 
 
+async def pin_start_ticket_after_grant(
+    control_client: object, ticket: str, lease_id: str
+) -> None:
+    """Bind T to the lease just granted. Fail closed; do not swallow errors."""
+
+    if not isinstance(ticket, str) or not ticket:
+        return
+    if not isinstance(lease_id, str) or not lease_id:
+        raise NativeLauncherTransactionError("box_ticket_pin_failed")
+    binder = getattr(control_client, "bind_next_start_ticket", None)
+    if not callable(binder):
+        raise NativeLauncherTransactionError("box_ticket_pin_failed")
+    try:
+        result = binder(ticket, operation_id=lease_id)
+        if hasattr(result, "__await__"):
+            await result
+    except NativeLauncherTransactionError:
+        raise
+    except TypeError as error:
+        raise NativeLauncherTransactionError("box_ticket_pin_failed") from error
+    except Exception as error:
+        raise NativeLauncherTransactionError("box_ticket_pin_failed") from error
+
+
 async def execute_native_launcher_transaction(
     raw_request: bytes,
     *,
@@ -890,6 +914,7 @@ async def execute_native_launcher_transaction(
         [float, float | None, str | None], Awaitable[None]
     ]
     | None = None,
+    box_ticket: str | None = None,
 ) -> int:
     if (
         type(sealed_policies) is not tuple
@@ -923,6 +948,15 @@ async def execute_native_launcher_transaction(
         )
         try:
             lease_token, lease_id, client_identity_json = _validate_grant(response)
+            ticket = box_ticket if isinstance(box_ticket, str) and box_ticket else None
+            if ticket is None:
+                pending = getattr(control_client, "pending_start_ticket", None)
+                if isinstance(pending, str) and pending:
+                    ticket = pending
+            if ticket is not None:
+                await pin_start_ticket_after_grant(
+                    control_client, ticket, lease_id
+                )
         except NativeLauncherTransactionError as error:
             recoverable_token = (
                 response.get("lease_token")

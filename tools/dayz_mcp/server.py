@@ -2890,13 +2890,20 @@ class ClientRuntime:
             self._control._session_call, "/session/status", payload
         )
 
-    async def bind_next_start_ticket(self, ticket: str) -> dict[str, Any]:
-        """Pin the exact ticket the next start of this operation must use."""
+    async def bind_next_start_ticket(
+        self, ticket: str, *, operation_id: object = None
+    ) -> dict[str, Any]:
+        """Pin the exact ticket to a granted lease. Fails closed without one."""
 
-        payload: dict[str, Any] = {"box_start_ticket": ticket}
-        lease_id = getattr(self._control, "active_lease_id", None)
-        if isinstance(lease_id, str) and lease_id:
-            payload["box_start_lease_id"] = lease_id
+        lease_id = operation_id or getattr(self._control, "active_lease_id", None)
+        if not isinstance(ticket, str) or not ticket:
+            raise ValueError("box_ticket_pin_failed")
+        if not isinstance(lease_id, str) or not lease_id:
+            raise ValueError("box_ticket_pin_failed")
+        payload: dict[str, Any] = {
+            "box_start_ticket": ticket,
+            "box_start_lease_id": lease_id,
+        }
         return await self._control_with_lazy_spawn(
             self._control._session_call,
             "/session/status",
@@ -7724,17 +7731,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async def execute(
             launch: dict[str, bool],
         ) -> tuple[dayz_test_tool.DayzTestToolError | None, dict[str, Any] | None]:
-            # The caller holds client.tool_lock. Pin T here, not before
-            # the lock, so a sister start in this session cannot take it.
-            if box_ticket:
-                try:
-                    bound = client.bind_next_start_ticket(box_ticket)
-                    if hasattr(bound, "__await__"):
-                        await bound
-                except AttributeError:
-                    pass
-                except Exception:
-                    pass
+            # The caller holds client.tool_lock. The ticket is pinned after
+            # session_acquire_wait, to the granted lease, before start_run.
             try:
                 with _typed_dayz_test_value_errors():
                     return None, await dayz_test_tool.execute_dayz_test_run(

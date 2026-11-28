@@ -2353,6 +2353,7 @@ async def _execute_request(
     client_dump_roots: list[str] | None = None,
     server_wait_s: int | None = None,
     focus: str = "keep",
+    box_ticket: str | None = None,
 ) -> dict[str, object]:
     stdout = bytearray()
     stderr = bytearray()
@@ -2412,17 +2413,24 @@ async def _execute_request(
         if len(target) <= 4096:
             target.extend(chunk[: 4097 - len(target)])
 
-    exit_code = await secure_launcher.execute_secure_launcher_request(
-        raw_request,
-        opened_launcher=opened_launcher,
-        verified_bundle=verified_bundle,
-        control_client=runtime,
-        daemon_policy=runtime.daemon_policy,
-        output_sink=capture,
-        max_wait_s=None,
-        queue_progress_cb=report_queued,
-        execution_started_cb=execution_started,
-    )
+    if isinstance(box_ticket, str) and box_ticket:
+        runtime.pending_start_ticket = box_ticket
+    else:
+        runtime.pending_start_ticket = None
+    try:
+        exit_code = await secure_launcher.execute_secure_launcher_request(
+            raw_request,
+            opened_launcher=opened_launcher,
+            verified_bundle=verified_bundle,
+            control_client=runtime,
+            daemon_policy=runtime.daemon_policy,
+            output_sink=capture,
+            max_wait_s=None,
+            queue_progress_cb=report_queued,
+            execution_started_cb=execution_started,
+        )
+    finally:
+        runtime.pending_start_ticket = None
     await report("finalizing", None)
     terminal = parse_worker_terminal(bytes(stdout), bytes(stderr), exit_code)
     _validate_terminal_context(
@@ -3598,6 +3606,7 @@ async def execute_dayz_test_run(
                 client_dump_roots=client_dump_roots,
                 server_wait_s=server_wait_s,
                 focus=focus,
+                box_ticket=box_ticket,
             )
             if display is not None and result.get("status") == "succeeded":
                 result["session_idle_s"] = display.session_idle_s

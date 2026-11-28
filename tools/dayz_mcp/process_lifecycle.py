@@ -5370,6 +5370,15 @@ class ProcessLifecycle:
                 return self._start_rejection(
                     client, authority, request_error or "invalid_start_request"
                 )
+            # Prefer an explicit ticket; otherwise copy the operation pin onto
+            # the start request so admit/bind do not depend on the pin lookup
+            # alone.
+            if not parsed.get("box_ticket"):
+                pinned = self.coordinator._bound_ticket(
+                    client, None, operation_id=authority[1]
+                )
+                if isinstance(pinned, str) and pinned:
+                    parsed["box_ticket"] = pinned
             executable = Path(parsed["argv"][0])
             canonical_error = self._canonical_error(executable)
             if canonical_error is not None:

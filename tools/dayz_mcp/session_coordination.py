@@ -2647,6 +2647,13 @@ class SessionCoordinator:
                 found.add(item[1])
         return found
 
+    def _clear_start_pin_locked(self, lease: object) -> None:
+        client = getattr(lease, "client", None)
+        lease_id = getattr(lease, "lease_id", None)
+        key = self._start_pin_key(client, lease_id) if client is not None else None
+        if key is not None:
+            self._box_next_start_ticket.pop(key, None)
+
     @staticmethod
     def _start_pin_key(
         client: ClientIdentity, operation_id: object
@@ -3211,6 +3218,7 @@ class SessionCoordinator:
             attached_at_expiry = self._probe_attached_run_locked(lease)
         self._active = None
         self._releasing = lease
+        self._clear_start_pin_locked(lease)
         self._open_lease_end_round_locked(lease)
         round_id = (
             self._lease_end_round.round_id
