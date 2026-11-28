@@ -3741,7 +3741,7 @@ class MCPBridge : Managed
 
 	protected bool DispatchVehiclePrepareFixture(MCPCommand command, MCPResult result)
 	{
-		// F3.2: classname is free; CarScript.Cast below rejects non-vehicles.
+		// F3.2: classname is free; the casts below accept a CarScript or a MotorbikeScript.
 		if (!command.args || command.args.mode != "object_at" || command.args.type == "" || !command.args.pos || command.args.pos.Count() != 3 || command.args.radius <= 0.0 || !IsFiniteFloat(command.args.radius))
 		{
 			result.ok = false;
@@ -3801,6 +3801,12 @@ class MCPBridge : Managed
 		CarScript car = CarScript.Cast(match);
 		if (!car)
 		{
+			MotorbikeScript bike = MotorbikeScript.Cast(match);
+			if (bike)
+			{
+				return DispatchMotorbikeFixture(command, result, telemetry, bike);
+			}
+
 			result.ok = false;
 			result.error = "fixture_not_vehicle";
 			result.telemetry = telemetry;
@@ -3832,6 +3838,38 @@ class MCPBridge : Managed
 		}
 
 		PopulateTelemetryObject(car, telemetry);
+		result.telemetry = telemetry;
+		result.vehicle_fixture_ready = true;
+		result.ok = true;
+		return true;
+	}
+
+	// fb-20261127-181405-b95f: the motorbike half of DispatchVehiclePrepareFixture,
+	// with the car's OnDebugSpawn and the same vehicle_fixture wait.
+	protected bool DispatchMotorbikeFixture(MCPCommand command, MCPResult result, MCPTelemetry telemetry, MotorbikeScript bike)
+	{
+		if (!IsMotorbikeFixtureReady(bike))
+		{
+			bike.OnDebugSpawn();
+		}
+
+		if (!IsMotorbikeFixtureReady(bike))
+		{
+			MCPJob job = new MCPJob();
+			job.id = command.id;
+			job.kind = "vehicle_fixture";
+			job.args = command.args;
+			job.subject = bike;
+			job.deadline_s = m_ElapsedS + VEHICLE_FIXTURE_WAIT_S;
+			job.tick_poll_sent = result.tick_poll_sent;
+			job.tick_poll_callback = result.tick_poll_callback;
+			job.tick_dispatch = result.tick_dispatch;
+			m_Jobs.Insert(job.id, job);
+			Log("job queued id=" + job.id + " kind=vehicle_fixture vehicle=motorbike deadline_s=" + job.deadline_s);
+			return false;
+		}
+
+		PopulateMotorbikeTelemetry(bike, telemetry);
 		result.telemetry = telemetry;
 		result.vehicle_fixture_ready = true;
 		result.ok = true;
@@ -8382,6 +8420,18 @@ class MCPBridge : Managed
 		}
 	}
 
+	// fb-20261127-181405-b95f: a fixture reply for a motorbike carries the vehicle
+	// fields PopulateTelemetryObject fills for a car; telemetry_read keeps its shape.
+	protected void PopulateMotorbikeTelemetry(MotorbikeScript bike, MCPTelemetry telemetry)
+	{
+		PopulateTelemetryObject(bike, telemetry);
+		telemetry.engine_on_server = bike.EngineIsOn();
+		telemetry.speedo = bike.GetSpeedometer();
+		telemetry.wheel_count = bike.WheelCountPresent();
+		telemetry.fuel_fraction = bike.GetFluidFraction(MotorbikeFluid.FUEL);
+		telemetry.lights_on_server = bike.LightIsOn();
+	}
+
 	protected void PopulateTelemetryInventory(EntityAI entity, MCPTelemetry telemetry)
 	{
 		GameInventory inventory = entity.GetInventory();
@@ -9040,6 +9090,11 @@ class MCPBridge : Managed
 		}
 		else if (job.kind == "vehicle_fixture")
 		{
+			if (MotorbikeScript.Cast(job.subject))
+			{
+				return IsMotorbikeFixtureReady(MotorbikeScript.Cast(job.subject));
+			}
+
 			return IsVehicleFixtureReady(CarScript.Cast(job.subject));
 		}
 
@@ -9177,6 +9232,46 @@ class MCPBridge : Managed
 		{
 			string sparkSlot = "SparkPlug";
 			if (!car.FindAttachmentBySlotName(sparkSlot))
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	// fb-20261127-181405-b95f: a motorbike is ready as vanilla's
+	// MotorbikeScript.CheckOperationalRequirements asks (fuel above 0, the spark
+	// plug when it is vital), plus every wheel on and the battery when it needs one.
+	protected bool IsMotorbikeFixtureReady(MotorbikeScript bike)
+	{
+		if (!bike)
+		{
+			return false;
+		}
+
+		if (bike.WheelCountPresent() != bike.WheelCount())
+		{
+			return false;
+		}
+
+		if (bike.GetFluidFraction(MotorbikeFluid.FUEL) <= 0.0)
+		{
+			return false;
+		}
+
+		if (bike.IsVitalSparkPlug())
+		{
+			string sparkSlot = "SparkPlug";
+			if (!bike.FindAttachmentBySlotName(sparkSlot))
+			{
+				return false;
+			}
+		}
+
+		if (bike.NeedElectricitySourceDevice())
+		{
+			if (!bike.GetElectricitySourceDevice())
 			{
 				return false;
 			}
@@ -9374,6 +9469,21 @@ class MCPBridge : Managed
 		CarScript car = CarScript.Cast(job.subject);
 		if (!car)
 		{
+			MotorbikeScript bike = MotorbikeScript.Cast(job.subject);
+			if (bike)
+			{
+				PopulateMotorbikeTelemetry(bike, telemetry);
+				result.vehicle_fixture_ready = ready;
+				result.ok = ready;
+				if (!ready)
+				{
+					result.error = "fixture_not_ready";
+				}
+
+				PostResult(result);
+				return;
+			}
+
 			telemetry.found = false;
 			result.ok = false;
 			result.error = "fixture_not_found";

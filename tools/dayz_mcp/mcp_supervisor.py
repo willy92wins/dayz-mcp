@@ -46,6 +46,11 @@ out (review F8 of #255). The session's identity crosses the gap as it crosses a
 recycle. The lease does not have to: only a call renews it (SESSION_TTL_S), and
 run_supervisor sets no idle timeout shorter than it lasts after the last one
 (server.MIN_IDLE_RETIREMENT_S), so it has run out before the worker is retired.
+
+A 2026-07-28 (modern stateless) client never sends ``initialize``, so a recycle cannot
+replay a handshake into a replacement worker; ``server_reload`` calls carrying
+``params._meta["io.modelcontextprotocol/protocolVersion"]`` are therefore refused with
+``modern_protocol_unsupported`` before any reservation, drain, retirement, or spawn.
 """
 
 from __future__ import annotations
@@ -74,6 +79,7 @@ def _is_observe_id(ident: object) -> bool:
     return isinstance(ident, str) and ident.startswith(_OBSERVE_PREFIX)
 
 RELOAD_TOOL_NAME = "server_reload"
+_MODERN_PROTOCOL_VERSION_KEY = "io.modelcontextprotocol/protocolVersion"
 RELOAD_TOOL = {
     "name": RELOAD_TOOL_NAME,
     "description": (
@@ -805,11 +811,48 @@ class Supervisor:
             self._routing += 1
         try:
             if parked:
+                # A modern reload is refused whatever the worker's state: do not start
+                # one only to refuse it.
+                if self._refused_modern_reload(raw):
+                    return
                 self._wake()
             self._route_host_line(raw)
         finally:
             with self._state:
                 self._routing -= 1
+
+    @staticmethod
+    def _is_modern_reload(message: dict) -> bool:
+        params = message.get("params")
+        if message.get("method") != "tools/call" or not isinstance(params, dict):
+            return False
+        if params.get("name") != RELOAD_TOOL_NAME:
+            return False
+        meta = params.get("_meta")
+        return isinstance(meta, dict) and _MODERN_PROTOCOL_VERSION_KEY in meta
+
+    def _reply_modern_reload_unsupported(self, ident: object) -> None:
+        self._reply(
+            ident,
+            {
+                "error": "modern_protocol_unsupported",
+                "hint": (
+                    "server_reload needs a client that sent initialize; "
+                    "restart the server process instead."
+                ),
+            },
+            is_error=True,
+        )
+
+    def _refused_modern_reload(self, raw: bytes) -> bool:
+        try:
+            message = json.loads(raw)
+        except ValueError:
+            return False
+        if not isinstance(message, dict) or not self._is_modern_reload(message):
+            return False
+        self._reply_modern_reload_unsupported(message.get("id"))
+        return True
 
     def _route_host_line(self, raw: bytes) -> None:
         with self._state:
@@ -827,6 +870,13 @@ class Supervisor:
 
         method = message.get("method")
         ident = message.get("id")
+        if ident is not None and not (
+            isinstance(ident, (str, int)) and not isinstance(ident, bool)
+        ):
+            # Not a usable id (a list or object is not even hashable): the worker answers
+            # it under a sentinel id. Nothing here may track it.
+            self._send_worker(generation, raw)
+            return
 
         if method == "initialize":
             self._initialize_line = raw
@@ -845,6 +895,9 @@ class Supervisor:
             and isinstance(params, dict)
             and params.get("name") == RELOAD_TOOL_NAME
         ):
+            if self._is_modern_reload(message):
+                self._reply_modern_reload_unsupported(ident)
+                return
             if self._reserve_recycle(ident):
                 try:
                     threading.Thread(

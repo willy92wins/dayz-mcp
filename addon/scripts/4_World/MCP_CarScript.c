@@ -2,6 +2,7 @@ class MCPCarDrive
 {
 	static bool s_Active;
 	static CarScript s_Car;
+	static MotorbikeScript s_Bike;
 	static float s_Throttle;
 	static float s_Steer;
 	static float s_Brake;
@@ -35,7 +36,34 @@ class MCPCarDrive
 			s_Car.SetBrakesActivateWithoutDriver(true);
 		}
 
+		s_Bike = null;
 		s_Car = car;
+		s_Throttle = throttle;
+		s_Steer = steer;
+		s_Brake = brake;
+		s_Handbrake = handbrake;
+		s_DeadlineS = deadlineS;
+		s_Active = true;
+	}
+
+	static void SetMotorbike(MotorbikeScript bike, float throttle, float steer, float brake, float handbrake, float deadlineS)
+	{
+		// A new drive, a different motorbike or a lapsed deadline starts
+		// without the settle stamp of the previous drive.
+		if (!s_Active || s_Bike != bike || GetGame().GetTickTime() > s_DeadlineS)
+		{
+			s_LastAutoShiftS = -1.0;
+		}
+
+		// A motorbike taking over leaves the previous car driverless: give
+		// it back the driverless brake OnInput turned off, then drop it.
+		if (s_Car)
+		{
+			s_Car.SetBrakesActivateWithoutDriver(true);
+			s_Car = null;
+		}
+
+		s_Bike = bike;
 		s_Throttle = throttle;
 		s_Steer = steer;
 		s_Brake = brake;
@@ -57,6 +85,7 @@ class MCPCarDrive
 
 		s_Active = false;
 		s_Car = null;
+		s_Bike = null;
 		s_TickEngineReady = false;
 		s_TickThrottleSet = false;
 		s_LastAutoShiftS = -1.0;

@@ -2719,8 +2719,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		string mode = "";
 		string carError = "";
+		MotorbikeScript bike = null;
 		CarScript car = ResolveOwnedCar(carError);
-		if (!car)
+		if (!car && carError == "not_a_car")
+		{
+			bike = ResolveOwnedMotorbike(carError);
+		}
+
+		if (!car && !bike)
 		{
 			result.ok = false;
 			result.error = carError;
@@ -2734,16 +2740,37 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		if (mode == "start")
 		{
-			car.EngineStart();
+			if (car)
+			{
+				car.EngineStart();
+			}
+			else
+			{
+				bike.EngineStart();
+			}
 		}
 		else if (mode == "stop")
 		{
-			car.EngineStop();
+			if (car)
+			{
+				car.EngineStop();
+			}
+			else
+			{
+				bike.EngineStop();
+			}
 		}
 		else
 		{
 			result.ok = false;
 			result.error = "bad_mode";
+			return true;
+		}
+
+		if (!car)
+		{
+			result.engine_on_server = bike.EngineIsOn();
+			result.ok = true;
 			return true;
 		}
 
@@ -2756,6 +2783,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		MCPArgs args;
 		CarScript car;
+		MotorbikeScript bike = null;
 		string carError = "";
 		float throttle = 0.0;
 		float steer = 0.0;
@@ -2806,7 +2834,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		car = ResolveOwnedCar(carError);
-		if (!car)
+		if (!car && carError == "not_a_car")
+		{
+			bike = ResolveOwnedMotorbike(carError);
+		}
+
+		if (!car && !bike)
 		{
 			result.ok = false;
 			result.error = carError;
@@ -2817,6 +2850,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (holdTtl > 0.0 && holdTtl <= VEHICLE_CONTROL_MAX_TTL_S && IsFiniteFloat(holdTtl))
 		{
 			ttl = holdTtl;
+		}
+
+		if (!car)
+		{
+			MCPCarDrive.SetMotorbike(bike, throttle, steer, brake, handbrake, GetGame().GetTickTime() + ttl);
+			result.engine_on_server = bike.EngineIsOn();
+			result.ok = true;
+			return true;
 		}
 
 		MCPCarDrive.Set(car, throttle, steer, brake, handbrake, GetGame().GetTickTime() + ttl);
@@ -6378,6 +6419,51 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		return car;
+	}
+
+	// fb-20261127-181405-b95f: the motorbike counterpart of ResolveOwnedCar, with
+	// the same refusal codes in the same order. A motorbike reads
+	// VEHICLESEAT_DRIVER for every seat (MotorbikeScript.GetSeatAnimationType,
+	// motorbikescript.c:449-452) and its config marks both crew positions as
+	// drivers, so the driver is crew position 0 (Transport.CrewMemberIndex,
+	// transport.c:186), the config's Driver class.
+	protected MotorbikeScript ResolveOwnedMotorbike(out string error)
+	{
+		error = "";
+		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!player)
+		{
+			error = "not_seated";
+			return null;
+		}
+
+		HumanCommandVehicle vehicleCommand = player.GetCommand_Vehicle();
+		if (!vehicleCommand)
+		{
+			error = "not_seated";
+			return null;
+		}
+
+		MotorbikeScript bike = MotorbikeScript.Cast(vehicleCommand.GetTransport());
+		if (!bike)
+		{
+			error = "not_a_car";
+			return null;
+		}
+
+		if (bike.CrewMemberIndex(player) != 0)
+		{
+			error = "not_driver";
+			return null;
+		}
+
+		if (!bike.IsOwner())
+		{
+			error = "not_owner";
+			return null;
+		}
+
+		return bike;
 	}
 
 	protected bool ProcessVehicleGetInClientJob(MCPJob job)
