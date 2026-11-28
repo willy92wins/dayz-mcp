@@ -21,7 +21,7 @@ Mejora planificada (run compartido con stack unión, cola para el recurso run, z
 
 ## La caja está ocupada: ponte en la cola (regla de bolsillo)
 
-1. La caja de DayZ es una por máquina. Mira `session_status()` → `box.occupied` (y `box.foreign_holder`, que nombra la instancia, el titular y el propósito del otro). Un daemon o un arnés que solo escucha en otro puerto (por ejemplo el 8797) **no** ocupa la caja. Sin un DayZ vivo la caja **no** está libre si existe `C:\tmp\caja-dayz\m1.espera`: ese fichero nunca caduca solo, y ocupa la caja hasta que una persona lo quite a mano.
+1. La caja de DayZ es una por máquina. Mira `session_status()` → `box.occupied` (y `box.foreign_holder`, que nombra la instancia, el titular y el propósito del otro). Un daemon o un arnés que solo escucha en otro puerto (por ejemplo el 8797) **no** ocupa la caja. Sin un DayZ vivo la caja **no** está libre si existe `C:\tmp\caja-dayz\m1.espera`: ese fichero nunca caduca solo, y ocupa la caja hasta que una persona lo quite a mano. Fuera del MCP, `python -m dayz_mcp.box_turn run --purpose ... -- ...`.
 2. Si está ocupada, llama a `dayz_test_run(..., on_busy="queue")` y espera tu turno. No sondees buscando un hueco: los relevos por la cola no dejan hueco libre.
 3. Nunca mates un DayZ, nunca cierres un arnés, una sesión o un daemon ajeno y nunca borres `C:\tmp\caja-dayz\m1.espera`. Tampoco preguntes a Guillermo si cerrar lo de otro: esperar en la cola es la respuesta, salvo que el rechazo sea terminal (paso 5).
 4. Si te para `run_protected` o `m1.espera`, espera en la cola solo cuando el rechazo sea contención (paso 5). Un run abandonado lo cierra el vigilante (`idle_warden`), que viene encendido por defecto. `m1.espera` no lo quita nadie automático: nunca caduca. Un `reason="box_reserved"` con `queue_offer` nulo (por ejemplo `m1.espera` y el puerto aún retenido) es terminal: no reencoles.
@@ -39,7 +39,7 @@ Mejora planificada (run compartido con stack unión, cola para el recurso run, z
 
 6. El lease hace falta para mutar en el juego y para el lifecycle low-level (adopt/reap u otra operación no cubierta por `dayz_test_run` / `dayz_test_stop`). Para parar un run, parar vía lifecycle guard con el `run_id` exacto (`dayz_test_stop(run_id)` en un run gestionado). Suéltalo al acabar y no lo retengas sin partida.
 
-Límites conocidos (2026-11-27, consultoría de la cola): la cola vive en la memoria de cada daemon, así que LIVE, experimental y los daemons de otros arneses no ven las colas de los demás; y lo que se lanza fuera del MCP (DayZDiag sueltos, bancos de otros proyectos) no puede pedir turno. Con un DayZ ajeno vivo, `on_busy="queue"` espera igual a que salga, pero sin orden respecto a la cola del otro daemon.
+Límites conocidos (2026-11-27, consultoría de la cola): la cola común está en `box-queue.json`. Fuera del MCP, `python -m dayz_mcp.box_turn run --purpose ... -- ...` pide el turno (un turno por partida). Con un DayZ ajeno vivo, `on_busy="queue"` espera a que salga.
 
 ## `credential_source_untrusted` / `daemon_identity_unverified`: editar el MCP desarma a los demás
 

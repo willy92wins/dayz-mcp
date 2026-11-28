@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `python -m dayz_mcp.box_turn` takes a turn on the shared box without an MCP client, a keyfile or a daemon. `status --json` reports `occupied`, `reason`, `holder` and `queue` from the DayZ name probe, the UDP socket table, `m1.espera` and `box-queue.json` (a listening TCP port does not count; an indeterminate scan occupies). `run --purpose TEXT [--holder NAME] [--wait-s N] -- COMMAND...` waits until it is the head with the box free, claims, runs the command, refreshes the claim and releases it in a `finally`. The process exits with the command's code, or 2, 75 or 70 before launch, and writes a final stderr line `{"box_turn": "...", "exit": N}`. A claimed external turn shows up in another instance's `session_status` as `occupied` with `foreign_holder`. Plan: `plans/2026-11-27-cola-caja-comun.md`, phase 3B.
+
 ### Changed
 
 - The DayZ box queue is one FIFO shared by every instance on the machine (LIVE, experimental, xai and harness daemons): `box-queue.json` under `server_cli.shared_root()`, changed only under `box-queue.lock` and written with `atomic_write_json` (`tools/dayz_mcp/shared_box_queue.py`). A daemon keeps only its own tickets in memory. Every new start is admitted under `box_admission()` with the exact ticket at the head in `claimed`; a start without that ticket is refused with `active_run_exists` (`box_queue_ahead` or `box_claimed`) while anyone else is ahead. A claim lasts 600 s, is refreshed by the existing heartbeat, and a lost claim never launches. Entries whose owner process exited (pid gone, or alive with another creation time) are purged; an unreadable or unknown queue file keeps the box occupied (`box_queue_unreadable`) and blocks `takeover`. Plan: `plans/2026-11-27-cola-caja-comun.md`, phase 3A.
