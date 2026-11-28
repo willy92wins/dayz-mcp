@@ -24,6 +24,7 @@ at rest, 3.834 cm at 22.5 degrees, 7.330 cm at 45 degrees.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib
 import io
 import json
@@ -383,6 +384,14 @@ class ArgumentTest(AnimFkCase):
                 self.assertEqual((code, out), (2, ""))
         self.assertEqual(self.launches(), 0)
 
+
+    def test_a_non_finite_timeout_answers_2(self) -> None:
+        for label, value in (("inf", "inf"), ("nan", "nan")):
+            with self.subTest(case=label):
+                code, out, _err = self.run_tool(self.base_args(STILL_REL) + ["--timeout", value])
+                self.assertEqual((code, out), (2, ""))
+        self.assertEqual(self.launches(), 0)
+
     def test_the_script_run_without_arguments_answers_2(self) -> None:
         env = {k: v for k, v in os.environ.items() if k not in ("DZ_ROOT", "DAYZATOOL")}
         completed = subprocess.run([sys.executable, "-B", str(TOOL)], capture_output=True, text=True, timeout=60,
@@ -484,6 +493,117 @@ class DocTest(unittest.TestCase):
         for token in ("anim_fk_v1", "DayZATool", "--dz", "--dayzatool", "--skeleton", "--ikpose", "--anm", "--bone",
                       "--work", "--timeout"):
             self.assertIn(token, text)
+
+
+class WorkUnderDzTest(AnimFkCase):
+    """Exit 2: --work, or the default temp cache, must not resolve under --dz, and nothing is written."""
+
+    def _dz_snapshot(self) -> dict:
+        return {str(p.relative_to(self.dz)): (p.stat().st_size, p.stat().st_mtime_ns)
+                for p in sorted(self.dz.rglob("*")) if p.is_file()}
+
+    def test_work_under_dz_answers_2_and_writes_nothing(self) -> None:
+        before = self._dz_snapshot()
+        work = self.dz / "cache"
+        args = self.base_args(STILL_REL)
+        args[args.index("--work") + 1] = str(work)
+        code, out, _err = self.run_tool(args)
+        self.assertEqual((code, out), (2, ""))
+        self.assertFalse(work.exists())
+        self.assertEqual(self._dz_snapshot(), before)
+        self.assertEqual(self.launches(), 0)
+
+    def test_default_temp_under_dz_answers_2_and_writes_nothing(self) -> None:
+        before = self._dz_snapshot()
+        args = self.base_args(STILL_REL)
+        i = args.index("--work")
+        del args[i:i + 2]
+        with mock.patch.object(self.tool.tempfile, "gettempdir", return_value=str(self.dz)):
+            code, out, _err = self.run_tool(args)
+        self.assertEqual((code, out), (2, ""))
+        self.assertFalse((self.dz / "anim_fk").exists())
+        self.assertEqual(self._dz_snapshot(), before)
+        self.assertEqual(self.launches(), 0)
+
+
+class CacheHashTest(AnimFkCase):
+    """A cache entry whose bytes do not match the source key is rewritten before DayZATool runs."""
+
+    def test_a_stale_cache_copy_is_rewritten_to_the_source_hash(self) -> None:
+        src = (self.dz / STILL_REL).read_bytes()
+        digest = hashlib.sha256(src).hexdigest()
+        folder = self.work / digest
+        folder.mkdir(parents=True)
+        stale = folder / Path(STILL_REL).name
+        stale.write_bytes(b"STALE" + src)
+        doc = self.ok_json(self.base_args(STILL_REL))
+        self.assertEqual(hashlib.sha256(stale.read_bytes()).digest(), hashlib.sha256(src).digest())
+        self.assertEqual(doc["segments"][0]["notes"], [{"frame": 2, "name": "mark"}])
+
+
+class PhysicalMembershipTest(AnimFkCase):
+    """A sibling tree is not inside --dz just because Path.relative_to folds case (NTFS)."""
+
+    def test_a_sibling_tree_is_refused_even_if_relative_to_accepts_it(self) -> None:
+        sibling = self.root / "DZ"
+        path = sibling / STILL_REL
+        path.parent.mkdir(parents=True)
+        path.write_bytes((self.dz / STILL_REL).read_bytes())
+        real = Path.relative_to
+
+        def folded(self_path, other):
+            try:
+                return real(self_path, other)
+            except ValueError:
+                return real(self_path, sibling.resolve())
+
+        with mock.patch.object(Path, "relative_to", folded):
+            code, out, _err = self.run_tool(self.base_args(str(path)))
+        self.assertEqual((code, out), (2, ""))
+        self.assertEqual(self.launches(), 0)
+
+    def test_membership_uses_samefile_and_inode_identity(self) -> None:
+        source = TOOL.read_text(encoding="utf-8")
+        self.assertIn("os.path.samefile", source)
+        self.assertIn("st_ino", source)
+        self.assertIn("st_dev", source)
+
+
+class FiniteOutputTest(AnimFkCase):
+    """Exit 5: non-finite JSON, or an OSError while reading a cached DayZATool output."""
+
+    def test_a_non_finite_channel_answers_5(self) -> None:
+        rel = "anims/anm/player/actions/items/nan.anm"
+        self.put(rel, seanim_bytes([("LeftHand", [(0, (float("nan"), 0.0, 0.0))], [])], 2))
+        code, out, _err = self.run_tool(self.base_args(rel))
+        self.assertEqual((code, out), (5, ""))
+
+    def test_an_unreadable_cached_output_answers_5(self) -> None:
+        self.ok_json(self.base_args(STILL_REL))
+        seanim = next(self.work.rglob("still.seanim"))
+        os.chmod(seanim, 0)
+        self.addCleanup(os.chmod, seanim, 0o644)
+        try:
+            code, out, _err = self.run_tool(self.base_args(STILL_REL))
+        except OSError:
+            self.fail("OSError escaped main; expected exit 5")
+        self.assertEqual((code, out), (5, ""))
+
+
+class PelvisTextTest(AnimFkCase):
+    """limits and the usage doc follow the code: clip keys win when they exist."""
+
+    def test_limits_and_docs_say_clip_keys_win_for_the_pelvis(self) -> None:
+        doc = self.ok_json(self.base_args(STILL_REL))
+        self.assertNotIn("The pelvis comes from the SEModel rest pose.", doc["limits"])
+        self.assertTrue(
+            any("clip keys when they exist" in item for item in doc["limits"]),
+            doc["limits"],
+        )
+        text = DOC.read_text(encoding="utf-8")
+        self.assertNotIn("The pelvis stays on the SEModel rest pose.", text)
+        self.assertIn("The pelvis uses the clip keys when they exist, otherwise the SEModel rest pose.", text)
+
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `tools/dev/anim_fk.py` rejects `--work` (and the default temporary cache) that resolves under `--dz` before it writes anything; after a cache copy it verifies the SHA-256 against the source and rewrites atomically on a mismatch; membership also uses `os.path.samefile` / inode identity so a sibling `dz`/`DZ` tree on case-sensitive NTFS is not accepted. `--timeout` must be a finite number greater than zero (exit 2). Non-finite channel values and an `OSError` while reading DayZATool output exit 5. The pelvis `limits` text matches the code: clip keys win when they exist.
 - `tools/pack-addon.ps1` gives AddonBuilder a new, empty temp folder for every build (`dayz-pack-` plus the mod name and a new GUID, under `%TEMP%`) and removes it afterwards. The shared `dayz-pack-` folder of each mod, which AddonBuilder empties only with `-clear`, let files from an earlier build of another tree into the PBO; `tools/dev/pbo_provenance.py` caught it on 2026-11-19 and 2026-11-27. If AddonBuilder leaves a fresh PBO in that folder and the copy to the destination fails, the script moves the PBO to a persistent `%TEMP%\dayz-pack-<mod>-undelivered-<GUID>.pbo` and puts that path in the error, so `finally` does not delete the only good copy. A failed `Remove-Item` of the temp folder uses `Write-Warning -WarningAction Continue`. Cleanup is armed only after the temp folder is created.
 
 ## [1.6] - 2026-11-28

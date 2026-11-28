@@ -8,8 +8,9 @@ Copies each source into the work directory and runs DayZATool v1.3 on the copy
 (--extract-mdl for the skeleton, --extract-anim with scale 100 for every clip).
 Prints one JSON object, schema anim_fk_v1, on stdout. Exit 2 bad arguments,
 3 DayZATool missing or not startable, 4 no output or timeout, 5 unreadable
-SEAnim/SEModel or ikpose grip bones, 6 a requested bone or a hand is absent
-from the skeleton. Stdout is empty unless the exit code is 0.
+SEAnim/SEModel or ikpose grip bones, a non-finite result, or an unreadable
+DayZATool output, 6 a requested bone or a hand is absent from the skeleton.
+Stdout is empty unless the exit code is 0.
 
 Standard library only.
 """
@@ -19,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -29,7 +31,7 @@ import anim_fk_math
 
 LIMITS = [
     "NormalWeaponIK and queue blends are not simulated.",
-    "The pelvis comes from the SEModel rest pose.",
+    "The pelvis uses the clip keys when they exist, otherwise the SEModel rest pose.",
     "Absolute orientations are not reliable; relative ones are (hand in the item frame, curves, wrist span).",
 ]
 
@@ -71,19 +73,110 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _under_dz(dz: Path, rel: str) -> Path | None:
-    root = dz.resolve()
+def _same_file(left: Path, right: Path) -> bool:
+    """True when both paths exist and are the same inode (os.path.samefile, or st_ino+st_dev)."""
     try:
+        if os.path.samefile(left, right):
+            return True
+    except OSError:
+        pass
+    try:
+        a = os.stat(left)
+        b = os.stat(right)
+    except OSError:
+        return False
+    return bool(a.st_ino) and (a.st_ino, a.st_dev) == (b.st_ino, b.st_dev)
+
+
+def _physically_under(root: Path, path: Path) -> bool:
+    """True if path or an existing ancestor is the same directory as root."""
+    cur = path
+    seen: set[str] = set()
+    while True:
+        key = str(cur)
+        if key in seen:
+            return False
+        seen.add(key)
+        if _same_file(cur, root):
+            return True
+        parent = cur.parent
+        if parent == cur:
+            return False
+        cur = parent
+
+
+def _resolves_under(root: Path, path: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _writes_under_dz(dz: Path, work: Path) -> bool:
+    """True if the cache would resolve, or physically sit, under --dz."""
+    if _resolves_under(dz, work) or _physically_under(dz, work):
+        return True
+    try:
+        return _resolves_under(dz.resolve(), work.resolve()) or _physically_under(dz.resolve(), work.resolve())
+    except OSError:
+        return False
+
+
+def _under_dz(dz: Path, rel: str) -> Path | None:
+    try:
+        root = dz.resolve()
         path = (Path(dz) / rel).resolve()
     except OSError:
         return None
-    try:
-        path.relative_to(root)
-    except ValueError:
+    if not _resolves_under(root, path):
         return None
+    # Path.relative_to can accept a sibling dz/DZ tree on case-sensitive NTFS.
+    # When both sides exist and no ancestor is the same inode as --dz, refuse.
+    try:
+        path.stat()
+        root.stat()
+        if not _physically_under(root, path):
+            return None
+    except OSError:
+        pass
     if not path.is_file():
         return None
     return path
+
+
+def _ensure_cache_copy(data: bytes, dest: Path) -> None:
+    """Leave dest as an exact copy of data, rewriting atomically when the hash does not match."""
+    expected = hashlib.sha256(data).digest()
+
+    def current_ok() -> bool:
+        try:
+            return dest.is_file() and hashlib.sha256(dest.read_bytes()).digest() == expected
+        except OSError:
+            return False
+
+    if current_ok():
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=dest.name + ".", suffix=".tmp", dir=str(dest.parent))
+    try:
+        os.write(fd, data)
+        os.close(fd)
+        fd = -1
+        os.replace(tmp_name, dest)
+    except OSError:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    if not current_ok():
+        raise ToolFailure(5, f"cached copy does not match the source: {dest.name}")
 
 
 def _extract(src: Path, rel: str, flag: str, work: Path, exe: str, timeout: float) -> bytes:
@@ -92,8 +185,7 @@ def _extract(src: Path, rel: str, flag: str, work: Path, exe: str, timeout: floa
     folder = work / hashlib.sha256(data).hexdigest()
     folder.mkdir(parents=True, exist_ok=True)
     copy = folder / src.name
-    if not copy.is_file():
-        copy.write_bytes(data)
+    _ensure_cache_copy(data, copy)
     suffix = ".semodel" if flag == "--extract-mdl" else ".seanim"
     output = copy.with_suffix(suffix)
     if not output.is_file():
@@ -112,7 +204,10 @@ def _extract(src: Path, rel: str, flag: str, work: Path, exe: str, timeout: floa
             raise ToolFailure(3, f"cannot start DayZATool: {exc}") from exc
         if not output.is_file():
             raise ToolFailure(4, f"DayZATool wrote no output for {rel}")
-    return output.read_bytes()
+    try:
+        return output.read_bytes()
+    except OSError as exc:
+        raise ToolFailure(5, f"cannot read DayZATool output for {rel}: {exc}") from exc
 
 
 def _segment(rel: str, clip, skeleton, bone_names: list[str], grip) -> dict:
@@ -165,8 +260,8 @@ def _run(args: argparse.Namespace) -> int:
     if not anms:
         _err("at least one --anm is required")
         return 2
-    if not (args.timeout > 0.0):
-        _err("--timeout must be greater than zero")
+    if not (math.isfinite(args.timeout) and args.timeout > 0.0):
+        _err("--timeout must be a finite number greater than zero")
         return 2
     dz = Path(dz_text)
     rels = [args.skeleton, args.ikpose, *anms]
@@ -177,6 +272,10 @@ def _run(args: argparse.Namespace) -> int:
             _err(f"path is outside --dz or is not a file: {rel}")
             return 2
         paths.append(path)
+    work = Path(args.work) if args.work else Path(tempfile.gettempdir()) / "anim_fk"
+    if _writes_under_dz(dz, work):
+        _err("--work resolves under --dz and would write in the vanilla tree")
+        return 2
     exe = args.dayzatool or os.environ.get("DAYZATOOL") or ""
     if not exe:
         _err("--dayzatool is required when DAYZATOOL is unset")
@@ -184,7 +283,6 @@ def _run(args: argparse.Namespace) -> int:
     if not Path(exe).is_file():
         _err(f"DayZATool is not a file: {exe}")
         return 3
-    work = Path(args.work) if args.work else Path(tempfile.gettempdir()) / "anim_fk"
     skel_path, ik_path, *anm_paths = paths
     skeleton = anim_fk_math.load_semodel(
         _extract(skel_path, args.skeleton, "--extract-mdl", work, exe, args.timeout)
@@ -219,7 +317,12 @@ def _run(args: argparse.Namespace) -> int:
         "limits": list(LIMITS),
         "segments": segments,
     }
-    print(json.dumps(document))
+    try:
+        text = json.dumps(document, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        _err(f"result is not finite JSON: {exc}")
+        return 5
+    print(text)
     return 0
 
 
