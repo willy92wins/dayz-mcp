@@ -237,7 +237,7 @@ exception is driving: a PHYSICS car only moves from its owning client, so
 
 ## Install
 
-An AI agent can follow [llms-install.md](llms-install.md), which still installs from a clone (the v1.6 GitHub release already carries the wheel and `dayz-mcp-requirements.txt`; the guide does not use them yet). The rest of this section is that clone path.
+Without a clone: subscribe to the [DayZ-MCP Workshop item](https://steamcommunity.com/sharedfiles/filedetails/?id=3846741037) and follow [llms-install.md](llms-install.md), written for an AI agent. It installs the Python half from the GitHub release with uv. The rest of this section installs from a clone.
 
 `.\install-mcp.ps1 -Register` requires both Claude Code and Codex (Python 3.11+ too). The pre-check uses
 `claude` / `codex.cmd` and refuses with `registration check failed for Codex:
