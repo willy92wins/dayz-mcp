@@ -45,6 +45,20 @@ def stage_wheel_tree(
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination)
 
+    skills = tools / "dayz_mcp" / "skills"
+    if skills.is_dir():
+        skills_stage = package_stage / "skills"
+        skills_stage.mkdir(parents=True, exist_ok=True)
+        for source in sorted(skills.rglob("*")):
+            if not source.is_file():
+                continue
+            relative = source.relative_to(skills)
+            if "__pycache__" in relative.parts or source.suffix == ".pyc":
+                continue
+            destination = skills_stage / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+
     if isinstance(version_json, (bytes, bytearray)):
         data = bytes(version_json)
     elif isinstance(version_json, Path):

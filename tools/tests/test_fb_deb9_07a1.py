@@ -16,6 +16,8 @@ SERVER_PY = Path(__file__).resolve().parents[1] / "dayz_mcp" / "server.py"
 KNOWN_CLEAR_STATICS = {
     "s_Active",
     "s_Car",
+    # b95f: Clear also drops the motorbike drive.
+    "s_Bike",
     "s_TickEngineReady",
     "s_TickThrottleSet",
 }

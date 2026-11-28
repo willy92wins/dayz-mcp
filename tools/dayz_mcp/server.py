@@ -36,6 +36,7 @@ from dayz_mcp import (
     daemon_credential,
     dayz_test_modes,
     dayz_test_tool,
+    dual_era,
     host_config,
     inbox,
     launch_focus,
@@ -43,6 +44,7 @@ from dayz_mcp import (
     orphan_guard,
     playbook_tool as playbook_tool_mod,
     registry_lock,
+    skills_catalog,
     tool_pack as tool_pack_mod,
     ui_dialog as ui_dialog_mod,
     window_foreground,
@@ -2873,6 +2875,7 @@ class ClientRuntime:
         ticket: str | None = None,
         done: bool = False,
         claim: bool = False,
+        start_ticket: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, object] = {}
         if wait:
@@ -2883,8 +2886,30 @@ class ClientRuntime:
             payload["box_wait_done"] = True
         if claim:
             payload["box_wait_claim"] = True
+        if isinstance(start_ticket, str) and start_ticket:
+            payload["box_start_ticket"] = start_ticket
         return await self._control_with_lazy_spawn(
             self._control._session_call, "/session/status", payload
+        )
+
+    async def bind_next_start_ticket(
+        self, ticket: str, *, operation_id: object = None
+    ) -> dict[str, Any]:
+        """Pin the exact ticket to a granted lease. Fails closed without one."""
+
+        lease_id = operation_id or getattr(self._control, "active_lease_id", None)
+        if not isinstance(ticket, str) or not ticket:
+            raise ValueError("box_ticket_pin_failed")
+        if not isinstance(lease_id, str) or not lease_id:
+            raise ValueError("box_ticket_pin_failed")
+        payload: dict[str, Any] = {
+            "box_start_ticket": ticket,
+            "box_start_lease_id": lease_id,
+        }
+        return await self._control_with_lazy_spawn(
+            self._control._session_call,
+            "/session/status",
+            payload,
         )
 
     async def reconcile_idle_session(self) -> dict[str, Any]:
@@ -7077,34 +7102,40 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         finally:
             runtime.stop_loopback()
 
+    catalog = skills_catalog.load_or_empty()
+    base_instructions = (
+        "Expose DayZDiag through typed MCP tools. Flow: "
+        "session_acquire_wait (or lease_acquire) -> check "
+        "bridge_status.ready -> mutating verbs -> wait_for to wait -> "
+        "session_release. Use dayz_test_run / dayz_test_stop for lifecycle; "
+        "call dayz_test_run without a lease, then session_acquire_wait "
+        "(its grant adopts the run) before bridge verbs or wait_for. "
+        "Spawn: playbook_run(name=\"place_safely\", "
+        "params={\"x\":..,\"z\":..}) before a new site; "
+        "pos=[x, surface_query.y, z]; y=0 is ground; example "
+        "type=CivilianSedan; living infected flags=3108 "
+        "(ECE_PLACE_ON_SURFACE|ECE_INITAI|ECE_CREATEPHYSICS). "
+        "wait_for/logs_since read script, RPT and a profile .ADM when one "
+        "exists. Player chat is in the .ADM, which DayZ writes only with "
+        "-adminlog (dayz_test_run server_adminlog=true). "
+        "wait_for(log_matches) lookback_lines=200 includes the last N "
+        "lines already on disk so a sequential action_use then wait_for "
+        "does not miss a ~200ms response. action_use: held item is the "
+        "ItemBase in the local player's hands (null if empty); world "
+        "targets use componentIndex=-1 unless door_index targets one door "
+        "of a Building (then that door's view-geometry component), or "
+        "component_index and cursor_pos select one world component through "
+        "action_use_component; classname is exact GetType()."
+    )
+    pointer = skills_catalog.instructions_pointer(catalog)
+    instructions = f"{base_instructions}\n{pointer}" if pointer else base_instructions
     app = FastMCP(
         name="dayz-mcp",
-        instructions=(
-            "Expose DayZDiag through typed MCP tools. Flow: "
-            "session_acquire_wait (or lease_acquire) -> check "
-            "bridge_status.ready -> mutating verbs -> wait_for to wait -> "
-            "session_release. Use dayz_test_run / dayz_test_stop for lifecycle; "
-            "call dayz_test_run without a lease, then session_acquire_wait "
-            "(its grant adopts the run) before bridge verbs or wait_for. "
-            "Spawn: playbook_run(name=\"place_safely\", "
-            "params={\"x\":..,\"z\":..}) before a new site; "
-            "pos=[x, surface_query.y, z]; y=0 is ground; example "
-            "type=CivilianSedan; living infected flags=3108 "
-            "(ECE_PLACE_ON_SURFACE|ECE_INITAI|ECE_CREATEPHYSICS). "
-            "wait_for/logs_since read script, RPT and a profile .ADM when one "
-            "exists. Player chat is in the .ADM, which DayZ writes only with "
-            "-adminlog (dayz_test_run server_adminlog=true). "
-            "wait_for(log_matches) lookback_lines=200 includes the last N "
-            "lines already on disk so a sequential action_use then wait_for "
-            "does not miss a ~200ms response. action_use: held item is the "
-            "ItemBase in the local player's hands (null if empty); world "
-            "targets use componentIndex=-1 unless door_index targets one door "
-            "of a Building (then that door's view-geometry component), or "
-            "component_index and cursor_pos select one world component through "
-            "action_use_component; classname is exact GetType()."
-        ),
+        instructions=instructions,
         lifespan=lifespan,
     )
+    skills_catalog.install(app, catalog)
+    setattr(app, skills_catalog.APP_CATALOG_ATTR, catalog)
     register_knowledge_tools(app)
 
     def _client_runtime() -> ClientRuntime:
@@ -7708,7 +7739,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async def execute(
             launch: dict[str, bool],
         ) -> tuple[dayz_test_tool.DayzTestToolError | None, dict[str, Any] | None]:
-            # The caller holds client.tool_lock.
+            # The caller holds client.tool_lock. The ticket is pinned after
+            # session_acquire_wait, to the granted lease, before start_run.
             try:
                 with _typed_dayz_test_value_errors():
                     return None, await dayz_test_tool.execute_dayz_test_run(
@@ -7741,6 +7773,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         project_mod_override=project_mod_override,
                         connect_host=connect_host,
                         mod_dir=mod_dir,
+                        box_ticket=box_ticket,
                     )
             except dayz_test_tool.DayzTestToolError as error:
                 return error, None
@@ -7993,6 +8026,50 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                             port=port,
                         )
                     )
+                if (
+                    target is not None
+                    and takeover
+                    and not box_ticket
+                ):
+                    try:
+                        fresh = await client.session_status()
+                    except Exception:
+                        fresh = None
+                    if not isinstance(fresh, dict):
+                        return annotated(
+                            _failed_active_run_result(
+                                project=project,
+                                mode=mode,
+                                box=box,
+                                started=started,
+                                caller_session=caller_session,
+                                port=port,
+                            )
+                        )
+                    box = _box_from_status(fresh)
+                    if box.get("reason") == "box_queue_unreadable":
+                        return annotated(
+                            _failed_active_run_result(
+                                project=project,
+                                mode=mode,
+                                box=box,
+                                started=started,
+                                caller_session=caller_session,
+                                port=port,
+                            )
+                        )
+                    queue_now = box.get("queue")
+                    if isinstance(queue_now, list) and queue_now:
+                        return annotated(
+                            _failed_active_run_result(
+                                project=project,
+                                mode=mode,
+                                box=box,
+                                started=started,
+                                caller_session=caller_session,
+                                port=port,
+                            )
+                        )
                 if target is not None and takeover:
                     try:
                         stop_result = await dayz_test_tool.execute_dayz_test_stop(
@@ -9338,12 +9415,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("query_get_in_condition", args, "server", _timeout(timeout_s))
 
-    # General fixture prep for any CarScript (no classname allowlist).
+    # General fixture prep for any CarScript or MotorbikeScript (no classname allowlist).
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Prepare a vehicle "
-            "fixture near pos (OnDebugSpawn when needed). Any CarScript "
-            "classname; non-vehicles return fixture_not_vehicle."
+            "fixture near pos (OnDebugSpawn when needed). Any CarScript or "
+            "MotorbikeScript classname; anything else, such as a boat, "
+            "returns fixture_not_vehicle. A motorbike is ready with every "
+            "wheel on, fuel above 0, its spark plug when vital and its "
+            "battery when it needs one; its reply carries the same vehicle "
+            "fields as a car's (engine_on_server, speedo, wheel_count, "
+            "fuel_fraction, lights_on_server)."
         )
     )
     async def vehicle_prepare_fixture(
@@ -12768,17 +12850,23 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Requires a lease (session_acquire_wait). Start or stop the "
             "owned vehicle's engine. This requires client-side ownership "
-            "established with vehicle_get_in_client. command_sent reports "
-            "bridge acceptance; state_confirmed reports matching engine "
-            "readback when available, otherwise null (accepted, not confirmed). "
-            "The local player must drive a car this client owns: otherwise the "
+            "established with vehicle_get_in_client. For a motorbike, "
+            "ownership comes from the vanilla get-in (action_use "
+            "ActionGetInTransport). command_sent reports bridge acceptance; "
+            "state_confirmed reports matching engine readback when available, "
+            "otherwise null (accepted, not confirmed). The local player must "
+            "drive a car or a motorbike this client owns: otherwise the "
             "bridge returns not_seated (not seated in a vehicle), not_a_car "
-            "(seated in a vehicle that is not a car, such as a boat), not_driver "
-            "(seated, but not in the driver seat) or not_owner (in the driver "
-            "seat, but this client does not own the car). The reply confirms "
-            "the command reached the car and is not telemetry: engine_on_server "
-            "is the only vehicle field it carries. vehicle_telemetry reports "
-            "gear, speed, position and ownership."
+            "(seated in a vehicle that is neither a car nor a motorbike, such "
+            "as a boat), not_driver (seated, but not in the driver seat; on a "
+            "motorbike, the driver is crew position 0) or not_owner (in the "
+            "driver seat, but this client does not own the vehicle). The reply "
+            "confirms the command reached the vehicle and is not telemetry: "
+            "engine_on_server is the only vehicle field it carries. "
+            "For a car, vehicle_telemetry reports gear, speed, position and "
+            "ownership; it fills those fields only for a CarScript, so read a "
+            "motorbike's speed on the server with players_kinematics (the "
+            "rider's vel)."
         )
     )
     async def engine_set(mode: str, timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
@@ -12810,14 +12898,20 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Requires a lease (session_acquire_wait). Set sustained "
             "owner-side driving control (held until released or deadman TTL). "
-            "The local player must drive a car this client owns: otherwise the "
-            "bridge returns not_seated (not seated in a vehicle), not_a_car "
-            "(seated in a vehicle that is not a car, such as a boat), not_driver "
-            "(seated, but not in the driver seat) or not_owner (in the driver "
-            "seat, but this client does not own the car). The reply confirms "
-            "the control reached the car and is not telemetry: engine_on_server "
-            "is the only vehicle field it carries. vehicle_telemetry reports "
-            "gear, speed, position and ownership."
+            "The local player must drive a car or a motorbike this client owns: "
+            "otherwise the bridge returns not_seated (not seated in a vehicle), "
+            "not_a_car (seated in a vehicle that is neither a car nor a "
+            "motorbike, such as a boat), not_driver (seated, but not in the "
+            "driver seat; on a motorbike, the driver is crew position 0) or "
+            "not_owner (in the driver seat, but this client does not own the "
+            "vehicle). On a motorbike, brake is the rear brake and handbrake "
+            "the front brake, and the kickstand goes up while it drives. The "
+            "reply confirms the control reached the vehicle and is not "
+            "telemetry: engine_on_server is the only vehicle field it carries. "
+            "For a car, vehicle_telemetry reports gear, speed, position and "
+            "ownership; it fills those fields only for a CarScript, so read a "
+            "motorbike's speed on the server with players_kinematics (the "
+            "rider's vel)."
         )
     )
     async def vehicle_control(
@@ -14762,7 +14856,7 @@ def run(argv: list[str] | None = None) -> int:
                 poll_interval=poll_interval,
             )
     try:
-        app.run(transport="stdio")
+        anyio.run(dual_era.run_stdio, app)
     finally:
         if config.mode == "embedded":
             runtime.stop_loopback()
