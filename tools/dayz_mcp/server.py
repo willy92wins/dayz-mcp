@@ -36,6 +36,7 @@ from dayz_mcp import (
     daemon_credential,
     dayz_test_modes,
     dayz_test_tool,
+    dual_era,
     host_config,
     inbox,
     launch_focus,
@@ -43,6 +44,7 @@ from dayz_mcp import (
     orphan_guard,
     playbook_tool as playbook_tool_mod,
     registry_lock,
+    skills_catalog,
     tool_pack as tool_pack_mod,
     ui_dialog as ui_dialog_mod,
     window_foreground,
@@ -7100,34 +7102,40 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         finally:
             runtime.stop_loopback()
 
+    catalog = skills_catalog.load_or_empty()
+    base_instructions = (
+        "Expose DayZDiag through typed MCP tools. Flow: "
+        "session_acquire_wait (or lease_acquire) -> check "
+        "bridge_status.ready -> mutating verbs -> wait_for to wait -> "
+        "session_release. Use dayz_test_run / dayz_test_stop for lifecycle; "
+        "call dayz_test_run without a lease, then session_acquire_wait "
+        "(its grant adopts the run) before bridge verbs or wait_for. "
+        "Spawn: playbook_run(name=\"place_safely\", "
+        "params={\"x\":..,\"z\":..}) before a new site; "
+        "pos=[x, surface_query.y, z]; y=0 is ground; example "
+        "type=CivilianSedan; living infected flags=3108 "
+        "(ECE_PLACE_ON_SURFACE|ECE_INITAI|ECE_CREATEPHYSICS). "
+        "wait_for/logs_since read script, RPT and a profile .ADM when one "
+        "exists. Player chat is in the .ADM, which DayZ writes only with "
+        "-adminlog (dayz_test_run server_adminlog=true). "
+        "wait_for(log_matches) lookback_lines=200 includes the last N "
+        "lines already on disk so a sequential action_use then wait_for "
+        "does not miss a ~200ms response. action_use: held item is the "
+        "ItemBase in the local player's hands (null if empty); world "
+        "targets use componentIndex=-1 unless door_index targets one door "
+        "of a Building (then that door's view-geometry component), or "
+        "component_index and cursor_pos select one world component through "
+        "action_use_component; classname is exact GetType()."
+    )
+    pointer = skills_catalog.instructions_pointer(catalog)
+    instructions = f"{base_instructions}\n{pointer}" if pointer else base_instructions
     app = FastMCP(
         name="dayz-mcp",
-        instructions=(
-            "Expose DayZDiag through typed MCP tools. Flow: "
-            "session_acquire_wait (or lease_acquire) -> check "
-            "bridge_status.ready -> mutating verbs -> wait_for to wait -> "
-            "session_release. Use dayz_test_run / dayz_test_stop for lifecycle; "
-            "call dayz_test_run without a lease, then session_acquire_wait "
-            "(its grant adopts the run) before bridge verbs or wait_for. "
-            "Spawn: playbook_run(name=\"place_safely\", "
-            "params={\"x\":..,\"z\":..}) before a new site; "
-            "pos=[x, surface_query.y, z]; y=0 is ground; example "
-            "type=CivilianSedan; living infected flags=3108 "
-            "(ECE_PLACE_ON_SURFACE|ECE_INITAI|ECE_CREATEPHYSICS). "
-            "wait_for/logs_since read script, RPT and a profile .ADM when one "
-            "exists. Player chat is in the .ADM, which DayZ writes only with "
-            "-adminlog (dayz_test_run server_adminlog=true). "
-            "wait_for(log_matches) lookback_lines=200 includes the last N "
-            "lines already on disk so a sequential action_use then wait_for "
-            "does not miss a ~200ms response. action_use: held item is the "
-            "ItemBase in the local player's hands (null if empty); world "
-            "targets use componentIndex=-1 unless door_index targets one door "
-            "of a Building (then that door's view-geometry component), or "
-            "component_index and cursor_pos select one world component through "
-            "action_use_component; classname is exact GetType()."
-        ),
+        instructions=instructions,
         lifespan=lifespan,
     )
+    skills_catalog.install(app, catalog)
+    setattr(app, skills_catalog.APP_CATALOG_ATTR, catalog)
     register_knowledge_tools(app)
 
     def _client_runtime() -> ClientRuntime:
@@ -14848,7 +14856,7 @@ def run(argv: list[str] | None = None) -> int:
                 poll_interval=poll_interval,
             )
     try:
-        app.run(transport="stdio")
+        anyio.run(dual_era.run_stdio, app)
     finally:
         if config.mode == "embedded":
             runtime.stop_loopback()
