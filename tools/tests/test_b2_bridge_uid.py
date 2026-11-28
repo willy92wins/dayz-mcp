@@ -56,6 +56,10 @@ def _s(text: str) -> EnforceString:
     return EnforceString.of(text)
 
 
+def _distance(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
 def _without_logs(signature: str) -> str:
     body = re.sub(r"\bLog\([^;\n]*\);", "", method_body(BRIDGE, signature))
     return signature + "\n{" + body + "}\n"
@@ -98,6 +102,9 @@ class _Human:
     def GetIdentity(self) -> _Identity:
         return self.identity
 
+    def GetPosition(self) -> tuple[float, float, float]:
+        return (0.0, 0.0, 0.0)
+
     def GetCommand_Vehicle(self) -> _VehicleCommand | None:
         return self.command
 
@@ -120,6 +127,9 @@ class _Vehicle:
 
     def GetSeatAnimationType(self, _crew: int) -> int:
         return 1
+
+    def GetPosition(self) -> tuple[float, float, float]:
+        return (3.0, 0.0, 0.0)
 
     def GetAnimInstance(self) -> int:
         return 0
@@ -145,6 +155,7 @@ class _Bridge:
             "ValidatePositionArgs": lambda args: SimpleNamespace(ok=True, error=_s(""), pos=args.pos),
             "FindTransportNear": lambda _pos: self.vehicle,
             "HasActiveJobFor": lambda _human, _vehicle: False,
+            "vector": SimpleNamespace(Distance=_distance),
             "DayZPlayerConstants": SimpleNamespace(VEHICLESEAT_DRIVER=DRIVER),
         }
         fake_class(MESSAGES, "MCPJob", self.ns)
