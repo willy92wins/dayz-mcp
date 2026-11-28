@@ -7079,7 +7079,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         finally:
             runtime.stop_loopback()
 
-    catalog = skills_catalog.SkillCatalog.load()
+    catalog = skills_catalog.load_or_empty()
     base_instructions = (
         "Expose DayZDiag through typed MCP tools. Flow: "
         "session_acquire_wait (or lease_acquire) -> check "
@@ -7112,6 +7112,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         lifespan=lifespan,
     )
     skills_catalog.install(app, catalog)
+    setattr(app, skills_catalog.APP_CATALOG_ATTR, catalog)
     register_knowledge_tools(app)
 
     def _client_runtime() -> ClientRuntime:

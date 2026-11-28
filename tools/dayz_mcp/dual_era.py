@@ -7,11 +7,16 @@ skills extension. This front sits in front of ``FastMCP._mcp_server.run``:
   and ``skill://`` ``resources/read``, or bridged onto the SDK session with a lazy
   one-time synthetic ``2025-11-25`` handshake and modern result shaping.
 - Legacy requests (no modern ``_meta``) pass through untouched in both directions.
+
+All modern requests on one stdio pipe share the single ``ClientRuntime`` and
+session lease of this process, so two interleaved conversations on the same
+pipe are not isolated from each other; run one conversation per pipe.
 """
 
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -142,6 +147,14 @@ def _id_key(request_id: Any) -> tuple[type, Any]:
     return (type(request_id), request_id)
 
 
+def _is_valid_request_id(request_id: Any) -> bool:
+    return isinstance(request_id, (str, int)) and not isinstance(request_id, bool)
+
+
+class _ClientGoneError(Exception):
+    """Raised internally when writing to the client stream fails because it closed."""
+
+
 def _client_info_from_meta(meta: dict[str, Any]) -> dict[str, str]:
     raw = meta.get(_CLIENT_INFO_KEY)
     if (
@@ -227,8 +240,23 @@ async def serve(
         pending_modern: dict[tuple[type, Any], str] = {}
 
         async def send_client(message: SessionMessage) -> None:
-            async with write_lock:
-                await write_stream.send(message)
+            try:
+                async with write_lock:
+                    await write_stream.send(message)
+            except (anyio.ClosedResourceError, anyio.BrokenResourceError) as exc:
+                raise _ClientGoneError() from exc
+
+        async def try_send_error(
+            request_id: str | int,
+            code: int,
+            message: str,
+            data: Any = None,
+        ) -> bool:
+            try:
+                await send_client(_error_message(request_id, code, message, data=data))
+                return True
+            except _ClientGoneError:
+                return False
 
         async def ensure_sdk_initialized(meta: dict[str, Any]) -> None:
             nonlocal synthetic_init_pending, synthetic_initialized
@@ -237,22 +265,24 @@ async def serve(
                     return
                 synthetic_init_pending = True
                 handshake_done_event = handshake_done
-                init_request = _session_message(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": _SYNTHETIC_INIT_ID,
-                        "method": "initialize",
-                        "params": {
-                            "protocolVersion": _LEGACY_BRIDGE_VERSION,
-                            # Empty capabilities prevent the SDK from issuing server-to-client requests.
-                            "capabilities": {},
-                            "clientInfo": _client_info_from_meta(meta),
-                        },
-                    }
-                )
-                await sdk_in_send.send(init_request)
-                await handshake_done_event.wait()
-                synthetic_init_pending = False
+                try:
+                    init_request = _session_message(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": _SYNTHETIC_INIT_ID,
+                            "method": "initialize",
+                            "params": {
+                                "protocolVersion": _LEGACY_BRIDGE_VERSION,
+                                # Empty capabilities prevent the SDK from issuing server-to-client requests.
+                                "capabilities": {},
+                                "clientInfo": _client_info_from_meta(meta),
+                            },
+                        }
+                    )
+                    await sdk_in_send.send(init_request)
+                    await handshake_done_event.wait()
+                finally:
+                    synthetic_init_pending = False
                 # Mark modern-initialized before notifications/initialized so any
                 # unsolicited SDK notification triggered on init is filtered.
                 synthetic_initialized = True
@@ -275,47 +305,66 @@ async def serve(
             nonlocal synthetic_init_pending
             try:
                 async for item in sdk_out_recv:
-                    raw = item.message.model_dump(by_alias=True, exclude_none=True)
-                    is_response = "id" in raw and ("result" in raw or "error" in raw)
-                    if is_response:
-                        msg_id = raw["id"]
-                        if synthetic_init_pending and msg_id == _SYNTHETIC_INIT_ID:
-                            handshake_done.set()
+                    msg_id: Any = None
+                    is_response = False
+                    try:
+                        raw = item.message.model_dump(by_alias=True, exclude_none=True)
+                        is_response = "id" in raw and ("result" in raw or "error" in raw)
+                        if is_response:
+                            msg_id = raw["id"]
+                            if synthetic_init_pending and msg_id == _SYNTHETIC_INIT_ID:
+                                handshake_done.set()
+                                continue
+                            method = (
+                                pending_modern.pop(_id_key(msg_id), None)
+                                if _is_valid_request_id(msg_id)
+                                else None
+                            )
+                            if method is not None:
+                                if "result" in raw and isinstance(raw["result"], dict):
+                                    shaped = modern_result(method, raw["result"])
+                                    await send_client(_result_message(msg_id, shaped))
+                                else:
+                                    await send_client(item)
+                                continue
+                            await send_client(item)
                             continue
-                        method = pending_modern.pop(_id_key(msg_id), None)
-                        if method is not None:
-                            if "result" in raw and isinstance(raw["result"], dict):
-                                shaped = modern_result(method, raw["result"])
-                                await send_client(_result_message(msg_id, shaped))
-                            else:
+
+                        if synthetic_initialized and not legacy_initialized:
+                            # Server-to-client request: modern stateless front refuses with -32601.
+                            if "id" in raw and "method" in raw:
+                                reply = _error_message(
+                                    raw["id"],
+                                    -32601,
+                                    "Server-to-client requests are not supported in 2026-07-28 mode",
+                                )
+                                try:
+                                    await sdk_in_send.send(reply)
+                                except (
+                                    anyio.ClosedResourceError,
+                                    anyio.BrokenResourceError,
+                                ):
+                                    pass
+                                continue
+                            # Server-to-client notification: keep only progress/message/cancelled.
+                            notif_method = raw.get("method")
+                            if notif_method in _MODERN_ALLOWED_SERVER_NOTIFICATIONS:
                                 await send_client(item)
                             continue
+
                         await send_client(item)
-                        continue
-
-                    if synthetic_initialized and not legacy_initialized:
-                        # Server-to-client request: modern stateless front refuses with -32601.
-                        if "id" in raw and "method" in raw:
-                            reply = _error_message(
-                                raw["id"],
-                                -32601,
-                                "Server-to-client requests are not supported in 2026-07-28 mode",
-                            )
-                            try:
-                                await sdk_in_send.send(reply)
-                            except (
-                                anyio.ClosedResourceError,
-                                anyio.BrokenResourceError,
-                            ):
-                                pass
-                            continue
-                        # Server-to-client notification: keep only progress/message/cancelled.
-                        notif_method = raw.get("method")
-                        if notif_method in _MODERN_ALLOWED_SERVER_NOTIFICATIONS:
-                            await send_client(item)
-                        continue
-
-                    await send_client(item)
+                    except _ClientGoneError:
+                        break
+                    except Exception as exc:
+                        print(
+                            f"[dual_era] internal error forwarding SDK message ({type(exc).__name__})",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        if is_response and _is_valid_request_id(msg_id):
+                            pending_modern.pop(_id_key(msg_id), None)
+                            if not await try_send_error(msg_id, -32603, "Internal error"):
+                                break
             finally:
                 # Unblock a waiting synthetic handshake if the SDK exits unexpectedly.
                 handshake_done.set()
@@ -431,7 +480,6 @@ async def serve(
                     return
 
             await ensure_sdk_initialized(meta)
-            pending_modern[_id_key(request_id)] = method
             stripped = strip_modern_meta(params)
             forwarded: dict[str, Any] = {
                 "jsonrpc": "2.0",
@@ -440,58 +488,104 @@ async def serve(
             }
             if stripped:
                 forwarded["params"] = stripped
-            await sdk_in_send.send(_session_message(forwarded))
+            forwarded_msg = _session_message(forwarded)
+            pending_modern[_id_key(request_id)] = method
+            await sdk_in_send.send(forwarded_msg)
 
         async def route_client_to_sdk() -> None:
             nonlocal legacy_initialized, client_eof
             try:
                 async for item in read_stream:
                     if isinstance(item, Exception):
-                        await sdk_in_send.send(item)
+                        try:
+                            await sdk_in_send.send(item)
+                        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+                            break
                         continue
-                    raw = item.message.model_dump(by_alias=True, exclude_none=True)
-                    if is_modern(raw):
-                        method = raw["method"]
-                        params = raw["params"]
-                        if "id" in raw:
-                            await handle_modern_request(raw["id"], method, params)
-                        else:
-                            # Modern notification: strip modern _meta and forward if version matches.
-                            if params["_meta"].get(_PROTOCOL_VERSION_KEY) != MODERN_VERSION:
-                                continue
-                            if synthetic_initialized or legacy_initialized:
-                                stripped = strip_modern_meta(params)
-                                forwarded: dict[str, Any] = {
-                                    "jsonrpc": "2.0",
-                                    "method": method,
-                                }
-                                if stripped:
-                                    forwarded["params"] = stripped
-                                await sdk_in_send.send(_session_message(forwarded))
-                        continue
-
-                    # Legacy traffic: reject initialize if the synthetic handshake already ran.
-                    method = raw.get("method")
-                    if method == "initialize" and "id" in raw:
-                        if synthetic_initialized:
-                            await send_client(
-                                _error_message(
-                                    raw["id"],
-                                    -32600,
-                                    f"Invalid request: this process already serves the {MODERN_VERSION} era",
-                                )
-                            )
+                    request_id: Any = None
+                    has_valid_id = False
+                    modern_line = False
+                    try:
+                        raw = item.message.model_dump(by_alias=True, exclude_none=True)
+                        if is_modern(raw):
+                            modern_line = True
+                            method = raw["method"]
+                            params = raw["params"]
+                            has_id = "id" in raw
+                            if has_id:
+                                request_id = raw["id"]
+                            else:
+                                raw_all = item.message.model_dump(by_alias=True)
+                                if "id" in raw_all:
+                                    has_id = True
+                                    request_id = raw_all["id"]
+                            if has_id:
+                                if not _is_valid_request_id(request_id):
+                                    # mcp==1.27.2 JSONRPCError cannot encode a null id,
+                                    # so answer invalid ids with 0 and do not bridge them.
+                                    if not await try_send_error(0, -32600, "Invalid Request"):
+                                        task_group.cancel_scope.cancel()
+                                        return
+                                    continue
+                                has_valid_id = True
+                                await handle_modern_request(request_id, method, params)
+                            else:
+                                # Modern notification: strip modern _meta and forward if version matches.
+                                if params["_meta"].get(_PROTOCOL_VERSION_KEY) != MODERN_VERSION:
+                                    continue
+                                if synthetic_initialized or legacy_initialized:
+                                    stripped = strip_modern_meta(params)
+                                    forwarded: dict[str, Any] = {
+                                        "jsonrpc": "2.0",
+                                        "method": method,
+                                    }
+                                    if stripped:
+                                        forwarded["params"] = stripped
+                                    await sdk_in_send.send(_session_message(forwarded))
                             continue
-                        legacy_initialized = True
-                    elif (
-                        method == "notifications/initialized"
-                        and synthetic_initialized
-                        and not legacy_initialized
-                    ):
-                        # Drop the trailing initialized notification of a refused legacy initialize.
-                        continue
 
-                    await sdk_in_send.send(item)
+                        # Legacy traffic: reject initialize if the synthetic handshake already ran.
+                        method = raw.get("method")
+                        if method == "initialize" and "id" in raw:
+                            if synthetic_initialized:
+                                reply_id = raw["id"] if _is_valid_request_id(raw["id"]) else 0
+                                await send_client(
+                                    _error_message(
+                                        reply_id,
+                                        -32600,
+                                        f"Invalid request: this process already serves the {MODERN_VERSION} era",
+                                    )
+                                )
+                                continue
+                            legacy_initialized = True
+                        elif (
+                            method == "notifications/initialized"
+                            and synthetic_initialized
+                            and not legacy_initialized
+                        ):
+                            # Drop the trailing initialized notification of a refused legacy initialize.
+                            continue
+
+                        try:
+                            await sdk_in_send.send(item)
+                        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+                            break
+                    except _ClientGoneError:
+                        task_group.cancel_scope.cancel()
+                        return
+                    except Exception as exc:
+                        if has_valid_id:
+                            pending_modern.pop(_id_key(request_id), None)
+                        kind = "modern request" if modern_line else "client line"
+                        print(
+                            f"[dual_era] internal error handling {kind} ({type(exc).__name__})",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        if has_valid_id:
+                            if not await try_send_error(request_id, -32603, "Internal error"):
+                                task_group.cancel_scope.cancel()
+                                return
                 client_eof = True
             finally:
                 await _aclose_streams(sdk_in_send)
@@ -516,6 +610,13 @@ async def run_stdio(
     catalog: skills_catalog.SkillCatalog | None = None,
 ) -> None:
     """Run ``app`` over stdio through the dual-era front."""
-    active_catalog = skills_catalog.SkillCatalog.load() if catalog is None else catalog
+    if catalog is not None:
+        active_catalog = catalog
+    else:
+        attached = getattr(app, skills_catalog.APP_CATALOG_ATTR, None)
+        if isinstance(attached, skills_catalog.SkillCatalog):
+            active_catalog = attached
+        else:
+            active_catalog = skills_catalog.load_or_empty()
     async with stdio_server() as (read_stream, write_stream):
         await serve(app, read_stream, write_stream, active_catalog)

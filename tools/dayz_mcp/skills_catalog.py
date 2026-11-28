@@ -9,10 +9,12 @@ import copy
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
 EXTENSION_ID = "io.modelcontextprotocol/skills"
+APP_CATALOG_ATTR = "_dayz_mcp_skills_catalog"
 
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9]))*$")
 _FRONTMATTER_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -344,6 +346,19 @@ class SkillCatalog:
 
     def uris(self) -> list[str]:
         return sorted(self._files)
+
+
+def load_or_empty(root: str | Path | None = None) -> SkillCatalog:
+    """Load the catalog, degrading to an empty catalog with a stderr warning on SkillError."""
+    try:
+        return SkillCatalog.load(root)
+    except SkillError as exc:
+        print(
+            f"[dayz-mcp] warning: skills catalog disabled ({exc})",
+            file=sys.stderr,
+            flush=True,
+        )
+        return SkillCatalog([], {})
 
 
 def _make_resource_reader(text: str) -> Callable[[], str]:

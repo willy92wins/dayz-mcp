@@ -46,6 +46,11 @@ out (review F8 of #255). The session's identity crosses the gap as it crosses a
 recycle. The lease does not have to: only a call renews it (SESSION_TTL_S), and
 run_supervisor sets no idle timeout shorter than it lasts after the last one
 (server.MIN_IDLE_RETIREMENT_S), so it has run out before the worker is retired.
+
+A 2026-07-28 (modern stateless) client never sends ``initialize``, so a recycle cannot
+replay a handshake into a replacement worker; ``server_reload`` calls carrying
+``params._meta["io.modelcontextprotocol/protocolVersion"]`` are therefore refused with
+``modern_protocol_unsupported`` before any reservation, drain, retirement, or spawn.
 """
 
 from __future__ import annotations
@@ -74,6 +79,7 @@ def _is_observe_id(ident: object) -> bool:
     return isinstance(ident, str) and ident.startswith(_OBSERVE_PREFIX)
 
 RELOAD_TOOL_NAME = "server_reload"
+_MODERN_PROTOCOL_VERSION_KEY = "io.modelcontextprotocol/protocolVersion"
 RELOAD_TOOL = {
     "name": RELOAD_TOOL_NAME,
     "description": (
@@ -845,6 +851,20 @@ class Supervisor:
             and isinstance(params, dict)
             and params.get("name") == RELOAD_TOOL_NAME
         ):
+            meta = params.get("_meta")
+            if isinstance(meta, dict) and _MODERN_PROTOCOL_VERSION_KEY in meta:
+                self._reply(
+                    ident,
+                    {
+                        "error": "modern_protocol_unsupported",
+                        "hint": (
+                            "server_reload needs a client that sent initialize; "
+                            "restart the server process instead."
+                        ),
+                    },
+                    is_error=True,
+                )
+                return
             if self._reserve_recycle(ident):
                 try:
                     threading.Thread(
