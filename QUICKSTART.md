@@ -1,7 +1,8 @@
 # Quickstart
 
+**With an AI agent, no clone.** Subscribe to the [DayZ-MCP Workshop item](https://steamcommunity.com/sharedfiles/filedetails/?id=3846741037) and ask your agent to follow [llms-install.md](llms-install.md). It installs the Python half from the GitHub release with uv, registers it with Claude Code (and Codex, when installed) and prints the `-mod=` argument for your server. The five steps below are the clone path.
+
 Five steps, from a fresh clone to an agent reading live state out of your server.
-An AI agent can follow [llms-install.md](llms-install.md), which is the same clone path in short form (the no-clone install from a GitHub release is not published yet).
 
 Everything else in this repo is optional until this works.
 
@@ -36,8 +37,8 @@ machine, run those installers yourself first.
 valid after `git checkout v1.5`, or pack the PBO from this clone (step 3).
 A labelled historical file from that release is
 [VERSION.json](https://github.com/willy92wins/dayz-mcp/releases/download/v1.5/VERSION.json)
-(v1.5; not an install recipe). The Python half is still the clone path: the wheel
-and `dayz-mcp-requirements.txt` are not in a published release.
+(v1.5; not an install recipe). The Python half installs without a clone through
+[llms-install.md](llms-install.md).
 
 **1 — Map the work drive.** DayZ Tools resolve addon sources through `P:\`, and
 `$PBOPREFIX$` is read relative to it. Point it at the folder *containing* `addon`:

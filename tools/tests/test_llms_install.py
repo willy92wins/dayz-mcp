@@ -23,10 +23,6 @@ RELEASE_ASSET_URL_RE = re.compile(
     r"https://github.com/willy92wins/dayz-mcp/releases/download/"
     r"v[0-9][^/\s\"'`)]+/[A-Za-z0-9._+-]+"
 )
-UNPUBLISHED_NO_CLONE_ASSET_RE = re.compile(
-    r"https://github.com/willy92wins/dayz-mcp/releases/download/"
-    r"v[0-9][^/\s\"'`)]+/(?:dayz-mcp-requirements\.txt|[^/\s\"'`)]+\.whl)"
-)
 
 
 def collect_documented_release_asset_urls(
@@ -133,6 +129,30 @@ def _project_version() -> str:
             f"(found {version!r})"
         )
     return version
+
+
+def _guide_version() -> str:
+    """Single release version G named by every venv-* folder in llms-install.md."""
+    text = _read("llms-install.md")
+    venv_versions = [
+        value.rstrip(".")
+        for value in re.findall(r"\bvenv-([^\s\"'\\/`),;:]+)", text)
+    ]
+    unique: list[str] = []
+    for value in venv_versions:
+        if value not in unique:
+            unique.append(value)
+    if len(venv_versions) < 1 or len(unique) != 1:
+        raise AssertionError(
+            "llms-install.md installs the last published release, which trails "
+            "tools/pyproject.toml between steps 1 and 9 of docs/RELEASE.md "
+            f"(venv versions {venv_versions!r})"
+        )
+    return unique[0]
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
 
 
 def _lock_python_version() -> str:
@@ -271,100 +291,151 @@ class LlmsInstallDocsTest(unittest.TestCase):
             f"{len(non_empty)} non-empty lines; expected between 1 and 6",
         )
 
-    def test_commands_block_is_the_clone_path(self) -> None:
+    def test_commands_block_is_the_release_path(self) -> None:
         block_text = self._commands_block_text()
         required_tokens = (
-            "git clone https://github.com/willy92wins/dayz-mcp.git",
-            "cd dayz-mcp\\tools",
-            ".\\install-mcp.ps1",
-            "-ServerProfiles",
-            "-ClientProfiles",
-            "-Register",
+            "--no-bin",
+            "--no-registry",
+            "os.path.realpath",
+            "--without-pip",
+            "--link-mode=copy",
+            "--require-hashes",
+            "setup --json",
         )
         for token in required_tokens:
             self.assertIn(
                 token,
                 block_text,
                 f"llms-install.md '## Commands' block omits required token "
-                f"{token!r} from the clone-path recipe",
+                f"{token!r} from the release-path recipe",
             )
         self.assertIsNone(
-            re.search(
-                r"https://github.com/willy92wins/dayz-mcp/releases/download/",
-                block_text,
-            ),
-            "llms-install.md '## Commands' block must not advertise a "
-            "releases/download URL until a release publishes that asset",
-        )
-        self.assertIsNone(
             re.search(r"\buv\s+venv\b", block_text),
-            "llms-install.md '## Commands' block uses forbidden 'uv venv'",
+            "llms-install.md '## Commands' block uses forbidden 'uv venv'; "
+            "the recipe must invoke 'os.path.realpath(sys.executable)' with "
+            "'-m venv --without-pip'",
+        )
+        self.assertNotIn("git clone", block_text)
+        self.assertNotIn("install-mcp.ps1", block_text)
+
+    def test_guide_versions_agree_and_do_not_pass_pyproject(self) -> None:
+        why = (
+            "llms-install.md installs the last published release, which trails "
+            "tools/pyproject.toml between steps 1 and 9 of docs/RELEASE.md"
+        )
+        guide_version = _guide_version()
+        text = _read("llms-install.md")
+        venv_versions = [
+            value.rstrip(".")
+            for value in re.findall(r"\bvenv-([^\s\"'\\/`),;:]+)", text)
+        ]
+        self.assertGreaterEqual(len(venv_versions), 1, why)
+        bad_venv = [value for value in venv_versions if value != guide_version]
+        self.assertEqual(bad_venv, [], f"{why}; venv versions {venv_versions!r}")
+
+        expected_tag = f"v{guide_version}"
+        download_tags = re.findall(r"/releases/download/([^/\s\"'`]+)/", text)
+        self.assertGreaterEqual(len(download_tags), 1, why)
+        bad_tags = [tag for tag in download_tags if tag != expected_tag]
+        self.assertEqual(
+            bad_tags,
+            [],
+            f"{why}; /releases/download/.../ tags {bad_tags!r} differ from "
+            f"{expected_tag!r}",
+        )
+        self.assertLessEqual(
+            _version_tuple(guide_version),
+            _version_tuple(_project_version()),
+            why,
         )
 
-    def test_guide_does_not_sell_an_unpublished_no_clone_path(self) -> None:
-        for doc_name in USER_GUIDE_DOCS:
-            body = _read(doc_name)
-            with self.subTest(doc=doc_name):
-                self.assertIsNone(
-                    UNPUBLISHED_NO_CLONE_ASSET_RE.search(body),
-                    f"{doc_name} still advertises an unpublished wheel or "
-                    "dayz-mcp-requirements.txt download URL",
-                )
-                lowered = body.casefold()
-                self.assertNotIn("no clone.", lowered)
-                self.assertNotIn("without a clone", lowered)
-                self.assertNotIn("sin clonar", lowered)
+    def test_requirements_url_matches_make_release(self) -> None:
+        release_download_url = _module_string_constant(
+            "tools/make_release.py", "RELEASE_DOWNLOAD_URL"
+        )
+        requirements_asset_name = _module_string_constant(
+            "tools/make_release.py", "REQUIREMENTS_ASSET_NAME"
+        )
+        version = _guide_version()
+        expected_url = f"{release_download_url}/v{version}/{requirements_asset_name}"
 
-    def test_register_requires_python_311_and_native_claude_and_codex(self) -> None:
+        block_text = self._commands_block_text()
+        targets = re.findall(r"(?<!\S)-r\s+(\S+)", block_text)
+        self.assertGreaterEqual(
+            len(targets),
+            1,
+            "llms-install.md '## Commands' block has no '-r <url>' argument; "
+            f"expected {expected_url!r} from tools/make_release.py and "
+            "the guide version",
+        )
+        bad_targets = [target for target in targets if target != expected_url]
+        self.assertEqual(
+            bad_targets,
+            [],
+            f"llms-install.md '## Commands' '-r' target(s) {bad_targets!r} differ "
+            f"from tools/make_release.py + guide version {expected_url!r}",
+        )
+        self.assertIsNotNone(
+            re.search(rf"(?<!\S)-r {re.escape(expected_url)}(?!\S)", block_text),
+            "llms-install.md '## Commands' block does not contain exact "
+            f"'-r {expected_url}' from tools/make_release.py and the guide version",
+        )
+
+    def test_guide_states_setup_registration(self) -> None:
         body = _read("llms-install.md")
-        lowered = body.casefold()
-        self.assertNotIn("codex is optional", lowered)
-        self.assertIn("Python 3.11", body)
-        self.assertIn("-Register", body)
-        self.assertIn("Claude", body)
-        self.assertIn("Codex", body)
-        self.assertIn("native", lowered)
-        self.assertIn("registration check failed for Codex", body)
-        self.assertRegex(
-            body,
-            r"-Register.{0,160}(Claude.{0,80}Codex|Codex.{0,80}Claude)"
-            r"|(Claude.{0,80}Codex|Codex.{0,80}Claude).{0,160}-Register",
-            "llms-install.md must say -Register requires both Claude and Codex",
-        )
-
-    def test_guide_documents_workshop_mod_and_client_profiles(self) -> None:
-        body = _read("llms-install.md")
-        workshop_id = _module_string_constant(
-            "tools/dayz_mcp/setup_cmd.py", "WORKSHOP_ITEM_ID"
-        )
+        self.assertIn("Claude Code installed as a native Windows executable", body)
+        self.assertIn("Codex is optional", body)
+        self.assertIn("`~/.codex/config.toml`", body)
+        self.assertIn("registers Claude only", body)
+        setup = _read("tools/dayz_mcp/setup_cmd.py")
         self.assertIn(
-            rf"steamapps\workshop\content\221100\{workshop_id}",
-            body,
+            '["claude"] if claude_only else ["claude", "codex"]',
+            setup,
         )
-        self.assertIn("-mod=", body)
-        self.assertIn("-profiles=", body)
-        self.assertIn("-ClientProfiles", body)
-        self.assertIn("-ClientProfiles", self._commands_block_text())
-        self.assertRegex(
-            body,
-            r"does not print.{0,40}-mod=|-mod=.{0,40}does not print",
-        )
-        self.assertRegex(
-            body,
-            r"Without `-ClientProfiles`.{0,120}dayz_mcp\.json"
-            r"|without `-ClientProfiles`.{0,120}dayz_mcp\.json",
-        )
+        self.assertIn('".codex" / "config.toml"', setup)
 
-    def test_doctor_check_uses_doctor_module_and_daemon_policy(self) -> None:
+    def test_reading_the_setup_json_names_the_setup_payload(self) -> None:
+        section = "\n".join(
+            _extract_h2_section(
+                _read("llms-install.md"),
+                "## Reading the setup JSON",
+                doc_name="llms-install.md",
+            )
+        )
+        payload_keys = (
+            "mod_arg",
+            "server_profiles_arg",
+            "client_profiles_arg",
+            "registered",
+            "server_name",
+        )
+        for key in payload_keys:
+            self.assertIn(
+                f"`{key}`",
+                section,
+                f"llms-install.md '## Reading the setup JSON' does not name `{key}`",
+            )
+        self.assertIn("Keys\\DayZ_MCP.bikey", section)
+        setup = _read("tools/dayz_mcp/setup_cmd.py")
+        for key in payload_keys:
+            self.assertIn(f'"{key}":', setup)
+
+    def test_doctor_check_uses_the_wheel_entry_point(self) -> None:
         body = _read("llms-install.md")
         self.assertIn(
-            "-m dayz_mcp.doctor --daemon-policy normal --json",
+            ".\\dayz-mcp.exe doctor --daemon-policy normal --json",
             body,
         )
         self.assertIsNone(
             re.search(r"-m dayz_mcp doctor\b", body),
             "llms-install.md must not invoke `python -m dayz_mcp doctor` "
             "(that hits server.run and requires --keyfile)",
+        )
+        self.assertNotIn(
+            "-m dayz_mcp.doctor",
+            body,
+            "llms-install.md must not invoke `python -m dayz_mcp.doctor` "
+            "(this path has no clone, and the wheel venv's python is not on PATH)",
         )
 
     def test_changelog_1_6_does_not_promise_no_clone_install(self) -> None:
@@ -483,6 +554,43 @@ class LlmsInstallDocsTest(unittest.TestCase):
             "'llms-install.md' as a file to update with tools/pyproject.toml",
         )
 
+    def test_release_runbook_step_9_moves_llms_install(self) -> None:
+        lines = _read("docs/RELEASE.md").splitlines()
+        step8_indices = [
+            idx for idx, line in enumerate(lines) if line.startswith("## 8.")
+        ]
+        step9_indices = [
+            idx for idx, line in enumerate(lines) if line.startswith("## 9.")
+        ]
+        self.assertEqual(
+            len(step8_indices),
+            1,
+            f"docs/RELEASE.md must have exactly one '## 8.' heading (found {len(step8_indices)})",
+        )
+        self.assertEqual(
+            len(step9_indices),
+            1,
+            f"docs/RELEASE.md must have exactly one '## 9.' heading (found {len(step9_indices)})",
+        )
+        self.assertGreater(
+            step9_indices[0],
+            step8_indices[0],
+            f"docs/RELEASE.md '## 9.' (line {step9_indices[0] + 1}) must follow "
+            f"'## 8.' (line {step8_indices[0] + 1})",
+        )
+        end = len(lines)
+        for idx in range(step9_indices[0] + 1, len(lines)):
+            if lines[idx].startswith("## "):
+                end = idx
+                break
+        section = "\n".join(lines[step9_indices[0] : end])
+        for token in ("llms-install.md", "step 8", "venv-X.Y.Z"):
+            self.assertIn(
+                token,
+                section,
+                f"docs/RELEASE.md step 9 does not name {token!r}",
+            )
+
     def test_quickstart_does_not_prescribe_v15_addon_zip_for_current_clone(self) -> None:
         body = _read("QUICKSTART.md")
         self.assertNotIn(
@@ -499,7 +607,7 @@ class LlmsInstallDocsTest(unittest.TestCase):
         self.assertRegex(body, r"(?i)historical")
 
     def test_quickstart_and_readme_register_require_claude_and_codex(self) -> None:
-        for doc_name in ("QUICKSTART.md", "README.md", "llms-install.md"):
+        for doc_name in ("QUICKSTART.md", "README.md"):
             body = _read(doc_name)
             with self.subTest(doc=doc_name):
                 lowered = body.casefold()

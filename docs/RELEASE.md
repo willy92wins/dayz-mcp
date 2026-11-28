@@ -8,14 +8,14 @@ already-built PBO and stages five verifiable release assets.
 
 Set the release version in
 [`tools/pyproject.toml:7`](../tools/pyproject.toml#L7). Use the same value, without
-the leading `v`, throughout this runbook. If a release publishes the wheel and `dayz-mcp-requirements.txt` and the no-clone path in `llms-install.md` is re-enabled, set the same value there (`venv-X.Y.Z` and the release URL). Until those assets exist, `llms-install.md` stays on the clone path; `tools/tests/test_llms_install.py` does a real GET of every concrete `releases/download/...` asset the docs mention.
+the leading `v`, throughout this runbook. Do not change `llms-install.md` here: it installs the last published release until step 9 moves it to this one. `tools/tests/test_llms_install.py` does a real GET of every concrete `releases/download/...` asset the user guides mention, so a guide that names this release before its assets are published fails it.
 
 [EXACT]
 
 ```powershell
 $Version = "X.Y.Z"
-git diff -- tools/pyproject.toml llms-install.md
-git add tools/pyproject.toml llms-install.md
+git diff -- tools/pyproject.toml
+git add tools/pyproject.toml
 git commit -m "Bump version to $Version"
 if (git status --porcelain) { throw "Release worktree is not clean" }
 ```
@@ -493,6 +493,10 @@ Publisher from DayZ Tools at that `@DayZ_MCP` folder itself; pointed at its
 `Addons` folder, the Publisher fails without uploading anything. Never publish
 the build folder. Use the Publisher because SteamCMD with the owner's account
 closes the owner's Steam client session. The item's description links to `https://github.com/willy92wins/dayz-mcp/blob/main/llms-install.md`.
+
+## 9. Point the agent guide at this release
+
+After step 8 has published the Workshop item, open a docs PR that moves `llms-install.md` to this version: every `venv-X.Y.Z` and the release URL. If the header of `tools/release/requirements.lock.txt` at the tag names another Python version, change it in the two `uv python` lines too. The item's description links to the `llms-install.md` on `main` (step 8), so the guide moves only after the item carries this release's PBO; before that, it would install this release's wheel beside the previous release's PBO. `tools/tests/test_llms_install.py` does a real GET of every asset the user guides name, so the PR passes only once this release's assets are published.
 
 ## Updating the dependency lock
 
