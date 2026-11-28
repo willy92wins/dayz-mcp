@@ -1,0 +1,1136 @@
+"""fb-20261127-181405-b95f: engine_set and vehicle_control drive a vanilla motorbike.
+
+A vanilla motorbike (MotorbikeScript, motorbikescript.c:53; Motorbike_01_* in DayZ 1.30) is not a
+CarScript, so both verbs answered not_a_car for its driver. The bridge now also resolves the motorbike
+the local player drives and whose simulation this client owns, with the car's refusal codes in the car's
+order: not_seated, then not_a_car (a vehicle that is neither a car nor a motorbike, such as a boat), then
+not_driver, then not_owner. A motorbike reports VEHICLESEAT_DRIVER for every seat
+(MotorbikeScript.GetSeatAnimationType, motorbikescript.c:449-452) and its config marks both crew
+positions as drivers, so its driver is crew position 0 (Transport.CrewMemberIndex, transport.c:186). The
+fake bike below reports the driver seat for every position, so a resolver that reads the seat type lets
+the passenger drive and fails here.
+
+No Enforce runtime: tests.enforce_subset_helpers translates the bridge methods and MCPCarDrive's statics
+from the source and runs them against fakes of the vanilla calls they make.
+
+r2 (laptop run 86e11ba5, M5 red): a running motorbike gets throttle, steering and its kickstand up on every
+tick, below idle too, and its first gear is GetNeutralGear() + 1. MotorbikeBelowIdleDriveTest runs the shipped
+MotorbikeScript.OnInput on a fake bike; MotorbikeBelowIdleMutantTest shows the 2a2242d body fails it.
+
+r3 (laptop PT19, run 234abf17, M5 short of 5 m/s at 5 s): below 5 km/h with throttle, or below first gear, the
+bike shifts to first before any redline upshift, and it waits its own MCP_AUTO_SHIFT_SETTLE_S (at least its
+0.8 s clutch cycle) between automatic upshifts; the car keeps 0.3 s. MotorbikeShiftTest and MotorbikeShiftMutantTest.
+"""
+from __future__ import annotations
+
+import re
+import unittest
+from types import SimpleNamespace
+
+from dayz_mcp.server import ServerConfig, build_app
+from tests._addon_paths import addon_root
+from tests.enforce_subset_helpers import EnforceString, method_body, translate
+
+CLIENT_BRIDGE = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
+CAR_SCRIPT = addon_root() / "scripts" / "4_World" / "MCP_CarScript.c"
+BIKE_SCRIPT = addon_root() / "scripts" / "4_World" / "MCP_MotorbikeScript.c"
+RESOLVE_CAR = "protected CarScript ResolveOwnedCar(out string error)"
+RESOLVE_BIKE = "protected MotorbikeScript ResolveOwnedMotorbike(out string error)"
+ENGINE_SET = "protected bool DispatchEngineSet(MCPCommand command, MCPResult result)"
+VEHICLE_CONTROL = "protected bool DispatchVehicleControl(MCPCommand command, MCPResult result)"
+FINITE = "protected bool IsFiniteFloat(float value)"
+DRIVE_SET = "static void Set(CarScript car, float throttle, float steer, float brake, float handbrake, float deadlineS)"
+DRIVE_SET_BIKE = (
+    "static void SetMotorbike(MotorbikeScript bike, float throttle, float steer, float brake, float handbrake, "
+    "float deadlineS)"
+)
+DRIVE_CLEAR = "static void Clear()"
+REFUSALS = ("not_seated", "not_a_car", "not_driver", "not_owner")
+DRIVE_MEMBERS = (
+    "s_Active",
+    "s_Car",
+    "s_Bike",
+    "s_Throttle",
+    "s_Steer",
+    "s_Brake",
+    "s_Handbrake",
+    "s_DeadlineS",
+    "s_TickEngineReady",
+    "s_TickThrottleSet",
+    "s_LastAutoShiftS",
+)
+
+SEATS = SimpleNamespace(
+    VEHICLESEAT_DRIVER=101,
+    VEHICLESEAT_CODRIVER=102,
+    VEHICLESEAT_PASSENGER_L=103,
+    VEHICLESEAT_PASSENGER_R=104,
+)
+CAR_POSITION = {
+    SEATS.VEHICLESEAT_DRIVER: 0,
+    SEATS.VEHICLESEAT_CODRIVER: 1,
+    SEATS.VEHICLESEAT_PASSENGER_L: 2,
+    SEATS.VEHICLESEAT_PASSENGER_R: 3,
+}
+CONTROL_ARGS = {"throttle": 0.5, "steer": -0.25, "brake": 0.0, "handbrake": 0.0, "hold_ttl_s": 8.0}
+TICK_TIME = 100.0
+
+
+class FakeVehicle:
+    """A transport of one kind: car (CarScript), bike (MotorbikeScript) or boat (neither)."""
+
+    def __init__(self, kind: str, *, owner: bool) -> None:
+        self.kind = kind
+        self.owner = owner
+        self.engine_on = False
+        self.crew: dict[int, object] = {}
+        self.calls: list[object] = []
+
+    def IsOwner(self) -> bool:
+        self.calls.append("IsOwner")
+        return self.owner
+
+    def EngineStart(self) -> None:
+        self.calls.append("EngineStart")
+        self.engine_on = True
+
+    def EngineStop(self) -> None:
+        self.calls.append("EngineStop")
+        self.engine_on = False
+
+    def EngineIsOn(self) -> bool:
+        return self.engine_on
+
+    def CrewMemberIndex(self, player: object) -> int:
+        for position, member in self.crew.items():
+            if member is player:
+                return position
+        return -1
+
+    def CrewDriver(self) -> object:
+        return self.crew.get(0)
+
+    def SetBrakesActivateWithoutDriver(self, activate: bool = True) -> None:
+        self.calls.append(("SetBrakesActivateWithoutDriver", activate))
+
+
+class FakeVehicleCommand:
+    def __init__(self, transport: FakeVehicle, seat: int) -> None:
+        self.transport = transport
+        self.seat = seat
+
+    def GetTransport(self) -> FakeVehicle:
+        return self.transport
+
+    def GetVehicleSeat(self) -> int:
+        return self.seat
+
+
+class FakePlayer:
+    def __init__(self) -> None:
+        self.command: FakeVehicleCommand | None = None
+
+    def GetCommand_Vehicle(self) -> FakeVehicleCommand | None:
+        return self.command
+
+
+class FakeGame:
+    def __init__(self) -> None:
+        self.player: FakePlayer | None = None
+
+    def GetPlayer(self) -> FakePlayer | None:
+        return self.player
+
+    def GetTickTime(self) -> float:
+        return TICK_TIME
+
+
+class Caster:
+    """Class.Cast: the value when it is of the class, else null."""
+
+    def __init__(self, accepts) -> None:
+        self.accepts = accepts
+
+    def Cast(self, value: object) -> object:
+        return value if value is not None and self.accepts(value) else None
+
+
+class DriveRecorder:
+    """MCPCarDrive as the verbs see it: every static call is recorded with its arguments."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return lambda *args: self.calls.append((name,) + args)
+
+
+def _seat(vehicle: FakeVehicle, position: int, seat: int) -> FakePlayer:
+    player = FakePlayer()
+    player.command = FakeVehicleCommand(vehicle, seat)
+    vehicle.crew[position] = player
+    return player
+
+
+def _car(seat: int, *, owner: bool = True):
+    car = FakeVehicle("car", owner=owner)
+    return _seat(car, CAR_POSITION[seat], seat), car
+
+
+def _bike(position: int, *, owner: bool = True, driver_present: bool = False):
+    bike = FakeVehicle("bike", owner=owner)
+    if driver_present:
+        _seat(bike, 0, SEATS.VEHICLESEAT_DRIVER)
+    # Every motorbike seat reads VEHICLESEAT_DRIVER (motorbikescript.c:449-452).
+    return _seat(bike, position, SEATS.VEHICLESEAT_DRIVER), bike
+
+
+def _boat(seat: int):
+    boat = FakeVehicle("boat", owner=True)
+    return _seat(boat, CAR_POSITION[seat], seat), boat
+
+
+# state -> (builder of (player, vehicle), refusal code, or "" when the verb acts on the vehicle)
+SCENARIOS = {
+    "no_player": (lambda: (None, None), "not_seated"),
+    "on_foot": (lambda: (FakePlayer(), None), "not_seated"),
+    "boat_driver": (lambda: _boat(SEATS.VEHICLESEAT_DRIVER), "not_a_car"),
+    "boat_codriver": (lambda: _boat(SEATS.VEHICLESEAT_CODRIVER), "not_a_car"),
+    "car_owning_driver": (lambda: _car(SEATS.VEHICLESEAT_DRIVER), ""),
+    "car_codriver": (lambda: _car(SEATS.VEHICLESEAT_CODRIVER), "not_driver"),
+    "car_driver_not_owner": (lambda: _car(SEATS.VEHICLESEAT_DRIVER, owner=False), "not_owner"),
+    "bike_owning_driver": (lambda: _bike(0), ""),
+    "bike_driver_not_owner": (lambda: _bike(0, owner=False), "not_owner"),
+    "bike_passenger_behind_driver": (lambda: _bike(1, driver_present=True), "not_driver"),
+    "bike_lone_passenger": (lambda: _bike(1), "not_driver"),
+    "bike_passenger_not_owner": (lambda: _bike(1, owner=False), "not_driver"),
+}
+DRIVE_STORE = {"car": "Set", "bike": "SetMotorbike"}
+
+
+def _float_constant(source: str, name: str) -> float:
+    match = re.search(r"protected const float " + name + r" = ([0-9.]+);", source)
+    if match is None:
+        raise AssertionError(f"missing constant {name}")
+    return float(match.group(1))
+
+
+class BridgeModel:
+    """The translated client methods, wired to fakes of one game."""
+
+    def __init__(self, source: str) -> None:
+        self.game = FakeGame()
+        self.drive = DriveRecorder()
+        self.namespace: dict[str, object] = {
+            "GetGame": lambda: self.game,
+            "PlayerBase": Caster(lambda value: isinstance(value, FakePlayer)),
+            "CarScript": Caster(lambda value: isinstance(value, FakeVehicle) and value.kind == "car"),
+            "MotorbikeScript": Caster(lambda value: isinstance(value, FakeVehicle) and value.kind == "bike"),
+            "DayZPlayerConstants": SEATS,
+            "MCPCarDrive": self.drive,
+            "VEHICLE_CONTROL_DEFAULT_TTL_S": _float_constant(source, "VEHICLE_CONTROL_DEFAULT_TTL_S"),
+            "VEHICLE_CONTROL_MAX_TTL_S": _float_constant(source, "VEHICLE_CONTROL_MAX_TTL_S"),
+        }
+        resolver_types = {"PlayerBase", "HumanCommandVehicle", "CarScript", "MotorbikeScript"}
+        self.resolve_car = translate(source, RESOLVE_CAR, self.namespace, class_types=resolver_types)
+        self.resolve_bike = translate(source, RESOLVE_BIKE, self.namespace, class_types=resolver_types)
+        translate(source, FINITE, self.namespace)
+        resolvers = {"ResolveOwnedCar": 1, "ResolveOwnedMotorbike": 1}
+        verb_types = {"CarScript", "MotorbikeScript", "MCPArgs"}
+        self.engine_set = translate(
+            source, ENGINE_SET, self.namespace, class_types=verb_types, out_functions=resolvers
+        )
+        self.vehicle_control = translate(
+            source, VEHICLE_CONTROL, self.namespace, class_types=verb_types, out_functions=resolvers
+        )
+
+    def seat(self, build) -> FakeVehicle | None:
+        player, vehicle = build()
+        self.game.player = player
+        self.drive.calls.clear()
+        return vehicle
+
+    def run_engine_set(self, mode: str):
+        command = SimpleNamespace(args=SimpleNamespace(mode=EnforceString.of(mode)))
+        result = SimpleNamespace(ok=None, error=EnforceString(b""), engine_on_server=None)
+        return self.engine_set(command, result), result
+
+    def run_vehicle_control(self):
+        command = SimpleNamespace(args=SimpleNamespace(**CONTROL_ARGS))
+        result = SimpleNamespace(ok=None, error=EnforceString(b""), engine_on_server=None)
+        return self.vehicle_control(command, result), result
+
+
+def _outcomes(model: BridgeModel) -> dict[tuple[str, str], tuple]:
+    """(verb, state) -> (posted, ok, error, what reached the vehicle), by value only."""
+    outcomes: dict[tuple[str, str], tuple] = {}
+    for state, (build, _expected) in SCENARIOS.items():
+        for mode in ("start", "stop"):
+            vehicle = model.seat(build)
+            posted, result = model.run_engine_set(mode)
+            effects = tuple(call for call in (vehicle.calls if vehicle else []) if call != "IsOwner")
+            outcomes[("engine_set " + mode, state)] = (posted, result.ok, result.error.text, effects)
+        vehicle = model.seat(build)
+        posted, result = model.run_vehicle_control()
+        calls = tuple(
+            (call[0], "seated_vehicle" if call[1] is vehicle else repr(call[1])) + tuple(call[2:])
+            for call in model.drive.calls
+        )
+        outcomes[("vehicle_control", state)] = (posted, result.ok, result.error.text, calls)
+    return outcomes
+
+
+def _mutate(source: str, signature: str, old: str, new: str) -> str:
+    start = source.index("{", source.index(signature))
+    end = source.index("\n\t}\n", start)
+    at = source.find(old, start, end)
+    if at < 0:
+        raise AssertionError(f"mutation target {old!r} not in {signature}")
+    return source[:at] + new + source[at + len(old) :]
+
+
+class MotorbikeVerbTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.source = CLIENT_BRIDGE.read_text(encoding="utf-8")
+        self.model = BridgeModel(self.source)
+
+    def test_engine_set_acts_only_for_the_owning_driver_of_a_car_or_a_motorbike(self) -> None:
+        for state, (build, expected) in SCENARIOS.items():
+            for mode in ("start", "stop"):
+                with self.subTest(state=state, mode=mode):
+                    vehicle = self.model.seat(build)
+                    posted, result = self.model.run_engine_set(mode)
+                    self.assertIs(posted, True)
+                    effects = [call for call in (vehicle.calls if vehicle else []) if call != "IsOwner"]
+                    if expected:
+                        self.assertIs(result.ok, False)
+                        self.assertEqual(result.error.text, expected)
+                        self.assertEqual(effects, [])
+                        self.assertIsNone(result.engine_on_server)
+                    else:
+                        self.assertIs(result.ok, True)
+                        self.assertEqual(result.error.text, "")
+                        self.assertEqual(effects, ["EngineStart" if mode == "start" else "EngineStop"])
+                        self.assertIs(result.engine_on_server, mode == "start")
+
+    def test_vehicle_control_hands_the_controls_to_the_store_of_that_vehicle(self) -> None:
+        deadline = TICK_TIME + CONTROL_ARGS["hold_ttl_s"]
+        for state, (build, expected) in SCENARIOS.items():
+            with self.subTest(state=state):
+                vehicle = self.model.seat(build)
+                posted, result = self.model.run_vehicle_control()
+                self.assertIs(posted, True)
+                if expected:
+                    self.assertIs(result.ok, False)
+                    self.assertEqual(result.error.text, expected)
+                    self.assertEqual(self.model.drive.calls, [])
+                else:
+                    self.assertIs(result.ok, True)
+                    self.assertEqual(
+                        self.model.drive.calls,
+                        [(DRIVE_STORE[vehicle.kind], vehicle, 0.5, -0.25, 0.0, 0.0, deadline)],
+                    )
+                    self.assertIs(result.engine_on_server, False)
+
+    def test_the_motorbike_resolver_returns_the_four_codes_in_the_car_order(self) -> None:
+        body = method_body(self.source, RESOLVE_BIKE)
+        coded = re.findall(r'error = "([a-z_]+)";\s*return null;', body)
+        self.assertEqual(len(coded), body.count("return null;"))
+        self.assertEqual(coded, ["not_seated", "not_seated", "not_a_car", "not_driver", "not_owner"])
+        self.assertLess(body.index("MotorbikeScript.Cast("), body.index('error = "not_a_car";'))
+        self.assertLess(body.index("CrewMemberIndex(player)"), body.index("IsOwner()"))
+        # A motorbike's seat type cannot tell its driver from its passenger.
+        self.assertNotIn("GetVehicleSeat", body)
+        for state, (build, expected) in SCENARIOS.items():
+            with self.subTest(state=state):
+                vehicle = self.model.seat(build)
+                resolved, error = self.model.resolve_bike()
+                bike_expected = expected if vehicle is not None and vehicle.kind == "bike" else None
+                if vehicle is None:
+                    self.assertIsNone(resolved)
+                    self.assertEqual(error.text, "not_seated")
+                elif vehicle.kind != "bike":
+                    self.assertIsNone(resolved)
+                    self.assertEqual(error.text, "not_a_car")
+                elif bike_expected:
+                    self.assertIsNone(resolved)
+                    self.assertEqual(error.text, bike_expected)
+                else:
+                    self.assertIs(resolved, vehicle)
+                    self.assertEqual(error.text, "")
+
+    def test_both_verbs_try_the_motorbike_only_after_the_car_answered_not_a_car(self) -> None:
+        for signature in (ENGINE_SET, VEHICLE_CONTROL):
+            with self.subTest(verb=signature):
+                body = method_body(self.source, signature)
+                self.assertEqual(body.count("ResolveOwnedCar(carError)"), 1)
+                self.assertEqual(body.count("ResolveOwnedMotorbike(carError)"), 1)
+                guard = method_body(body, 'if (!car && carError == "not_a_car")')
+                self.assertEqual(" ".join(guard.split()), "bike = ResolveOwnedMotorbike(carError);")
+                refusal = " ".join(method_body(body, "if (!car && !bike)").split())
+                self.assertEqual(refusal, "result.ok = false; result.error = carError; return true;")
+                self.assertNotIn('result.error = "not_seated"', body)
+
+
+class DriveStoreTest(unittest.TestCase):
+    """MCPCarDrive drives one vehicle at a time, and a car it lets go gets its driverless brake back."""
+
+    def setUp(self) -> None:
+        source = CAR_SCRIPT.read_text(encoding="utf-8")
+        self.game = FakeGame()
+        self.namespace: dict[str, object] = {"GetGame": lambda: self.game}
+        for name in DRIVE_MEMBERS:
+            self.namespace[name] = None
+        self.namespace.update(s_Active=False, s_LastAutoShiftS=-1.0, s_TickEngineReady=False, s_TickThrottleSet=False)
+        self.namespace["AUTO_SHIFT_SETTLE_S"] = 0.3
+        types = {"CarScript", "MotorbikeScript"}
+        self.set_car = translate(source, DRIVE_SET, self.namespace, class_types=types, members=DRIVE_MEMBERS)
+        self.set_bike = translate(source, DRIVE_SET_BIKE, self.namespace, class_types=types, members=DRIVE_MEMBERS)
+        self.clear = translate(source, DRIVE_CLEAR, self.namespace, class_types=types, members=DRIVE_MEMBERS)
+
+    def test_a_motorbike_drive_drops_the_car_and_gives_it_its_brake_back(self) -> None:
+        car = FakeVehicle("car", owner=True)
+        bike = FakeVehicle("bike", owner=True)
+        self.set_car(car, 0.5, 0.0, 0.0, 0.0, TICK_TIME + 5.0)
+        self.set_bike(bike, 0.7, 0.25, 0.1, 1.0, TICK_TIME + 6.0)
+        ns = self.namespace
+        self.assertIs(ns["s_Bike"], bike)
+        self.assertIsNone(ns["s_Car"])
+        self.assertIs(ns["s_Active"], True)
+        self.assertEqual(
+            (ns["s_Throttle"], ns["s_Steer"], ns["s_Brake"], ns["s_Handbrake"], ns["s_DeadlineS"]),
+            (0.7, 0.25, 0.1, 1.0, TICK_TIME + 6.0),
+        )
+        self.assertIn(("SetBrakesActivateWithoutDriver", True), car.calls)
+        self.assertEqual(bike.calls, [])
+
+    def test_a_car_drive_drops_the_motorbike(self) -> None:
+        car = FakeVehicle("car", owner=True)
+        bike = FakeVehicle("bike", owner=True)
+        self.set_bike(bike, 0.7, 0.0, 0.0, 0.0, TICK_TIME + 6.0)
+        self.set_car(car, 0.5, 0.0, 0.0, 0.0, TICK_TIME + 5.0)
+        self.assertIs(self.namespace["s_Car"], car)
+        self.assertIsNone(self.namespace["s_Bike"])
+
+    def test_clear_drops_the_motorbike(self) -> None:
+        bike = FakeVehicle("bike", owner=True)
+        self.set_bike(bike, 0.7, 0.0, 0.0, 0.0, TICK_TIME + 6.0)
+        self.clear()
+        self.assertIsNone(self.namespace["s_Bike"])
+        self.assertIsNone(self.namespace["s_Car"])
+        self.assertIs(self.namespace["s_Active"], False)
+
+
+class MotorbikeOnInputTest(unittest.TestCase):
+    """The modded MotorbikeScript.OnInput applies the stored controls to its own bike only."""
+
+    def test_on_input_drives_only_the_stored_motorbike_with_the_bike_setters(self) -> None:
+        # Its own file, so MCP_CarScript.c keeps the one OnInput the car tests read by signature.
+        self.assertNotIn("modded class MotorbikeScript", CAR_SCRIPT.read_text(encoding="utf-8"))
+        source = BIKE_SCRIPT.read_text(encoding="utf-8")
+        self.assertEqual(source.count("modded class MotorbikeScript"), 1)
+        bike_class = source[source.index("modded class MotorbikeScript") :]
+        body = method_body(bike_class, "override void OnInput(float dt)")
+        self.assertTrue(" ".join(body.split()).startswith("super.OnInput(dt);"))
+        self.assertIn("MCPCarDrive.s_Bike == this", body)
+        self.assertIn("MCPCarDrive.Clear();", body)
+        for setter in (
+            "SetThrottle(",
+            "SetSteering(MCPCarDrive.s_Steer)",
+            "SetBrake(MCPCarDrive.s_Brake)",
+            "SetHandbrake(MCPCarDrive.s_Handbrake)",
+            "SetKickstand(0.0)",
+        ):
+            self.assertIn(setter, body)
+        # Car-only calls stay out: the motorbike has no driverless brake, and vehicle_trace is for cars.
+        self.assertNotIn("SetBrakesActivateWithoutDriver", body)
+        self.assertNotIn("MCPVehicleTrace", body)
+        self.assertNotIn("s_TickEngineReady", body)
+
+
+class MotorbikeMutantTest(unittest.TestCase):
+    def test_mutants_of_the_motorbike_path_are_caught(self) -> None:
+        source = CLIENT_BRIDGE.read_text(encoding="utf-8")
+        expected = _outcomes(BridgeModel(source))
+        self.assertEqual(_outcomes(BridgeModel(source)), expected)
+        mutants = {
+            "engine_set_never_tries_the_motorbike": (
+                ENGINE_SET,
+                "bike = ResolveOwnedMotorbike(carError);",
+                "bike = null;",
+            ),
+            "vehicle_control_never_tries_the_motorbike": (
+                VEHICLE_CONTROL,
+                "bike = ResolveOwnedMotorbike(carError);",
+                "bike = null;",
+            ),
+            "motorbike_driver_by_seat_type": (
+                RESOLVE_BIKE,
+                "if (bike.CrewMemberIndex(player) != 0)",
+                "if (vehicleCommand.GetVehicleSeat() != DayZPlayerConstants.VEHICLESEAT_DRIVER)",
+            ),
+            "motorbike_owner_unchecked": (RESOLVE_BIKE, "if (!bike.IsOwner())", "if (false)"),
+            "motorbike_passenger_reported_not_seated": (
+                RESOLVE_BIKE,
+                'error = "not_driver";',
+                'error = "not_seated";',
+            ),
+            "motorbike_in_the_car_store": (VEHICLE_CONTROL, "MCPCarDrive.SetMotorbike(", "MCPCarDrive.Set("),
+        }
+        for label, (signature, old, new) in mutants.items():
+            with self.subTest(mutant=label):
+                mutant = BridgeModel(_mutate(source, signature, old, new))
+                self.assertNotEqual(_outcomes(mutant), expected, f"{label} is not caught")
+
+
+class MotorbikeDocsTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        app, _runtime = build_app(ServerConfig(log_sink=lambda _message: None))
+        self.tools = {tool.name: tool for tool in await app.list_tools()}
+
+    async def test_both_descriptions_name_the_motorbike_and_its_refusals(self) -> None:
+        for tool in ("engine_set", "vehicle_control"):
+            with self.subTest(tool=tool):
+                description = self.tools[tool].description or ""
+                self.assertIn("must drive a car or a motorbike this client owns", description)
+                self.assertIn(
+                    "not_a_car (seated in a vehicle that is neither a car nor a motorbike, such as a boat)",
+                    description,
+                )
+                self.assertIn(
+                    "not_driver (seated, but not in the driver seat; on a motorbike, the driver is crew "
+                    "position 0)",
+                    description,
+                )
+                self.assertIn("not_owner (in the driver seat, but this client does not own the vehicle)", description)
+                self.assertNotIn("does not own the car", description)
+
+    async def test_vehicle_control_names_the_motorbike_brakes(self) -> None:
+        description = self.tools["vehicle_control"].description or ""
+        self.assertIn(
+            "On a motorbike, brake is the rear brake and handbrake the front brake, and the kickstand goes up "
+            "while it drives.",
+            description,
+        )
+
+    async def test_engine_set_names_the_motorbike_get_in(self) -> None:
+        description = self.tools["engine_set"].description or ""
+        self.assertIn(
+            "For a motorbike, ownership comes from the vanilla get-in (action_use ActionGetInTransport).",
+            description,
+        )
+
+
+# b95f r2: on the laptop (run 86e11ba5, 6565d71, Motorbike_01_Blue) engine_set started the engine, but with throttle 1
+# for 5 s the bike moved 15 and 19 cm and stopped (0.05 m/s at most on the server). Transport.OnInput is empty and
+# runs after the native input step (transport.c:349-356): a tick without SetThrottle keeps the driver's own throttle,
+# 0 for an agent. At 2a2242d a manual gearbox was never ready below idle, a rule vanilla's DIAG autopilot also has
+# (motorbikescript.c:860-874), and an engine at idle can sit just under its configured idle (616.5 against 625 on a
+# car, test_fb_3efe_automatic_gearbox). First gear was CarGear.FIRST, while the bike numbers its gears from
+# GetNeutralGear() (motorbike.c:184; the vanilla HUD labels neutral + 1 as "1", motorbikehud.c:77-88).
+BIKE_ON_INPUT = "override void OnInput(float dt)"
+BIKE_MANUAL = 0
+BIKE_AUTOMATIC = 1
+BIKE_MODE_D = 3
+# Motorbike_01_ColorBase: Engine rpmIdle 1200, rpmRedline 6000 (vehicles_singletrack config).
+BIKE_IDLE_RPM = 1200.0
+BIKE_REDLINE_RPM = 6000.0
+MANUAL_GUARD_2A2242D = "if (GearboxGetType() == CarGearboxType.MANUAL || !EngineIsOn() || rpm < 1.0)"
+# MotorbikeScript.OnInput at 2a2242d, verbatim.
+ON_INPUT_2A2242D = """
+override void OnInput(float dt)
+{
+	super.OnInput(dt);
+
+	bool applyControl = MCPCarDrive.s_Active && MCPCarDrive.s_Bike == this;
+	if (applyControl && GetGame().GetTickTime() > MCPCarDrive.s_DeadlineS)
+	{
+		MCPCarDrive.Clear();
+		applyControl = false;
+	}
+
+	if (applyControl)
+	{
+		float rpm = EngineGetRPM();
+		float spd = GetSpeedometerAbsolute();
+		bool engineReady = true;
+
+		// Engine management. Only a throttle request starts or restarts
+		// the engine; a brake-only command leaves the engine as it is.
+		if (rpm < EngineGetRPMIdle())
+		{
+			if (MCPCarDrive.s_Throttle > 0.0)
+			{
+				if (rpm < 1.0 && EngineIsOn())
+				{
+					EngineStop();
+				}
+				else if (!EngineIsOn())
+				{
+					EngineStart();
+				}
+			}
+			// Below idle a manual gearbox is not ready. An automatic is
+			// ready once its engine runs; a stall is engine on with rpm < 1.
+			if (GearboxGetType() == CarGearboxType.MANUAL || !EngineIsOn() || rpm < 1.0)
+			{
+				engineReady = false;
+			}
+		}
+
+		// Brakes do not wait for the engine. Rear brake, then front brake.
+		SetBrake(MCPCarDrive.s_Brake);
+		SetHandbrake(MCPCarDrive.s_Handbrake);
+
+		if (engineReady)
+		{
+			float throttle = MCPCarDrive.s_Throttle;
+
+			bool isManual = GearboxGetType() == CarGearboxType.MANUAL;
+			if (isManual)
+			{
+				if (rpm > EngineGetRPMRedline() * 0.8)
+				{
+					if (throttle > 0.1)
+					{
+						float nowS = GetGame().GetTickTime();
+						// A stamp ahead of the clock is stale and never blocks.
+						if (MCPCarDrive.s_LastAutoShiftS < 0.0 || nowS < MCPCarDrive.s_LastAutoShiftS || nowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S)
+						{
+							ShiftUp();
+							MCPCarDrive.s_LastAutoShiftS = nowS;
+						}
+					}
+				}
+				else if (GetGear() < CarGear.FIRST || (throttle > 0.0 && spd < 5.0))
+				{
+					ShiftTo(CarGear.FIRST);
+				}
+			}
+			// An automatic keeps its mode until shifted. In P, R or N it
+			// shifts up behind the same settle interval and is asked for
+			// no throttle, so it gets throttle only once the mode reads D.
+			else if (throttle > 0.0 && GearboxGetMode() != CarAutomaticGearboxMode.D)
+			{
+				float modeNowS = GetGame().GetTickTime();
+				if (MCPCarDrive.s_LastAutoShiftS < 0.0 || modeNowS < MCPCarDrive.s_LastAutoShiftS || modeNowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S)
+				{
+					ShiftUp();
+					MCPCarDrive.s_LastAutoShiftS = modeNowS;
+				}
+
+				throttle = 0.0;
+			}
+
+			SetThrottle(throttle);
+			SetSteering(MCPCarDrive.s_Steer);
+			SetKickstand(0.0);
+		}
+	}
+}
+"""
+
+
+class _Bike:
+    """A MotorbikeScript as its OnInput reads and drives it. Every setter, shift and engine call is recorded."""
+
+    def __init__(
+        self,
+        *,
+        rpm: float,
+        engine_on: bool = True,
+        gear: int = 1,
+        neutral: int = 1,
+        gearbox: int = BIKE_MANUAL,
+        speed: float = 0.0,
+    ) -> None:
+        self.rpm = rpm
+        self.engine_on = engine_on
+        self.gear = gear
+        self.neutral = neutral
+        self.gearbox = gearbox
+        self.speed = speed
+        self.calls: list[tuple] = []
+
+    def bind(self, namespace: dict) -> None:
+        for name in (
+            "EngineGetRPM",
+            "EngineGetRPMIdle",
+            "EngineGetRPMRedline",
+            "EngineIsOn",
+            "EngineStart",
+            "EngineStop",
+            "GetSpeedometerAbsolute",
+            "GearboxGetType",
+            "GearboxGetMode",
+            "GetGear",
+            "GetNeutralGear",
+            "GetGearCount",
+            "ShiftUp",
+            "ShiftDown",
+            "ShiftTo",
+            "SetThrottle",
+            "SetSteering",
+            "SetBrake",
+            "SetHandbrake",
+            "SetKickstand",
+            "SetClutch",
+            "GetClutch",
+            "GetThrottle",
+        ):
+            namespace[name] = getattr(self, name)
+
+    def EngineGetRPM(self) -> float:
+        return self.rpm
+
+    def EngineGetRPMIdle(self) -> float:
+        return BIKE_IDLE_RPM
+
+    def EngineGetRPMRedline(self) -> float:
+        return BIKE_REDLINE_RPM
+
+    def EngineIsOn(self) -> bool:
+        return self.engine_on
+
+    def EngineStart(self) -> None:
+        self.calls.append(("EngineStart",))
+        self.engine_on = True
+
+    def EngineStop(self) -> None:
+        self.calls.append(("EngineStop",))
+        self.engine_on = False
+
+    def GetSpeedometerAbsolute(self) -> float:
+        return self.speed
+
+    def GearboxGetType(self) -> int:
+        return self.gearbox
+
+    def GearboxGetMode(self) -> int:
+        return BIKE_MODE_D
+
+    def GetGear(self) -> int:
+        return self.gear
+
+    def GetNeutralGear(self) -> int:
+        return self.neutral
+
+    def GetGearCount(self) -> int:
+        return self.neutral + 4
+
+    def ShiftUp(self) -> None:
+        self.calls.append(("ShiftUp",))
+
+    def ShiftDown(self) -> None:
+        self.calls.append(("ShiftDown",))
+
+    def ShiftTo(self, gear: int) -> None:
+        self.calls.append(("ShiftTo", gear))
+        self.gear = gear
+
+    def SetThrottle(self, value: float) -> None:
+        self.calls.append(("SetThrottle", value))
+
+    def SetSteering(self, value: float) -> None:
+        self.calls.append(("SetSteering", value))
+
+    def SetBrake(self, value: float) -> None:
+        self.calls.append(("SetBrake", value))
+
+    def SetHandbrake(self, value: float) -> None:
+        self.calls.append(("SetHandbrake", value))
+
+    def SetKickstand(self, value: float) -> None:
+        self.calls.append(("SetKickstand", value))
+
+    def SetClutch(self, value: float) -> None:
+        self.calls.append(("SetClutch", value))
+
+    def GetClutch(self) -> int:
+        return 0
+
+    def GetThrottle(self) -> float:
+        return 0.0
+
+
+def _bike_tick(
+    bike: _Bike,
+    *,
+    throttle: float = 1.0,
+    steer: float = 0.3,
+    brake: float = 0.0,
+    handbrake: float = 0.0,
+    source: str | None = None,
+) -> _Bike:
+    """One OnInput tick of `source` (the shipped MotorbikeScript by default) with vehicle_control held."""
+    if source is None:
+        source = BIKE_SCRIPT.read_text(encoding="utf-8")
+    drive = SimpleNamespace(
+        s_Active=True,
+        s_Car=None,
+        s_Bike=bike,
+        s_DeadlineS=TICK_TIME + 5.0,
+        s_Throttle=throttle,
+        s_Steer=steer,
+        s_Brake=brake,
+        s_Handbrake=handbrake,
+        s_LastAutoShiftS=-1.0,
+        AUTO_SHIFT_SETTLE_S=0.3,
+        Clear=lambda: None,
+    )
+    namespace: dict = {
+        "super": SimpleNamespace(OnInput=lambda _dt: None),
+        "this": bike,
+        "MCPCarDrive": drive,
+        "GetGame": lambda: SimpleNamespace(GetTickTime=lambda: TICK_TIME),
+        "CarGearboxType": SimpleNamespace(MANUAL=BIKE_MANUAL, AUTOMATIC=BIKE_AUTOMATIC),
+        "CarAutomaticGearboxMode": SimpleNamespace(P=0, R=1, N=2, D=BIKE_MODE_D),
+        "CarGear": SimpleNamespace(REVERSE=0, NEUTRAL=1, FIRST=2),
+    }
+    bike.bind(namespace)
+    translate(source, BIKE_ON_INPUT, namespace)(0.05)
+    return bike
+
+
+def _bike_contract_failures(source: str) -> list[str]:
+    """What the r2 contract finds wrong in one MotorbikeScript.OnInput source: empty when it holds."""
+    failures: list[str] = []
+    bike = _Bike(rpm=BIKE_IDLE_RPM - 20.0)
+    for rpm in (BIKE_IDLE_RPM - 20.0, BIKE_IDLE_RPM - 50.0, BIKE_IDLE_RPM - 10.0):
+        bike.rpm = rpm
+        bike.calls.clear()
+        _bike_tick(bike, throttle=1.0, steer=0.3, source=source)
+        for call in (("SetThrottle", 1.0), ("SetSteering", 0.3), ("SetKickstand", 0.0)):
+            if call not in bike.calls:
+                failures.append(f"no {call[0]} at {rpm} rpm")
+    for neutral in (0, 1):
+        for rpm in (BIKE_IDLE_RPM + 300.0, BIKE_IDLE_RPM - 20.0):
+            bike = _Bike(rpm=rpm, gear=neutral, neutral=neutral)
+            _bike_tick(bike, source=source)
+            shifts = [call for call in bike.calls if call[0] == "ShiftTo"]
+            if shifts != [("ShiftTo", neutral + 1)]:
+                failures.append(f"neutral {neutral} at {rpm} rpm shifted {shifts}")
+    return failures
+
+
+def _engine_calls(bike: _Bike) -> list[tuple]:
+    return [call for call in bike.calls if call[0] in ("EngineStart", "EngineStop")]
+
+
+class MotorbikeBelowIdleDriveTest(unittest.TestCase):
+    """b95f r2: the shipped MotorbikeScript.OnInput, one tick at a time, on a fake Motorbike_01 (idle 1200 rpm)."""
+
+    def test_a_running_bike_below_idle_gets_throttle_steering_and_kickstand_on_every_tick(self) -> None:
+        bike = _Bike(rpm=1180.0)
+        for rpm in (1180.0, 1150.0, 1190.0):
+            with self.subTest(rpm=rpm):
+                bike.rpm = rpm
+                bike.calls.clear()
+                _bike_tick(bike, throttle=1.0, steer=0.3)
+                for call in (
+                    ("SetThrottle", 1.0),
+                    ("SetSteering", 0.3),
+                    ("SetKickstand", 0.0),
+                    ("SetBrake", 0.0),
+                    ("SetHandbrake", 0.0),
+                ):
+                    self.assertIn(call, bike.calls)
+                self.assertEqual(_engine_calls(bike), [])
+
+    def test_first_gear_counts_from_the_bikes_neutral(self) -> None:
+        for neutral in (0, 1):
+            for rpm in (1500.0, 1180.0):
+                with self.subTest(neutral=neutral, rpm=rpm):
+                    bike = _Bike(rpm=rpm, gear=neutral, neutral=neutral)
+                    _bike_tick(bike)
+                    shifts = [call for call in bike.calls if call[0] == "ShiftTo"]
+                    self.assertEqual(shifts, [("ShiftTo", neutral + 1)])
+
+    def test_a_stalled_engine_is_stopped_and_a_stopped_one_started_without_throttle(self) -> None:
+        stalled = _bike_tick(_Bike(rpm=0.5, engine_on=True))
+        self.assertEqual(_engine_calls(stalled), [("EngineStop",)])
+        self.assertFalse([call for call in stalled.calls if call[0] == "SetThrottle"])
+        stopped = _bike_tick(_Bike(rpm=0.0, engine_on=False))
+        self.assertEqual(_engine_calls(stopped), [("EngineStart",)])
+        self.assertFalse([call for call in stopped.calls if call[0] == "SetThrottle"])
+
+    def test_a_brake_only_command_brakes_and_starts_nothing(self) -> None:
+        bike = _bike_tick(_Bike(rpm=0.0, engine_on=False), throttle=0.0, brake=1.0, handbrake=0.5)
+        self.assertIn(("SetBrake", 1.0), bike.calls)
+        self.assertIn(("SetHandbrake", 0.5), bike.calls)
+        self.assertEqual(_engine_calls(bike), [])
+
+    def test_the_clutch_is_left_to_the_game(self) -> None:
+        # Vanilla's DIAG autopilot never calls SetClutch either (motorbikescript.c:852-932).
+        for rpm in (1180.0, 1500.0):
+            with self.subTest(rpm=rpm):
+                bike = _bike_tick(_Bike(rpm=rpm))
+                self.assertFalse([call for call in bike.calls if call[0] == "SetClutch"])
+
+    def test_the_shipped_on_input_meets_the_contract(self) -> None:
+        self.assertEqual(_bike_contract_failures(BIKE_SCRIPT.read_text(encoding="utf-8")), [])
+
+
+class MotorbikeBelowIdleMutantTest(unittest.TestCase):
+    def test_the_2a2242d_rule_and_each_half_fix_fail_the_contract(self) -> None:
+        self.assertEqual(ON_INPUT_2A2242D.count(MANUAL_GUARD_2A2242D), 1)
+        self.assertEqual(ON_INPUT_2A2242D.count("CarGear.FIRST"), 2)
+        mutants = {
+            "2a2242d": ON_INPUT_2A2242D,
+            "guard_fixed_first_gear_from_cargear": ON_INPUT_2A2242D.replace(
+                MANUAL_GUARD_2A2242D, "if (!EngineIsOn() || rpm < 1.0)"
+            ),
+            "first_gear_fixed_guard_kept": ON_INPUT_2A2242D.replace("CarGear.FIRST", "GetNeutralGear() + 1"),
+        }
+        for label, source in mutants.items():
+            with self.subTest(mutant=label):
+                self.assertTrue(_bike_contract_failures(source), f"{label} is not caught")
+
+
+class MotorbikeSpeedDocsTest(unittest.TestCase):
+    def test_vehicle_testing_says_where_a_motorbike_speed_is_read(self) -> None:
+        doc = addon_root().parent / "docs" / "VEHICLE_TESTING.md"
+        text = " ".join(doc.read_text(encoding="utf-8").split())
+        self.assertIn(
+            "so read a car's gear, speed, position and ownership with `vehicle_telemetry`, which fills them only "
+            "for a `CarScript`; a motorbike's speed is read on the server with `players_kinematics` (the rider's "
+            "`vel`).",
+            text,
+        )
+
+
+# b95f r3: on the laptop (PT19, run 234abf17, PBO of fe8da13d) the bike drives, but M5 fell short twice: 4.15 and
+# 4.17 m/s at 5 s, 5 m/s at about 5.4 s (0.00, 0.44, 1.88, 3.02, 4.31, 5.69, 7.71 m/s second by second). At 416d4727
+# the ShiftUp branch above 0.8 x redline came first, so at launch, with the clutch slipping, the bike could shift up
+# below 5 km/h; and the bike waited the car's 0.3 s between automatic upshifts, shorter than its clutch cycle
+# (vehicles_singletrack Clutch: Motorbike_01 uncoupleTime 0.2 + coupleTime 0.6 = 0.8 s; Motorbike_02 0.3 + 0.2 = 0.5 s).
+BIKE_SETTLE_NAME = "MCP_AUTO_SHIFT_SETTLE_S"
+BIKE_CLUTCH_CYCLE_S = max(0.2 + 0.6, 0.3 + 0.2)
+FORCED_FIRST = "GetGear() < firstGear || (throttle > 0.0 && spd < 5.0)"
+BIKE_UPSHIFT_RPM = 5000.0  # above 0.8 x the 6000 rpm redline
+# MotorbikeScript.OnInput at 416d4727, verbatim.
+ON_INPUT_416D4727 = """
+override void OnInput(float dt)
+{
+	super.OnInput(dt);
+
+	bool applyControl = MCPCarDrive.s_Active && MCPCarDrive.s_Bike == this;
+	if (applyControl && GetGame().GetTickTime() > MCPCarDrive.s_DeadlineS)
+	{
+		MCPCarDrive.Clear();
+		applyControl = false;
+	}
+
+	if (applyControl)
+	{
+		float rpm = EngineGetRPM();
+		float spd = GetSpeedometerAbsolute();
+		bool engineReady = true;
+
+		// Engine management. Only a throttle request starts or restarts
+		// the engine; a brake-only command leaves the engine as it is.
+		if (rpm < EngineGetRPMIdle())
+		{
+			if (MCPCarDrive.s_Throttle > 0.0)
+			{
+				if (rpm < 1.0 && EngineIsOn())
+				{
+					EngineStop();
+				}
+				else if (!EngineIsOn())
+				{
+					EngineStart();
+				}
+			}
+			// Below idle a running engine is ready on every gearbox. SetThrottle
+			// has to run or the native input step keeps the driver's throttle at 0.
+			if (!EngineIsOn() || rpm < 1.0)
+			{
+				engineReady = false;
+			}
+		}
+
+		// Brakes do not wait for the engine. Rear brake, then front brake.
+		SetBrake(MCPCarDrive.s_Brake);
+		SetHandbrake(MCPCarDrive.s_Handbrake);
+
+		if (engineReady)
+		{
+			float throttle = MCPCarDrive.s_Throttle;
+
+			bool isManual = GearboxGetType() == CarGearboxType.MANUAL;
+			if (isManual)
+			{
+				// First gear is one above this bike's own neutral.
+				int firstGear = GetNeutralGear() + 1;
+				if (rpm > EngineGetRPMRedline() * 0.8)
+				{
+					if (throttle > 0.1)
+					{
+						float nowS = GetGame().GetTickTime();
+						// A stamp ahead of the clock is stale and never blocks.
+						if (MCPCarDrive.s_LastAutoShiftS < 0.0 || nowS < MCPCarDrive.s_LastAutoShiftS || nowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S)
+						{
+							ShiftUp();
+							MCPCarDrive.s_LastAutoShiftS = nowS;
+						}
+					}
+				}
+				else if (GetGear() < firstGear || (throttle > 0.0 && spd < 5.0))
+				{
+					ShiftTo(firstGear);
+				}
+			}
+			// An automatic keeps its mode until shifted. In P, R or N it
+			// shifts up behind the same settle interval and is asked for
+			// no throttle, so it gets throttle only once the mode reads D.
+			else if (throttle > 0.0 && GearboxGetMode() != CarAutomaticGearboxMode.D)
+			{
+				float modeNowS = GetGame().GetTickTime();
+				if (MCPCarDrive.s_LastAutoShiftS < 0.0 || modeNowS < MCPCarDrive.s_LastAutoShiftS || modeNowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S)
+				{
+					ShiftUp();
+					MCPCarDrive.s_LastAutoShiftS = modeNowS;
+				}
+
+				throttle = 0.0;
+			}
+
+			SetThrottle(throttle);
+			SetSteering(MCPCarDrive.s_Steer);
+			SetKickstand(0.0);
+		}
+	}
+}
+"""
+
+
+def _bike_settle_s(source: str) -> float | None:
+    """The bike's own settle interval, declared once as a static const float in its modded class."""
+    found = re.findall(r"static\s+const\s+float\s+" + BIKE_SETTLE_NAME + r"\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*;", source)
+    return float(found[0]) if len(found) == 1 else None
+
+
+class _ShiftingBike(_Bike):
+    """A _Bike whose ShiftUp moves it up one gear, so the next tick sees the new gear."""
+
+    def ShiftUp(self) -> None:
+        super().ShiftUp()
+        self.gear += 1
+
+
+class _BikeRig:
+    """One bike and one MCPCarDrive kept across ticks of one OnInput source, on a clock the test sets."""
+
+    def __init__(self, source: str, *, settle_s: float, gear: int, neutral: int = 1) -> None:
+        self.bike = _ShiftingBike(rpm=BIKE_UPSHIFT_RPM, gear=gear, neutral=neutral, speed=20.0)
+        self.now = 10.0
+        self.drive = SimpleNamespace(
+            s_Active=True,
+            s_Car=None,
+            s_Bike=self.bike,
+            s_DeadlineS=1.0e9,
+            s_Throttle=1.0,
+            s_Steer=0.0,
+            s_Brake=0.0,
+            s_Handbrake=0.0,
+            s_LastAutoShiftS=-1.0,
+            AUTO_SHIFT_SETTLE_S=0.3,
+            Clear=lambda: None,
+        )
+        namespace: dict = {
+            "super": SimpleNamespace(OnInput=lambda _dt: None),
+            "this": self.bike,
+            "MCPCarDrive": self.drive,
+            "GetGame": lambda: SimpleNamespace(GetTickTime=lambda: self.now),
+            "CarGearboxType": SimpleNamespace(MANUAL=BIKE_MANUAL, AUTOMATIC=BIKE_AUTOMATIC),
+            "CarAutomaticGearboxMode": SimpleNamespace(P=0, R=1, N=2, D=BIKE_MODE_D),
+            "CarGear": SimpleNamespace(REVERSE=0, NEUTRAL=1, FIRST=2),
+            BIKE_SETTLE_NAME: settle_s,
+        }
+        self.bike.bind(namespace)
+        self.on_input = translate(source, BIKE_ON_INPUT, namespace, members=(BIKE_SETTLE_NAME,))
+
+    def tick(self, now: float, *, rpm: float = BIKE_UPSHIFT_RPM, speed: float = 20.0, throttle: float = 1.0) -> list:
+        self.now = now
+        self.bike.rpm = rpm
+        self.bike.speed = speed
+        self.drive.s_Throttle = throttle
+        self.bike.calls.clear()
+        self.on_input(0.05)
+        return [call for call in self.bike.calls if call[0] in ("ShiftTo", "ShiftUp", "ShiftDown")]
+
+
+def _r3_contract_failures(source: str, settle_s: float | None) -> list[str]:
+    """What the r3 contract finds wrong in one MotorbikeScript.OnInput source: empty when it holds."""
+    if settle_s is None:
+        return [f"no single static const float {BIKE_SETTLE_NAME}"]
+    failures: list[str] = []
+    if settle_s < BIKE_CLUTCH_CYCLE_S:
+        failures.append(f"{BIKE_SETTLE_NAME} {settle_s} is shorter than the {BIKE_CLUTCH_CYCLE_S} s clutch cycle")
+    # Forced first gear wins over the redline upshift: below 5 km/h with throttle, and below first gear.
+    for neutral in (0, 1):
+        first = neutral + 1
+        for label, gear, speed in (("first gear at 3 km/h", first, 3.0), ("neutral at 20 km/h", neutral, 20.0)):
+            shifts = _BikeRig(source, settle_s=settle_s, gear=gear, neutral=neutral).tick(10.0, speed=speed)
+            if shifts != [("ShiftTo", first)]:
+                failures.append(f"{label}, neutral {neutral}, {BIKE_UPSHIFT_RPM} rpm: {shifts}")
+    # Above 5 km/h in first gear near the redline the bike shifts up, then waits settle_s before the next upshift.
+    rig = _BikeRig(source, settle_s=settle_s, gear=2, neutral=1)
+    shifts = rig.tick(10.0)
+    if shifts != [("ShiftUp",)]:
+        failures.append(f"first gear at 20 km/h, {BIKE_UPSHIFT_RPM} rpm: {shifts}")
+    for wait in (0.3, 0.5, settle_s - 0.01):
+        shifts = rig.tick(10.0 + wait)
+        if ("ShiftUp",) in shifts:
+            failures.append(f"a second upshift {wait:.2f} s after the first")
+    if rig.tick(10.0 + settle_s + 0.001) != [("ShiftUp",)]:
+        failures.append(f"no upshift {settle_s + 0.001:.3f} s after the first")
+    if rig.tick(10.0 + settle_s + 2.002) != [("ShiftUp",)]:
+        failures.append("no upshift 2 s after the second")
+    return failures
+
+
+class MotorbikeShiftTest(unittest.TestCase):
+    """b95f r3: the shipped MotorbikeScript.OnInput holds first gear at launch and spaces its upshifts."""
+
+    def test_the_shipped_on_input_meets_the_r3_contract(self) -> None:
+        source = BIKE_SCRIPT.read_text(encoding="utf-8")
+        self.assertEqual(_r3_contract_failures(source, _bike_settle_s(source)), [])
+
+    def test_the_settle_interval_covers_both_vanilla_clutch_cycles(self) -> None:
+        settle_s = _bike_settle_s(BIKE_SCRIPT.read_text(encoding="utf-8"))
+        self.assertIsNotNone(settle_s)
+        self.assertGreaterEqual(settle_s, BIKE_CLUTCH_CYCLE_S)
+
+    def test_the_car_keeps_its_settle_interval(self) -> None:
+        car = CAR_SCRIPT.read_text(encoding="utf-8")
+        self.assertEqual(car.count("static const float AUTO_SHIFT_SETTLE_S = 0.3;"), 1)
+        self.assertNotIn(BIKE_SETTLE_NAME, car)
+
+
+class MotorbikeShiftMutantTest(unittest.TestCase):
+    def test_the_old_order_the_car_interval_and_no_speed_check_are_caught(self) -> None:
+        source = BIKE_SCRIPT.read_text(encoding="utf-8")
+        settle_s = _bike_settle_s(source)
+        self.assertIsNotNone(settle_s, f"no single static const float {BIKE_SETTLE_NAME}")
+        self.assertEqual(source.count(FORCED_FIRST), 1)
+        head, signature, body = source.partition(BIKE_ON_INPUT)
+        self.assertIn(BIKE_SETTLE_NAME, body)
+        self.assertEqual(ON_INPUT_416D4727.count("MCPCarDrive.AUTO_SHIFT_SETTLE_S"), 2)
+        mutants = {
+            "old_order": ON_INPUT_416D4727.replace("MCPCarDrive.AUTO_SHIFT_SETTLE_S", BIKE_SETTLE_NAME),
+            "car_interval_on_the_bike": head + signature + body.replace(
+                BIKE_SETTLE_NAME, "MCPCarDrive.AUTO_SHIFT_SETTLE_S"
+            ),
+            "no_speed_check": source.replace(FORCED_FIRST, "GetGear() < firstGear"),
+        }
+        for label, mutant in mutants.items():
+            with self.subTest(mutant=label):
+                self.assertTrue(_r3_contract_failures(mutant, settle_s), f"{label} is not caught")
+
+
+if __name__ == "__main__":
+    unittest.main()

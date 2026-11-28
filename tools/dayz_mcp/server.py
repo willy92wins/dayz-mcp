@@ -9407,12 +9407,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("query_get_in_condition", args, "server", _timeout(timeout_s))
 
-    # General fixture prep for any CarScript (no classname allowlist).
+    # General fixture prep for any CarScript or MotorbikeScript (no classname allowlist).
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Prepare a vehicle "
-            "fixture near pos (OnDebugSpawn when needed). Any CarScript "
-            "classname; non-vehicles return fixture_not_vehicle."
+            "fixture near pos (OnDebugSpawn when needed). Any CarScript or "
+            "MotorbikeScript classname; anything else, such as a boat, "
+            "returns fixture_not_vehicle. A motorbike is ready with every "
+            "wheel on, fuel above 0, its spark plug when vital and its "
+            "battery when it needs one; its reply carries the same vehicle "
+            "fields as a car's (engine_on_server, speedo, wheel_count, "
+            "fuel_fraction, lights_on_server)."
         )
     )
     async def vehicle_prepare_fixture(
@@ -12837,17 +12842,23 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Requires a lease (session_acquire_wait). Start or stop the "
             "owned vehicle's engine. This requires client-side ownership "
-            "established with vehicle_get_in_client. command_sent reports "
-            "bridge acceptance; state_confirmed reports matching engine "
-            "readback when available, otherwise null (accepted, not confirmed). "
-            "The local player must drive a car this client owns: otherwise the "
+            "established with vehicle_get_in_client. For a motorbike, "
+            "ownership comes from the vanilla get-in (action_use "
+            "ActionGetInTransport). command_sent reports bridge acceptance; "
+            "state_confirmed reports matching engine readback when available, "
+            "otherwise null (accepted, not confirmed). The local player must "
+            "drive a car or a motorbike this client owns: otherwise the "
             "bridge returns not_seated (not seated in a vehicle), not_a_car "
-            "(seated in a vehicle that is not a car, such as a boat), not_driver "
-            "(seated, but not in the driver seat) or not_owner (in the driver "
-            "seat, but this client does not own the car). The reply confirms "
-            "the command reached the car and is not telemetry: engine_on_server "
-            "is the only vehicle field it carries. vehicle_telemetry reports "
-            "gear, speed, position and ownership."
+            "(seated in a vehicle that is neither a car nor a motorbike, such "
+            "as a boat), not_driver (seated, but not in the driver seat; on a "
+            "motorbike, the driver is crew position 0) or not_owner (in the "
+            "driver seat, but this client does not own the vehicle). The reply "
+            "confirms the command reached the vehicle and is not telemetry: "
+            "engine_on_server is the only vehicle field it carries. "
+            "For a car, vehicle_telemetry reports gear, speed, position and "
+            "ownership; it fills those fields only for a CarScript, so read a "
+            "motorbike's speed on the server with players_kinematics (the "
+            "rider's vel)."
         )
     )
     async def engine_set(mode: str, timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
@@ -12879,14 +12890,20 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Requires a lease (session_acquire_wait). Set sustained "
             "owner-side driving control (held until released or deadman TTL). "
-            "The local player must drive a car this client owns: otherwise the "
-            "bridge returns not_seated (not seated in a vehicle), not_a_car "
-            "(seated in a vehicle that is not a car, such as a boat), not_driver "
-            "(seated, but not in the driver seat) or not_owner (in the driver "
-            "seat, but this client does not own the car). The reply confirms "
-            "the control reached the car and is not telemetry: engine_on_server "
-            "is the only vehicle field it carries. vehicle_telemetry reports "
-            "gear, speed, position and ownership."
+            "The local player must drive a car or a motorbike this client owns: "
+            "otherwise the bridge returns not_seated (not seated in a vehicle), "
+            "not_a_car (seated in a vehicle that is neither a car nor a "
+            "motorbike, such as a boat), not_driver (seated, but not in the "
+            "driver seat; on a motorbike, the driver is crew position 0) or "
+            "not_owner (in the driver seat, but this client does not own the "
+            "vehicle). On a motorbike, brake is the rear brake and handbrake "
+            "the front brake, and the kickstand goes up while it drives. The "
+            "reply confirms the control reached the vehicle and is not "
+            "telemetry: engine_on_server is the only vehicle field it carries. "
+            "For a car, vehicle_telemetry reports gear, speed, position and "
+            "ownership; it fills those fields only for a CarScript, so read a "
+            "motorbike's speed on the server with players_kinematics (the "
+            "rider's vel)."
         )
     )
     async def vehicle_control(

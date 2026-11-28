@@ -31,6 +31,8 @@ SCRIPTS = addon_root() / "scripts" / "5_Mission"
 CLIENT_BRIDGE = SCRIPTS / "MCPClientBridge.c"
 MESSAGES = SCRIPTS / "MCPMessages.c"
 RESOLVE = "protected CarScript ResolveOwnedCar(out string error)"
+# b95f: the verbs try this motorbike resolver once the car one answers not_a_car.
+RESOLVE_BIKE = "protected MotorbikeScript ResolveOwnedMotorbike(out string error)"
 ENGINE_SET = "protected bool DispatchEngineSet(MCPCommand command, MCPResult result)"
 VEHICLE_CONTROL = "protected bool DispatchVehicleControl(MCPCommand command, MCPResult result)"
 FINITE = "protected bool IsFiniteFloat(float value)"
@@ -163,6 +165,8 @@ class DriveModel:
             "GetGame": lambda: self.game,
             "PlayerBase": Caster(lambda value: isinstance(value, FakePlayer)),
             "CarScript": Caster(lambda value: isinstance(value, FakeTransport) and value.carscript),
+            # None of these transports is a motorbike (b95f covers those).
+            "MotorbikeScript": Caster(lambda value: False),
             "DayZPlayerConstants": SEATS,
             "MCPCarDrive": self.drive,
             "VEHICLE_CONTROL_DEFAULT_TTL_S": _float_constant(source, "VEHICLE_CONTROL_DEFAULT_TTL_S"),
@@ -173,11 +177,23 @@ class DriveModel:
         )
         translate(source, FINITE, self.namespace)
         resolver = {"ResolveOwnedCar": 1}
+        if RESOLVE_BIKE in source:
+            translate(
+                source,
+                RESOLVE_BIKE,
+                self.namespace,
+                class_types={"PlayerBase", "HumanCommandVehicle", "MotorbikeScript"},
+            )
+            resolver["ResolveOwnedMotorbike"] = 1
         self.engine_set = translate(
-            source, ENGINE_SET, self.namespace, class_types={"CarScript"}, out_functions=resolver
+            source, ENGINE_SET, self.namespace, class_types={"CarScript", "MotorbikeScript"}, out_functions=resolver
         )
         self.vehicle_control = translate(
-            source, VEHICLE_CONTROL, self.namespace, class_types={"CarScript", "MCPArgs"}, out_functions=resolver
+            source,
+            VEHICLE_CONTROL,
+            self.namespace,
+            class_types={"CarScript", "MotorbikeScript", "MCPArgs"},
+            out_functions=resolver,
         )
 
     def seat(self, build) -> FakeTransport | None:
@@ -305,7 +321,8 @@ class DriveVerbGateTest(unittest.TestCase):
             with self.subTest(verb=signature):
                 body = method_body(self.source, signature)
                 self.assertEqual(body.count("ResolveOwnedCar(carError)"), 1)
-                refusal = " ".join(method_body(body, "if (!car)").split())
+                # b95f: a refusal needs neither a car nor a motorbike.
+                refusal = " ".join(method_body(body, "if (!car && !bike)").split())
                 self.assertEqual(refusal, "result.ok = false; result.error = carError; return true;")
                 self.assertNotIn('result.error = "not_seated"', body)
 
@@ -375,11 +392,16 @@ class DriveVerbRefusalDocsTest(unittest.IsolatedAsyncioTestCase):
         for tool in ("engine_set", "vehicle_control"):
             with self.subTest(tool=tool):
                 description = self.tools[tool].description or ""
-                self.assertIn("must drive a car this client owns", description)
+                self.assertIn("must drive a car or a motorbike this client owns", description)
                 self.assertIn("not_seated (not seated in a vehicle)", description)
-                self.assertIn("not_a_car (seated in a vehicle that is not a car, such as a boat)", description)
-                self.assertIn("not_driver (seated, but not in the driver seat)", description)
-                self.assertIn("not_owner (in the driver seat, but this client does not own the car)", description)
+                self.assertIn(
+                    "not_a_car (seated in a vehicle that is neither a car nor a motorbike, such as a boat)",
+                    description,
+                )
+                self.assertIn("not_driver (seated, but not in the driver seat", description)
+                self.assertIn(
+                    "not_owner (in the driver seat, but this client does not own the vehicle)", description
+                )
                 for code in codes:
                     self.assertIn(code, description)
 

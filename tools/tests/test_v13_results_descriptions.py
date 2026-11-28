@@ -2,7 +2,7 @@
 
 Tool descriptions and one Python ToolError text only; no Enforce, no PBO.
 - a412: the vehicle_control and engine_set replies confirm the command reached
-  the car and are not telemetry (fb-20260823-130809-a412).
+  the vehicle and are not telemetry (fb-20260823-130809-a412).
 - 95d8: the server-side body does not travel with a client-owned car, so the
   player reads keep the server position (fb-20260823-130833-95d8).
 - c931: condition_failed means action_use did not dispatch; it does not promise
@@ -53,14 +53,16 @@ class V13DescriptionsTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(tool=name):
                 description = self._description(name)
                 self.assertIn(
-                    f"The reply confirms the {subject} reached the car and is not telemetry",
+                    f"The reply confirms the {subject} reached the vehicle and is not telemetry",
                     description,
                 )
                 self.assertIn(
                     "engine_on_server is the only vehicle field it carries", description
                 )
                 self.assertIn(
-                    "vehicle_telemetry reports gear, speed, position and ownership",
+                    "For a car, vehicle_telemetry reports gear, speed, position and ownership; it fills "
+                    "those fields only for a CarScript, so read a motorbike's speed on the server with "
+                    "players_kinematics (the rider's vel).",
                     description,
                 )
 

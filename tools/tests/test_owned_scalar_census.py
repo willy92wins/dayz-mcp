@@ -1203,6 +1203,14 @@ class OwnedScalarCensusControlTest(unittest.TestCase):
             "\t\tresult.engine_on_server = car.EngineIsOn();\n",
             "\t\tMCPCarDrive.Set(car, throttle, steer, brake, handbrake, GetGame().GetTickTime() + ttl);\n",
         )
+        # b95f: vehicle_control also writes it in its motorbike branch; that write goes too.
+        mutated = _mutant(
+            mutated,
+            "MCPClientBridge.c",
+            "\t\t\tMCPCarDrive.SetMotorbike(bike, throttle, steer, brake, handbrake, GetGame().GetTickTime() + ttl);\n"
+            "\t\t\tresult.engine_on_server = bike.EngineIsOn();\n",
+            "\t\t\tMCPCarDrive.SetMotorbike(bike, throttle, steer, brake, handbrake, GetGame().GetTickTime() + ttl);\n",
+        )
         self.assertEqual(census(mutated)["engine_on_server"], {"engine_set", "vehicle_telemetry"})
 
     def test_an_out_argument_counts_as_a_write(self) -> None:
