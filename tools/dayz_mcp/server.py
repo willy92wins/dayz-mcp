@@ -2873,6 +2873,7 @@ class ClientRuntime:
         ticket: str | None = None,
         done: bool = False,
         claim: bool = False,
+        start_ticket: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, object] = {}
         if wait:
@@ -2883,8 +2884,30 @@ class ClientRuntime:
             payload["box_wait_done"] = True
         if claim:
             payload["box_wait_claim"] = True
+        if isinstance(start_ticket, str) and start_ticket:
+            payload["box_start_ticket"] = start_ticket
         return await self._control_with_lazy_spawn(
             self._control._session_call, "/session/status", payload
+        )
+
+    async def bind_next_start_ticket(
+        self, ticket: str, *, operation_id: object = None
+    ) -> dict[str, Any]:
+        """Pin the exact ticket to a granted lease. Fails closed without one."""
+
+        lease_id = operation_id or getattr(self._control, "active_lease_id", None)
+        if not isinstance(ticket, str) or not ticket:
+            raise ValueError("box_ticket_pin_failed")
+        if not isinstance(lease_id, str) or not lease_id:
+            raise ValueError("box_ticket_pin_failed")
+        payload: dict[str, Any] = {
+            "box_start_ticket": ticket,
+            "box_start_lease_id": lease_id,
+        }
+        return await self._control_with_lazy_spawn(
+            self._control._session_call,
+            "/session/status",
+            payload,
         )
 
     async def reconcile_idle_session(self) -> dict[str, Any]:
@@ -7708,7 +7731,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async def execute(
             launch: dict[str, bool],
         ) -> tuple[dayz_test_tool.DayzTestToolError | None, dict[str, Any] | None]:
-            # The caller holds client.tool_lock.
+            # The caller holds client.tool_lock. The ticket is pinned after
+            # session_acquire_wait, to the granted lease, before start_run.
             try:
                 with _typed_dayz_test_value_errors():
                     return None, await dayz_test_tool.execute_dayz_test_run(
@@ -7741,6 +7765,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         project_mod_override=project_mod_override,
                         connect_host=connect_host,
                         mod_dir=mod_dir,
+                        box_ticket=box_ticket,
                     )
             except dayz_test_tool.DayzTestToolError as error:
                 return error, None
@@ -7993,6 +8018,50 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                             port=port,
                         )
                     )
+                if (
+                    target is not None
+                    and takeover
+                    and not box_ticket
+                ):
+                    try:
+                        fresh = await client.session_status()
+                    except Exception:
+                        fresh = None
+                    if not isinstance(fresh, dict):
+                        return annotated(
+                            _failed_active_run_result(
+                                project=project,
+                                mode=mode,
+                                box=box,
+                                started=started,
+                                caller_session=caller_session,
+                                port=port,
+                            )
+                        )
+                    box = _box_from_status(fresh)
+                    if box.get("reason") == "box_queue_unreadable":
+                        return annotated(
+                            _failed_active_run_result(
+                                project=project,
+                                mode=mode,
+                                box=box,
+                                started=started,
+                                caller_session=caller_session,
+                                port=port,
+                            )
+                        )
+                    queue_now = box.get("queue")
+                    if isinstance(queue_now, list) and queue_now:
+                        return annotated(
+                            _failed_active_run_result(
+                                project=project,
+                                mode=mode,
+                                box=box,
+                                started=started,
+                                caller_session=caller_session,
+                                port=port,
+                            )
+                        )
                 if target is not None and takeover:
                     try:
                         stop_result = await dayz_test_tool.execute_dayz_test_stop(

@@ -2748,10 +2748,23 @@ class ProcessLifecycle:
     def _retire_minted(
         self, run_id: str, role: str, minted: str | None, reason: str
     ) -> None:
+        if reason == "launch_failed":
+            self._release_box_run(run_id)
         bindings = self.bindings
         if bindings is None or minted is None:
             return
         bindings.retire_role(run_id, role, reason)
+
+    def _release_box_run(
+        self, run_id: str, session_id: str | None = None
+    ) -> None:
+        coordinator = self.coordinator
+        if coordinator is None or not isinstance(run_id, str) or not run_id:
+            return
+        try:
+            coordinator.box_release_run(session_id, run_id)
+        except Exception:
+            return
 
     def _retire_run_bindings(self, run_id: str, reason: str) -> None:
         bindings = self.bindings
@@ -2978,6 +2991,8 @@ class ProcessLifecycle:
             self.manifest.replace(run)
         except Exception:
             return False
+        if getattr(run, "state", None) == "EXITED":
+            self._release_box_run(run.run_id, session_id=getattr(run, "owner_session_id", None))
         # §2.12: only the lifecycle proves processes gone, and only after
         # the manifest write succeeded. A failed write calls nothing.
         if self.coordinator is not None and hasattr(
@@ -5355,6 +5370,15 @@ class ProcessLifecycle:
                 return self._start_rejection(
                     client, authority, request_error or "invalid_start_request"
                 )
+            # Prefer an explicit ticket; otherwise copy the operation pin onto
+            # the start request so admit/bind do not depend on the pin lookup
+            # alone.
+            if not parsed.get("box_ticket"):
+                pinned = self.coordinator._bound_ticket(
+                    client, None, operation_id=authority[1]
+                )
+                if isinstance(pinned, str) and pinned:
+                    parsed["box_ticket"] = pinned
             executable = Path(parsed["argv"][0])
             canonical_error = self._canonical_error(executable)
             if canonical_error is not None:
@@ -5433,7 +5457,7 @@ class ProcessLifecycle:
                 getattr(self.coordinator, "box_admit_start", None)
             ):
                 queue_reason = self.coordinator.box_admit_start(
-                    client, parsed.get("box_ticket")
+                    client, parsed.get("box_ticket"), operation_id=authority[1]
                 )
                 if queue_reason:
                     return self._start_rejection(
@@ -5747,6 +5771,40 @@ class ProcessLifecycle:
                         # the way _start_rejection publishes it, not swallowed.
                         self._add_degradation(settled, "audit_failed")
                     return settled
+                # Reserve the turn before rotating storage. A later FIFO
+                # refusal must not leave storage_1 on the backup.
+                if existing is None and callable(
+                    getattr(self.coordinator, "box_bind_run", None)
+                ):
+                    bind_reason = self.coordinator.box_bind_run(
+                        client,
+                        parsed.get("box_ticket"),
+                        run_id,
+                        operation_id=authority[1],
+                    )
+                    if bind_reason:
+                        audited = self._audit(
+                            "lifecycle_start_rejected",
+                            client,
+                            str(bind_reason),
+                            "rejected",
+                            run_id=run_id,
+                            stage="spawn",
+                        )
+                        self._retire_minted(run_id, launch_role, minted, "launch_failed")
+                        settled = self._settle_failed_launch(
+                            client=client,
+                            previous=previous,
+                            provisional=provisional,
+                            launched=None,
+                            record=None,
+                            confirmed_error="active_run_exists",
+                            attempt_started_at=attempt_started_at,
+                        )
+                        if not audited:
+                            self._add_degradation(settled, "audit_failed")
+                        return settled
+
                 # M15 (fichas 4407 + 01ae) / Codex F-01. Last step before the
                 # spawn and after EVERY admission: a refusal above this line has
                 # rotated nothing, and this is the only point at which the run
@@ -5875,34 +5933,6 @@ class ProcessLifecycle:
                     if not audited:
                         self._add_degradation(settled, "audit_failed")
                     return settled
-                if existing is None and callable(
-                    getattr(self.coordinator, "box_bind_run", None)
-                ):
-                    bind_reason = self.coordinator.box_bind_run(
-                        client, parsed.get("box_ticket"), run_id
-                    )
-                    if bind_reason:
-                        audited = self._audit(
-                            "lifecycle_start_rejected",
-                            client,
-                            str(bind_reason),
-                            "rejected",
-                            run_id=run_id,
-                            stage="spawn",
-                        )
-                        self._retire_minted(run_id, launch_role, minted, "launch_failed")
-                        settled = self._settle_failed_launch(
-                            client=client,
-                            previous=previous,
-                            provisional=provisional,
-                            launched=None,
-                            record=None,
-                            confirmed_error="active_run_exists",
-                            attempt_started_at=attempt_started_at,
-                        )
-                        if not audited:
-                            self._add_degradation(settled, "audit_failed")
-                        return settled
                 launched_at = self._server_start_clock()
                 try:
                     launched = self.launcher(
