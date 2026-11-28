@@ -81,9 +81,11 @@ def clear_probe_hooks() -> None:
 
 
 def _emit(kind: str, code: int) -> int:
+    sys.stderr.write("\n")
     print(
         json.dumps({"box_turn": kind, "exit": code}, ensure_ascii=False),
         file=sys.stderr,
+        flush=True,
     )
     return code
 
@@ -184,7 +186,9 @@ def physical_reason() -> str | None:
 
 def _view() -> dict:
     try:
-        return shared_box_queue.read_view(now=time.time(), session_id="")
+        return shared_box_queue.read_view(
+            now=time.time(), session_id="", write_purge=False
+        )
     except shared_box_queue.QueueUnreadable:
         return {"unreadable": True, "queue": []}
 
@@ -213,6 +217,11 @@ def collect_status() -> dict:
                 if reason is None:
                     reason = "box_claimed"
                 break
+        if reason is None and (view.get("occupies") is True or entries):
+            head = entries[0] if entries and isinstance(entries[0], dict) else None
+            if head is not None:
+                holder = head.get("holder")
+            reason = "box_queue_ahead"
     return {
         "occupied": reason is not None,
         "reason": reason,
@@ -249,7 +258,8 @@ class Turn:
         if not isinstance(response, dict):
             return {}
         if response.get("box_wait_error") == "box_ticket_invalid":
-            self.ticket = None
+            # Keep the original ticket. Minting a new claim mid-command
+            # would skip the physical probes.
             return response
         ticket = response.get("box_ticket")
         if isinstance(ticket, str) and ticket:
@@ -319,12 +329,39 @@ class Turn:
                 self._leave()
                 return "unreadable"
             if response.get("box_claimed") is True:
+                if time.monotonic() >= deadline:
+                    self._leave()
+                    return "wait_expired"
                 return None
             if time.monotonic() >= deadline:
                 self._leave()
                 return "wait_expired"
             remaining = deadline - time.monotonic()
             time.sleep(min(_POLL_S, max(0.0, remaining)))
+
+    def _attach_child(self, child: subprocess.Popen) -> None:
+        """Keep the claim on the live child if the wrapper later exits."""
+
+        pid = getattr(child, "pid", None)
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return
+        try:
+            snap = shared_box_queue.default_snapshot(pid)
+        except Exception:
+            return
+        created = snap.get("creation_time_utc") if isinstance(snap, dict) else None
+        if not isinstance(created, str) or not created:
+            return
+        try:
+            shared_box_queue.rebind_owner(
+                self.session_id,
+                self.ticket,
+                owner_pid=pid,
+                owner_created=created,
+                now=time.time(),
+            )
+        except (shared_box_queue.QueueUnreadable, OSError, TimeoutError):
+            return
 
     def _popen(self) -> subprocess.Popen:
         """Foreground command. stdin, stdout and stderr stay the parent's.
@@ -371,7 +408,9 @@ class Turn:
                     result = self._touch(claim=True)
                 except shared_box_queue.QueueUnreadable:
                     continue
-                self._remember(result)
+                response = self._remember(result)
+                if response.get("box_wait_error") == "box_ticket_invalid":
+                    return 70
             except KeyboardInterrupt:
                 # Ctrl+C on this console reaches a foreground child. If it is
                 # still alive, stop it and wait. A child that will not die
@@ -392,8 +431,14 @@ class Turn:
         child: subprocess.Popen | None = None
         code = 1
         try:
-            child = self._popen()
+            try:
+                child = self._popen()
+            except OSError:
+                return _emit("unreadable", 70)
+            self._attach_child(child)
             code = self._refresh_while(child)
+            if code == 70 and child.poll() is None:
+                return _emit("claim_lost", 70)
         finally:
             if child is not None and child.poll() is None:
                 self._stop_child(child)
@@ -415,7 +460,7 @@ def _parse_run(args: list[str]) -> tuple[Turn | None, int | None]:
                 return None, 2
             if not command:
                 return None, 2
-            if isinstance(wait_s, bool) or not math.isfinite(wait_s) or wait_s < 0:
+            if isinstance(wait_s, bool) or not math.isfinite(wait_s) or wait_s <= 0:
                 return None, 2
             return Turn(purpose.strip(), holder.strip(), float(wait_s), command), None
         if token in {"--purpose", "--holder", "--wait-s"}:

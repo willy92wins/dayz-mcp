@@ -9,7 +9,7 @@ You cannot do these steps from a shell, so ask the person to handle them:
 - Subscribe to the [DayZ-MCP Workshop item](https://steamcommunity.com/sharedfiles/filedetails/?id=3846741037) in Steam and wait for Steam to download it (no command can subscribe without their click).
 - Have Steam with DayZ installed, a DayZ server on this same machine that they may load mods on (retail `DayZServer` works), Python 3.11 or newer, and both Claude Code and Codex installed as native Windows executables. `.\install-mcp.ps1 -Register` requires both: it refuses with `registration check failed for Codex: command missing` (or the Claude equivalent) if either is absent, and it does not register Claude alone.
 - Give you the path of their server profiles folder and of their client profiles folder (`-ClientProfiles`), restart the MCP client when you ask, and start the game with the `-mod=` and `-profiles=` arguments you build below.
-- A git clone of this repository. The no-clone install from a GitHub release (the wheel and `dayz-mcp-requirements.txt`) is not published yet. Do not invent or use a `releases/download/...` URL for those files until a release includes them and a GET of the asset returns HTTP 200.
+- A git clone of this repository. The v1.6 GitHub release already carries the wheel and `dayz-mcp-requirements.txt`; this guide still uses the clone path and does not use those assets yet. Do not invent a `releases/download/...` URL for those files in the Commands below.
 
 ## Commands
 

@@ -146,17 +146,19 @@ def parse_document(text: str) -> dict | None:
 
 
 def _number(value: object) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _entry_sane(item: dict) -> bool:
     if not isinstance(item.get("ticket"), str) or not item["ticket"]:
         return False
-    if item.get("kind") not in {"mcp", "external"}:
+    kind = item.get("kind")
+    if not isinstance(kind, str) or kind not in {"mcp", "external"}:
         return False
     if not isinstance(item.get("instance"), str) or not item["instance"]:
         return False
@@ -173,7 +175,8 @@ def _entry_sane(item: dict) -> bool:
     created = item.get("owner_created")
     if not isinstance(created, str) or not created:
         return False
-    if item.get("state") not in {"waiting", "claimed"}:
+    state = item.get("state")
+    if not isinstance(state, str) or state not in {"waiting", "claimed"}:
         return False
     run_id = item.get("run_id")
     if run_id is not None and not isinstance(run_id, str):
@@ -345,6 +348,7 @@ class _Lock:
         self.root = root
         self.wait_s = wait_s
         self.descriptor: int | None = None
+        self.dir_descriptor: int | None = None
 
     def __enter__(self) -> _Lock:
         from dayz_mcp.server_cli import open_lock_file
@@ -361,12 +365,31 @@ class _Lock:
                     if os.fstat(descriptor).st_size == 0:
                         os.write(descriptor, b"\0")
                     byte_lock.try_lock(descriptor, 0)
+                    # POSIX: the lock file can be unlinked while held, and a
+                    # new inode would not conflict. The directory fd cannot.
+                    if os.name != "nt":
+                        if self.dir_descriptor is None:
+                            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                            self.dir_descriptor = os.open(self.root, flags)
+                        # OFD write locks need a writable fd; directories
+                        # are read-only. flock is exclusive on the inode.
+                        import fcntl
+                        fcntl.flock(
+                            self.dir_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB
+                        )
                     return self
                 except OSError:
                     if _monotonic() >= deadline:
                         raise TimeoutError("box_queue_lock_timeout")
                     time.sleep(0.01)
         except BaseException:
+            dirfd = self.dir_descriptor
+            self.dir_descriptor = None
+            if dirfd is not None:
+                try:
+                    os.close(dirfd)
+                except OSError:
+                    pass
             try:
                 os.close(descriptor)
             except OSError:
@@ -375,8 +398,20 @@ class _Lock:
             raise
 
     def __exit__(self, *_) -> None:
+        dirfd = self.dir_descriptor
+        self.dir_descriptor = None
         descriptor = self.descriptor
         self.descriptor = None
+        if dirfd is not None:
+            try:
+                import fcntl
+                fcntl.flock(dirfd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(dirfd)
+            except OSError:
+                pass
         if descriptor is None:
             return
         try:
@@ -387,6 +422,10 @@ class _Lock:
             os.close(descriptor)
 
 
+def _resolve_now(now: float | Callable[[], float]) -> float:
+    return now() if callable(now) else now
+
+
 def locked_update(
     mutator: Callable[[dict], tuple[dict, dict]],
     *,
@@ -394,6 +433,7 @@ def locked_update(
     snapshot_fn: Callable[[int], dict] | None = None,
     root: Path | None = None,
     wait_s: float = LOCK_WAIT_S,
+    write_purge: bool = True,
 ) -> dict:
     """Purge, then let ``mutator`` rewrite the document under the lock.
 
@@ -405,11 +445,12 @@ def locked_update(
     snap = snapshot_fn or default_snapshot
     base = queue_root() if root is None else root
     with _Lock(base, wait_s):
+        clock = now() if callable(now) else now
         path = base / DOCUMENT_NAME
         document = _read(path)
         if document is None:
             return {"unreadable": True, "entries": [], "removed": []}
-        entries, removed = purge_entries(list(document["entries"]), now, snap)
+        entries, removed = purge_entries(list(document["entries"]), clock, snap)
         document = {"version": VERSION, "entries": entries}
         updated, result = mutator(document)
         result = dict(result)
@@ -420,7 +461,7 @@ def locked_update(
         result["removed"] = list(removed) + left
         if result.get("write", True):
             _write(path, updated)
-        elif removed:
+        elif removed and write_purge:
             _write(path, document)
         result["entries"] = list(updated["entries"])
         result["unreadable"] = False
@@ -442,26 +483,34 @@ def read_view(
     session_id: str = "",
     snapshot_fn: Callable[[int], dict] | None = None,
     root: Path | None = None,
+    write_purge: bool = True,
 ) -> dict:
     def mutator(document: dict) -> tuple[dict, dict]:
+        current = _resolve_now(now)
         entries = document["entries"]
         claimed = next((item for item in entries if item.get("state") == "claimed"), None)
         claimed_s = None
         if claimed is not None and _number(claimed.get("claimed_at")):
-            claimed_s = max(0.0, now - float(claimed["claimed_at"]))
+            claimed_s = max(0.0, current - float(claimed["claimed_at"]))
         return document, {
             "write": False,
-            "queue": project_queue(entries, now),
+            "queue": project_queue(entries, current),
             "claimed": claimed is not None,
-            "claimed_s": claimed_s,
             "occupies": queue_occupies_caller(entries, session_id),
             "external_holder": external_holder_payload(entries),
             "blocked": bool(entries)
-            and admission(entries, session_id, None, now) is not None,
+            and admission(entries, session_id, None, current) is not None,
+            "claimed_s": claimed_s,
         }
 
     try:
-        return locked_update(mutator, now=now, snapshot_fn=snapshot_fn, root=root)
+        return locked_update(
+            mutator,
+            now=now,
+            snapshot_fn=snapshot_fn,
+            root=root,
+            write_purge=write_purge,
+        )
     except (TimeoutError, OSError):
         return {"unreadable": True, "entries": [], "removed": [], "queue": []}
 
@@ -486,6 +535,7 @@ def touch(
     snap = snapshot_fn or default_snapshot
 
     def mutator(document: dict) -> tuple[dict, dict]:
+        current = _resolve_now(now)
         entries = list(document["entries"])
         removed: list[tuple[str, str]] = []
         if done:
@@ -538,17 +588,17 @@ def touch(
                 "owner_created": created,
                 "state": "waiting",
                 "run_id": run_id,
-                "created_at": now,
-                "touched_at": now,
+                "created_at": current,
+                "touched_at": current,
                 "claimed_at": None,
                 "ttl_s": WAITING_TTL_S,
             }
             entries.append(existing)
         else:
-            existing["touched_at"] = now
+            existing["touched_at"] = current
         if claim and entries and entries[0] is existing:
             if existing.get("state") != "claimed":
-                existing["claimed_at"] = now
+                existing["claimed_at"] = current
             existing["state"] = "claimed"
             existing["ttl_s"] = CLAIM_TTL_S
         position = entries.index(existing) + 1
@@ -628,6 +678,38 @@ def leave_session(
         return {"unreadable": True, "removed": []}
 
 
+def release_run(
+    session_id: str | None,
+    run_id: str,
+    *,
+    now: float,
+    snapshot_fn: Callable[[int], dict] | None = None,
+    root: Path | None = None,
+) -> dict:
+    """Drop the claim that occupies this run, if any."""
+
+    def mutator(document: dict) -> tuple[dict, dict]:
+        kept: list[dict] = []
+        removed: list[tuple[object, object]] = []
+        for item in document["entries"]:
+            same_run = item.get("run_id") == run_id
+            same_session = (
+                not session_id or item.get("session_id") == session_id
+            )
+            if same_run and same_session:
+                removed.append((item.get("session_id"), item.get("ticket")))
+                continue
+            kept.append(item)
+        if not removed:
+            return document, {"write": False, "removed": []}
+        return {"version": VERSION, "entries": kept}, {"removed": removed}
+
+    try:
+        return locked_update(mutator, now=now, snapshot_fn=snapshot_fn, root=root)
+    except (TimeoutError, OSError):
+        return {"unreadable": True, "removed": []}
+
+
 def bind_run(
     session_id: str,
     ticket: str | None,
@@ -640,19 +722,46 @@ def bind_run(
     """Attach ``run_id`` to the admitted head. Return an audit reason or None."""
 
     def mutator(document: dict) -> tuple[dict, dict]:
+        current = _resolve_now(now)
         entries = document["entries"]
-        reason = admission(entries, session_id, ticket, now)
+        reason = admission(entries, session_id, ticket, current)
         if reason is not None:
             return document, {"write": False, "reason": reason}
         if not entries:
-            return document, {"write": False, "reason": None}
+            # An immediate start must occupy the document so a concurrent
+            # box_turn cannot claim the same empty queue and launch too.
+            snap = snapshot_fn or default_snapshot
+            try:
+                pid, created = _self_owner(snap)
+            except QueueUnreadable:
+                return document, {"write": False, "reason": "box_queue_unreadable"}
+            minted = ticket if isinstance(ticket, str) and ticket else f"bound:{run_id}"
+            entries = [
+                {
+                    "ticket": minted,
+                    "kind": "mcp",
+                    "instance": "mcp",
+                    "holder": session_id[:12],
+                    "purpose": "dayz_test_run",
+                    "session_id": session_id,
+                    "owner_pid": pid,
+                    "owner_created": created,
+                    "state": "claimed",
+                    "run_id": run_id,
+                    "created_at": current,
+                    "touched_at": current,
+                    "claimed_at": current,
+                    "ttl_s": CLAIM_TTL_S,
+                }
+            ]
+            return {"version": VERSION, "entries": entries}, {"reason": None}
         head = entries[0]
         if ticket and head.get("ticket") != ticket:
             return document, {"write": False, "reason": "box_queue_ahead"}
         if head.get("session_id") != session_id or head.get("state") != "claimed":
             return document, {"write": False, "reason": "box_claim_lost"}
         head["run_id"] = run_id
-        head["touched_at"] = now
+        head["touched_at"] = current
         return {"version": VERSION, "entries": entries}, {"reason": None}
 
     try:
@@ -673,7 +782,7 @@ def admit(
     root: Path | None = None,
 ) -> str | None:
     def mutator(document: dict) -> tuple[dict, dict]:
-        reason = admission(document["entries"], session_id, ticket, now)
+        reason = admission(document["entries"], session_id, ticket, _resolve_now(now))
         return document, {"write": False, "reason": reason}
 
     try:
@@ -712,3 +821,41 @@ def reset_empty(reason: str, *, root: Path | None = None) -> None:
             "document": DOCUMENT_NAME,
         }
         atomic_write_json(base / "box-queue-reset.json", audit)
+
+
+def rebind_owner(
+    session_id: str,
+    ticket: str | None,
+    *,
+    owner_pid: int,
+    owner_created: str,
+    now: float,
+    snapshot_fn: Callable[[int], dict] | None = None,
+    root: Path | None = None,
+) -> str | None:
+    """Point a live claim at a child process so a wrapper exit does not purge it."""
+
+    def mutator(document: dict) -> tuple[dict, dict]:
+        current = _resolve_now(now)
+        for entry in document["entries"]:
+            if entry.get("session_id") != session_id:
+                continue
+            if ticket and entry.get("ticket") != ticket:
+                continue
+            if entry.get("state") != "claimed":
+                continue
+            entry["owner_pid"] = owner_pid
+            entry["owner_created"] = owner_created
+            entry["touched_at"] = current
+            return {"version": VERSION, "entries": document["entries"]}, {
+                "reason": None
+            }
+        return document, {"write": False, "reason": "box_claim_lost"}
+
+    try:
+        result = locked_update(mutator, now=now, snapshot_fn=snapshot_fn, root=root)
+    except (TimeoutError, OSError):
+        return "box_queue_unreadable"
+    if result.get("unreadable"):
+        return "box_queue_unreadable"
+    return result.get("reason")

@@ -237,7 +237,7 @@ exception is driving: a PHYSICS car only moves from its owning client, so
 
 ## Install
 
-An AI agent can follow [llms-install.md](llms-install.md), which installs from a clone until a GitHub release publishes the wheel and `dayz-mcp-requirements.txt`. The rest of this section is that clone path.
+An AI agent can follow [llms-install.md](llms-install.md), which still installs from a clone (the v1.6 GitHub release already carries the wheel and `dayz-mcp-requirements.txt`; the guide does not use them yet). The rest of this section is that clone path.
 
 `.\install-mcp.ps1 -Register` requires both Claude Code and Codex (Python 3.11+ too). The pre-check uses
 `claude` / `codex.cmd` and refuses with `registration check failed for Codex:

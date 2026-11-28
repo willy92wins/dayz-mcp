@@ -8,7 +8,7 @@ already-built PBO and stages five verifiable release assets.
 
 Set the release version in
 [`tools/pyproject.toml:7`](../tools/pyproject.toml#L7). Use the same value, without
-the leading `v`, throughout this runbook. If a release publishes the wheel and `dayz-mcp-requirements.txt` and the no-clone path in `llms-install.md` is re-enabled, set the same value there (`venv-X.Y.Z` and the release URL). Until those assets exist, `llms-install.md` stays on the clone path; `tools/tests/test_llms_install.py` does a real GET of every concrete `releases/download/...` asset the docs mention.
+the leading `v`, throughout this runbook. The v1.6 release already carries the wheel and `dayz-mcp-requirements.txt`. If the clone-free path in `llms-install.md` is enabled, set the same value there (`venv-X.Y.Z` and the release URL). Until that path is enabled, `llms-install.md` stays on the clone path; `tools/tests/test_llms_install.py` does a real GET of every concrete `releases/download/...` asset the docs mention.
 
 [EXACT]
 
