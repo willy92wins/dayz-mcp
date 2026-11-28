@@ -1201,6 +1201,11 @@ _SAFE_FINITE_REAL = _reject_numeric_errors(_real_in_range())
 _SAFE_POSITIVE_REAL = _reject_numeric_errors(
     _real_in_range(minimum=0.0, minimum_inclusive=False)
 )
+# Mirrors MCPBridge.c TELEMETRY_OBJECT_AT_MAX_RADIUS (object_at: telemetry_read,
+# vehicle_prepare_fixture); a test pins the two together.
+_SAFE_OBJECT_AT_RADIUS = _reject_numeric_errors(
+    _real_in_range(minimum=0.0, maximum=50.0, minimum_inclusive=False)
+)
 _SAFE_RADIUS_200 = _reject_numeric_errors(
     _real_in_range(minimum=0.0, maximum=200.0, minimum_inclusive=False)
 )
@@ -1894,7 +1899,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "mode": _equal_to("object_at"),
                 "type": _is_non_empty_string,
                 "pos": _is_real_vector3,
-                "radius": _SAFE_POSITIVE_REAL,
+                "radius": _SAFE_OBJECT_AT_RADIUS,
             },
         )
     ),
@@ -2708,7 +2713,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "mode": _equal_to("object_at"),
                 "type": _is_non_empty_string,
                 "pos": _is_real_vector3,
-                "radius": _SAFE_POSITIVE_REAL,
+                "radius": _SAFE_OBJECT_AT_RADIUS,
             },
         ),
         _schema_variant(

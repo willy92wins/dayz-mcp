@@ -866,6 +866,10 @@ SERVER_PERF_WINDOW_MIN_S = 1.0
 SERVER_PERF_WINDOW_MAX_S = 60.0
 SERVER_PERF_SLACK_S = 10.0
 NAV_SNAP_RADIUS_MAX_M = 50.0
+# MCPBridge.c TELEMETRY_OBJECT_AT_MAX_RADIUS: the largest object_at radius
+# ValidateTelemetryArgs accepts (telemetry_read, vehicle_prepare_fixture). A
+# default above it answered bad_args with no hint (G1b run 1792c310, 100 m).
+OBJECT_AT_RADIUS_MAX_M = 50.0
 VISIBILITY_RADIUS_MAX_M = 100.0
 # 165a: the most entries one scene holds. Mirrors SCENE_ENTRIES_MAX in
 # addon/scripts/5_Mission/MCPBridge.c, which refuses a spawn past it with
@@ -9343,22 +9347,25 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Requires a lease (session_acquire_wait). Prepare a vehicle "
             "fixture near pos (OnDebugSpawn when needed). Any CarScript "
-            "classname; non-vehicles return fixture_not_vehicle."
+            "classname; non-vehicles return fixture_not_vehicle. radius is "
+            "the search radius around pos in metres, a finite number in "
+            "(0, 50] (default 50): the bridge refuses a larger one with "
+            "bad_args, and so does this tool before it asks the bridge."
         )
     )
     async def vehicle_prepare_fixture(
         type: str,
         pos: list[StrictFloat],
-        radius: StrictFloat = 100.0,
+        radius: StrictFloat = OBJECT_AT_RADIUS_MAX_M,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(type, str) or type == "":
             raise ToolError(_bad_args("type", type, "be a non-empty string"))
         radius_error = _bad_args(
-            "radius", radius, "be a finite number greater than 0"
+            "radius", radius, "be a finite number in (0, 50]"
         )
         radius_value = _finite_float(radius, radius_error)
-        if radius_value <= 0.0:
+        if radius_value <= 0.0 or radius_value > OBJECT_AT_RADIUS_MAX_M:
             raise ToolError(radius_error)
         args = {
             "mode": "object_at",

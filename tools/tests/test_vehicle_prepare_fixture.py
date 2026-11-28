@@ -15,7 +15,8 @@ VALID_ARGS = {
     "mode": "object_at",
     "type": "CivilianSedan",
     "pos": [7500.0, 0.0, 7500.0],
-    "radius": 100.0,
+    # MCPBridge.c TELEMETRY_OBJECT_AT_MAX_RADIUS: a larger radius is refused at ingress.
+    "radius": 50.0,
 }
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 

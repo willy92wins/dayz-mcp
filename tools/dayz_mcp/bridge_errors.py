@@ -908,6 +908,18 @@ _PLAYER_RESPAWN_COMMANDS = frozenset({"player_respawn", "player_respawn_survivor
 # vanilla's MissionServer.OnClientRespawnEvent kills only an unconscious or
 # restrained player and leaves any other living one alone. player_kill is not
 # in PUBLIC_NEXT_TOOLS, so the way out is named in the text, not next_step=.
+# vehicle_enter's seat job ends with timeout when the server did not read the
+# player in the driver seat with the get-in over within the bridge's 5 s. The
+# server command is not cancelled, so the player can still end in the vehicle
+# on the server (G1b run 1792c310: boat, server in_vehicle 1, client on foot).
+# vehicle_enter never runs the client get-in, so the client is not seated either way.
+VEHICLE_ENTER_TIMEOUT_TEXT = (
+    "the server get-in was not confirmed in time and is not cancelled: read "
+    "query_all_players (in_vehicle) before a retry; vehicle_enter seats the "
+    "server's player only, the client stays on foot (vehicle_get_in_client is "
+    "the client seat)"
+)
+
 PLAYER_ALIVE_CONSCIOUS_TEXT = (
     "the local player is alive, conscious and not restrained; vanilla respawns only a "
     "dead, unconscious or restrained player, so nothing was requested (player_kill "
@@ -995,6 +1007,10 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     not restrained), so no observed= detail is added; their other codes
     stay bare.
 
+    vehicle_enter is the fifteenth: its timeout carries VEHICLE_ENTER_TIMEOUT_TEXT
+    (the server get-in is not cancelled and the client is not seated). Every other
+    verb keeps a bare timeout, and so do vehicle_enter's refusals.
+
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
     clicked=false, and a world_spawn timeout has to stay "timeout". The click
@@ -1040,6 +1056,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _object_set_health_detail(result)
     if cmd in _PLAYER_RESPAWN_COMMANDS and str(result.get("error") or "") == "player_alive_conscious":
         return PLAYER_ALIVE_CONSCIOUS_TEXT
+    if cmd == "vehicle_enter" and str(result.get("error") or "") == "timeout":
+        return VEHICLE_ENTER_TIMEOUT_TEXT
     if cmd == "actor_emote":
         return _actor_emote_detail(result)
     if cmd == "ai_emote":

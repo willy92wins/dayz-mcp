@@ -326,6 +326,52 @@ server replica is.
    ladder on `vehicle_client_seated` or `vehicle_eject_failed`; keep the
    registered fixture id for a retry after resolving the blocked exit.
 
+## Boats (G1b run 1792c310, 2026-11-28, DayZDiag 1.30.164289)
+
+Measured by the Auditor in one client plus one server on Chernarus
+(`Boat_01_Orange`, `CivilianSedan`, PBO of main `ace3c3a`). Read, not
+re-measured: the code citations are the 1.30.164289 vanilla scripts.
+
+- **`vehicle_enter` seats the server's player only.** It runs
+  `StartCommand_Vehicle` on the server (`DispatchVehicleEnter`) and never the
+  client get-in, so for every transport the client stays on foot until
+  `vehicle_get_in_client` seats it. In the run, the boat's `vehicle_enter`
+  answered `timeout` (5 s, `JOB_TIMEOUT_S`) with the player 45 m from the boat,
+  and the server then read the player in the boat (`query_all_players`
+  `in_vehicle` 1) while the client was not seated; the way out the run used was
+  `player_kill`, `player_respawn` and `vehicle_get_in_client`. The car's
+  `vehicle_enter` seated in 1.75 s with the player 12 m away. Distance and
+  transport type are confounded in that one pair, so neither is established as
+  the cause of the timeout. The bridge now logs `seat dispatch ... dist_m=`
+  when it starts the get-in and `seat timeout ... command= transport_match=
+  getting_in= seat=` when the job ends at its deadline, and the tool's
+  `timeout` message names the half state. Seat the player next to the boat
+  and read both lines before reading anything into a timeout.
+- **The 890 VM exceptions at `actioninput.c:895` are vanilla's, not the seat's.**
+  `ToggleVehicleLightsActionInput.UpdatePossibleActions` forces the transport
+  the player is in as the action target, calls `GetActions` on it and reads
+  `possibleActions.Count()` before its null check
+  (`actioninput.c:894-896`). `BoatScript.SetActions` (`boatscript.c:758-762`)
+  registers `ActionGetInTransport` and `ActionPushBoat` only, no
+  `ActionSwitchLights` (`CarScript` and `MotorbikeScript` register it), so
+  `GetActions` returns a null array for a boat and the line throws once per
+  frame for any player seated in one. It starts with the seat
+  (03:20:50.186 against the `vehicle_get_in_client` call at 03:20:50) whichever
+  way the seat is made, and the addon defines no `GetActions` and no
+  `ToggleVehicleLightsActionInput` override. The vanilla scripts of `164078`
+  and `164200` have the same lines. The #467 description says "No `SCRIPT (E)`
+  line in the server or client script logs or RPTs of the run"; that run was on
+  DayZDiag 1.30.164423.89 and the statement does not reproduce on 1.30.164289,
+  where `crash_<date>.log` collects the exceptions (it is the VM exception log,
+  not a dump). Whether 164423 changed the vanilla lines was not checked (its
+  scripts are not in the evidence). Expect the exceptions in every boat test
+  on 164289 and do not count them against the addon.
+- **`vehicle_prepare_fixture` takes `radius` in (0, 50].** The call
+  `{"type": "CivilianSedan", "pos": [...]}` answered `bad_args` because the
+  tool's default radius was 100 m and the bridge refuses an `object_at` radius
+  above 50 m (`TELEMETRY_OBJECT_AT_MAX_RADIUS`). The default is 50 now, and a
+  larger radius is refused by the tool with the range in the message.
+
 ## Session shape
 
 Run the whole scenario inside **one process lifetime** (managed run start,

@@ -3506,6 +3506,10 @@ class MCPBridge : Managed
 		}
 
 		int seatAnim = vehicle.GetSeatAnimationType(crew);
+		// G1b run 1792c310: the boat's player stood 45 m away and the get-in timed
+		// out, the car's stood 12 m away and seated in 1.75 s. The distance is read
+		// before StartCommand_Vehicle moves the player, and logged only.
+		float seatDistance = vector.Distance(human.GetPosition(), vehicle.GetPosition());
 		HumanCommandVehicle vehicleCommand = human.StartCommand_Vehicle(vehicle, crew, seatAnim);
 		if (!vehicleCommand)
 		{
@@ -3529,6 +3533,7 @@ class MCPBridge : Managed
 		m_Jobs.Insert(job.id, job);
 
 		Log("job queued id=" + job.id + " kind=seat deadline_s=" + job.deadline_s);
+		Log("seat dispatch id=" + command.id + " type=" + vehicle.GetType() + " crew=" + crew + " dist_m=" + seatDistance);
 		return false;
 	}
 
@@ -9404,8 +9409,49 @@ class MCPBridge : Managed
 		PostResult(result);
 	}
 
+	// G1b run 1792c310: a seat job that ends at its deadline answers only timeout,
+	// so the server log is where a get-in that never ends (command still getting
+	// in, or on another transport) is told apart from a missing command. Reads
+	// only: the job outcome and the player's command are not touched.
+	protected void LogSeatTimeout(MCPJob job)
+	{
+		string seatState = "actor=null";
+		Human seatHuman = job.actor;
+		if (seatHuman)
+		{
+			HumanCommandVehicle seatCommand = seatHuman.GetCommand_Vehicle();
+			if (!seatCommand)
+			{
+				seatState = "command=none";
+			}
+			else
+			{
+				int seatMatch = 0;
+				if (seatCommand.GetTransport() == job.subject)
+				{
+					seatMatch = 1;
+				}
+
+				int seatGettingIn = 0;
+				if (seatCommand.IsGettingIn())
+				{
+					seatGettingIn = 1;
+				}
+
+				seatState = "command=vehicle transport_match=" + seatMatch + " getting_in=" + seatGettingIn + " seat=" + seatCommand.GetVehicleSeat();
+			}
+		}
+
+		Log("seat timeout id=" + job.id + " " + seatState);
+	}
+
 	protected void PostJobTimeout(MCPJob job)
 	{
+		if (job.kind == "seat")
+		{
+			LogSeatTimeout(job);
+		}
+
 		if (job.kind == "lease_close")
 		{
 			PostLeaseCloseJob(job, true);

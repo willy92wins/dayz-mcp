@@ -177,18 +177,41 @@ class SeatJobDiagnosticsSourceTest(unittest.TestCase):
                 self.assertNotIn(forbidden, body)
 
 
+class ClientShutdownHolderLogTest(unittest.TestCase):
+    """Finding 3: the exit log tells native retention from a request in flight."""
+
+    def test_shutdown_logs_the_holder_count_after_the_terminal_posts(self) -> None:
+        client = (addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c").read_text(
+            encoding="utf-8"
+        )
+        body = _squashed(method_body(client, "void Shutdown()"))
+        self.assertIn('Log("shutdown rest holder in_flight=" + MCPClientRestHolder.Count());', body)
+        # after the terminal POSTs and the teardown, so it counts what stays held
+        self.assertGreater(
+            body.index("in_flight="), body.index("m_RestSink.Disconnect();")
+        )
+        self.assertGreater(body.index("in_flight="), body.index("m_Configured = false;"))
+
+    def test_the_holder_itself_is_unchanged(self) -> None:
+        holder = (addon_root() / "scripts" / "4_World" / "MCP_ClientRestCallbacks.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("static int Count()", holder)
+        self.assertNotIn("Clear()", method_body(holder, "static void Drop(RestCallback cb)"))
+
+
 class DocsTest(unittest.TestCase):
     def test_vehicle_doc_corrects_the_467_claim_and_names_the_vanilla_cause(self) -> None:
         text = _squashed(VEHICLE_DOC)
         self.assertIn("actioninput.c:895", text)
         self.assertIn("BoatScript", text)
         self.assertIn("ActionSwitchLights", text)
-        self.assertIn("No `SCRIPT (E)` line", VEHICLE_DOC)
+        self.assertIn("No `SCRIPT (E)` line", text)
         self.assertIn("does not reproduce", text)
 
     def test_vehicle_doc_says_vehicle_enter_never_seats_the_client(self) -> None:
         text = _squashed(VEHICLE_DOC)
-        self.assertIn("vehicle_enter seats the server's player only", text)
+        self.assertIn("`vehicle_enter` seats the server's player only", text)
         self.assertIn("run 1792c310", text)
 
     def test_changelog_documents_the_exit_leak_as_native_retention(self) -> None:

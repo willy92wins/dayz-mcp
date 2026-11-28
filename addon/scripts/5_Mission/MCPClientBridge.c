@@ -11224,6 +11224,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_PollVersion = "";
 		m_Accum = 0.0;
 		m_Backoff = 0.0;
+		// Log only. G1b run 1792c310: a full exit still printed Leaked
+		// MCPClientPollCallback/MCPClientResultCallback (1x). This count is what
+		// the holder keeps at this point: 0 and the lines still printed means the
+		// engine, not a request in flight, keeps the two instances.
+		Log("shutdown rest holder in_flight=" + MCPClientRestHolder.Count());
 	}
 
 	protected void Log(string message)
