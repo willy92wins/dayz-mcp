@@ -359,6 +359,7 @@ class SessionCoordinator:
         self._time_fn = time_fn
         self._wall_time_fn = wall_time_fn
         self._box_bound_ticket: dict[str, str] = {}
+        self._box_next_start_ticket: dict[str, str] = {}
         self._token_fn = token_fn or (lambda: secrets.token_urlsafe(32))
         self._id_fn = id_fn or (lambda: uuid.uuid4().hex)
         self._fault_id_fn = fault_id_fn or (lambda: uuid.uuid4().hex)
@@ -2646,10 +2647,17 @@ class SessionCoordinator:
                 found.add(item[1])
         return found
 
+    def bind_next_start_ticket(self, client: ClientIdentity, ticket: object) -> None:
+        """Attach the exact ticket this start must use; not the session's last claim."""
+
+        with self._condition:
+            if isinstance(ticket, str) and ticket:
+                self._box_next_start_ticket[client.session_id] = ticket
+
     def _bound_ticket(self, client: ClientIdentity, ticket: object) -> object:
         if isinstance(ticket, str) and ticket:
             return ticket
-        return self._box_bound_ticket.get(client.session_id)
+        return self._box_next_start_ticket.get(client.session_id)
 
     def box_admit_start(self, client: ClientIdentity, ticket: object) -> str | None:
         """Audit reason that refuses a new start, or None when it may proceed."""
@@ -2660,7 +2668,7 @@ class SessionCoordinator:
             reason = shared_box_queue.admit(
                 client.session_id,
                 self._bound_ticket(client, ticket),
-                now=self._wall_time_fn(),
+                now=self._wall_time_fn,
                 root=self._box_io_root(),
             )
             return reason
@@ -2673,13 +2681,28 @@ class SessionCoordinator:
         supplied = self._bound_ticket(client, ticket)
         supplied = supplied if isinstance(supplied, str) and supplied else None
         with self._condition:
+            self._box_next_start_ticket.pop(client.session_id, None)
             return shared_box_queue.bind_run(
                 client.session_id,
                 supplied,
                 run_id,
-                now=self._wall_time_fn(),
+                now=self._wall_time_fn,
                 root=self._box_io_root(),
             )
+
+    def box_release_run(self, session_id: str | None, run_id: str) -> None:
+        from dayz_mcp import shared_box_queue
+
+        if not isinstance(run_id, str) or not run_id:
+            return
+        with self._condition:
+            result = shared_box_queue.release_run(
+                session_id,
+                run_id,
+                now=self._wall_time_fn,
+                root=self._box_io_root(),
+            )
+            self._box_apply_removed_locked(result.get("removed"))
 
     def box_wait_touch(
         self,

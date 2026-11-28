@@ -353,7 +353,11 @@ class BoxOccupancyTest(unittest.TestCase):
         self.coordinator.box_wait_touch(IDENTITY_A, joined["box_ticket"], claim=True)
         launched = process(self.launcher.pid)
         self.guard.snapshots[launched.pid] = snapshot(launched)
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A,
+            self.token_a,
+            self.request() | {"box_ticket": joined["box_ticket"]},
+        )
         self.assertTrue(result.get("ok"))
 
 

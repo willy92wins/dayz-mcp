@@ -10654,6 +10654,9 @@ class Handler(BaseHTTPRequestHandler):
             done_flag = body.get("box_wait_done") is True
             claim_flag = body.get("box_wait_claim") is True
             ticket = body.get("box_ticket")
+            start_ticket = body.get("box_start_ticket")
+            if isinstance(start_ticket, str) and start_ticket:
+                coordination.bind_next_start_ticket(client, start_ticket)
             if wait_flag or done_flag or claim_flag or ticket:
                 try:
                     payload.update(

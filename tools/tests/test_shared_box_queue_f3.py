@@ -149,7 +149,11 @@ class SharedBoxQueueF3(unittest.TestCase):
         waiter_c = _identity("instance-1-c")
         held = coordinator.box_wait_touch(owner, claim=True)
         _, owner_lease = coordinator.acquire(owner, "run")
-        started = lifecycle.start_run(owner, owner_lease["lease_token"], self._request(game))
+        started = lifecycle.start_run(
+            owner,
+            owner_lease["lease_token"],
+            self._request(game, box_ticket=held["box_ticket"]),
+        )
         self.assertTrue(started.get("ok"), started)
         self.assertEqual(len(launcher.calls), 1)
         for run in lifecycle.manifest.list_runs():
@@ -176,7 +180,9 @@ class SharedBoxQueueF3(unittest.TestCase):
         self.assertEqual(status_b, 200)
         self.assertTrue(claimed_b["box_claimed"])
         started_b = fresh.start_run(
-            waiter_b, lease_b["lease_token"], self._request(game)
+            waiter_b,
+            lease_b["lease_token"],
+            self._request(game, box_ticket=first["box_ticket"]),
         )
         self.assertTrue(started_b.get("ok"), started_b)
         self.assertEqual(len(launcher.calls), 2)
@@ -191,7 +197,9 @@ class SharedBoxQueueF3(unittest.TestCase):
         later = self._lifecycle(now, launcher, name="rt-c")[1]
         later.coordinator = coordinator
         started_c = later.start_run(
-            waiter_c, lease_c["lease_token"], self._request(game)
+            waiter_c,
+            lease_c["lease_token"],
+            self._request(game, box_ticket=second["box_ticket"]),
         )
         self.assertTrue(started_c.get("ok"), started_c)
         self.assertEqual(len(launcher.calls), 3)
@@ -435,7 +443,9 @@ class SharedBoxQueueF3(unittest.TestCase):
         _, owner_lease = coordinator.acquire(owner, "run")
         now[0] = BOX_CLAIM_TTL_S - 1
         started = lifecycle.start_run(
-            owner, owner_lease["lease_token"], self._request(game)
+            owner,
+            owner_lease["lease_token"],
+            self._request(game, box_ticket=joined["box_ticket"]),
         )
         self.assertTrue(started.get("ok"), started)
         self.assertEqual(len(launcher.calls), 1)
@@ -443,7 +453,9 @@ class SharedBoxQueueF3(unittest.TestCase):
             run.state = "EXITED"
         now[0] = (BOX_CLAIM_TTL_S - 1) + BOX_CLAIM_TTL_S
         lost = lifecycle.start_run(
-            owner, owner_lease["lease_token"], self._request(game)
+            owner,
+            owner_lease["lease_token"],
+            self._request(game, box_ticket=joined["box_ticket"]),
         )
         self.assertFalse(lost.get("ok"), lost)
         self.assertEqual(len(launcher.calls), 1)
@@ -472,7 +484,9 @@ class SharedBoxQueueF3(unittest.TestCase):
         self.assertTrue(entered["box_claimed"])
         coordinator.box_wait_touch(other, entered["box_ticket"], done=True)
         resumed = lifecycle.start_run(
-            owner, owner_lease["lease_token"], self._request(game)
+            owner,
+            owner_lease["lease_token"],
+            self._request(game, box_ticket=joined["box_ticket"]),
         )
         self.assertFalse(resumed.get("ok"), resumed)
         self.assertEqual(len(launcher.calls), 1)
@@ -495,7 +509,9 @@ class SharedBoxQueueF3(unittest.TestCase):
         self.assertFalse(stolen_start.get("ok"), stolen_start)
         self.assertEqual(len(launcher.calls), 0)
         owned = lifecycle.start_run(
-            session, lease["lease_token"], self._request(game)
+            session,
+            lease["lease_token"],
+            self._request(game, box_ticket=first["box_ticket"]),
         )
         self.assertTrue(owned.get("ok"), owned)
         self.assertEqual(len(launcher.calls), 1)
@@ -521,13 +537,15 @@ class SharedBoxQueueF3(unittest.TestCase):
         now = [0.0]
         coordinator, lifecycle, _launcher, game = self._lifecycle(now)
         session = _identity("same-session")
-        coordinator.box_wait_touch(session, claim=True)
+        held = coordinator.box_wait_touch(session, claim=True)
         _, lease = coordinator.acquire(session, "run")
         coordinator.box_wait_touch(session)
         coordinator.box_wait_touch(session, None, done=True)
         self.assertTrue(coordinator.box_is_claimed())
         started = lifecycle.start_run(
-            session, lease["lease_token"], self._request(game)
+            session,
+            lease["lease_token"],
+            self._request(game, box_ticket=held["box_ticket"]),
         )
         self.assertTrue(started.get("ok"), started)
 
@@ -555,7 +573,9 @@ class SharedBoxQueueF3(unittest.TestCase):
         status, lease = coordinator.acquire(owner, "run")
         self.assertEqual(status, 200)
         started = lifecycle.start_run(
-            owner, lease["lease_token"], self._request(game)
+            owner,
+            lease["lease_token"],
+            self._request(game, box_ticket=claimed["box_ticket"]),
         )
         self.assertTrue(started.get("ok"), started)
         self.assertEqual(len(launcher.calls), 1)
@@ -569,7 +589,9 @@ class SharedBoxQueueF3(unittest.TestCase):
         status, lease = coordinator.acquire(owner, "dayz-test")
         self.assertEqual(status, 200)
         started = lifecycle.start_run(
-            owner, lease["lease_token"], self._request(game)
+            owner,
+            lease["lease_token"],
+            self._request(game, box_ticket=claimed["box_ticket"]),
         )
         self.assertTrue(started.get("ok"), started)
         self.assertEqual(len(launcher.calls), 1)
@@ -606,7 +628,9 @@ class SharedBoxQueueF3(unittest.TestCase):
         self.assertTrue(entered.get("box_claimed"))
         coordinator.box_wait_touch(other, entered["box_ticket"], done=True)
         resumed = lifecycle.start_run(
-            owner, lease["lease_token"], self._request(game)
+            owner,
+            lease["lease_token"],
+            self._request(game, box_ticket=claimed["box_ticket"]),
         )
         self.assertFalse(resumed.get("ok"), resumed)
         self.assertEqual(len(launcher.calls), 0)
@@ -626,7 +650,9 @@ class SharedBoxQueueF3(unittest.TestCase):
         self.assertTrue(entered.get("box_claimed"))
         coordinator.box_wait_touch(other, entered["box_ticket"], done=True)
         resumed = lifecycle.start_run(
-            owner, lease["lease_token"], self._request(game)
+            owner,
+            lease["lease_token"],
+            self._request(game, box_ticket=claimed["box_ticket"]),
         )
         self.assertFalse(resumed.get("ok"), resumed)
         self.assertEqual(len(launcher.calls), 0)
@@ -1106,9 +1132,13 @@ class SharedBoxQueueF3(unittest.TestCase):
         coordinator, lifecycle, launcher, game = self._lifecycle(now)
         owner = _identity("owner-ext")
         waiter = _identity("waiter-ext")
-        coordinator.box_wait_touch(owner, claim=True)
+        held = coordinator.box_wait_touch(owner, claim=True)
         _, lease = coordinator.acquire(owner, "run")
-        started = lifecycle.start_run(owner, lease["lease_token"], self._request(game))
+        started = lifecycle.start_run(
+            owner,
+            lease["lease_token"],
+            self._request(game, box_ticket=held["box_ticket"]),
+        )
         self.assertTrue(started.get("ok"), started)
         coordinator.box_wait_touch(owner, done=True)
         coordinator.box_wait_touch(waiter, purpose="wait")

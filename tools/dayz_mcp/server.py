@@ -2873,6 +2873,7 @@ class ClientRuntime:
         ticket: str | None = None,
         done: bool = False,
         claim: bool = False,
+        start_ticket: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, object] = {}
         if wait:
@@ -2883,8 +2884,19 @@ class ClientRuntime:
             payload["box_wait_done"] = True
         if claim:
             payload["box_wait_claim"] = True
+        if isinstance(start_ticket, str) and start_ticket:
+            payload["box_start_ticket"] = start_ticket
         return await self._control_with_lazy_spawn(
             self._control._session_call, "/session/status", payload
+        )
+
+    async def bind_next_start_ticket(self, ticket: str) -> dict[str, Any]:
+        """Pin the exact ticket the next start in this session must use."""
+
+        return await self._control_with_lazy_spawn(
+            self._control._session_call,
+            "/session/status",
+            {"box_start_ticket": ticket},
         )
 
     async def reconcile_idle_session(self) -> dict[str, Any]:
@@ -7896,6 +7908,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             result: dict[str, Any] | None = None
             evicted_run_id: str | None = None
             requeued = False
+            if box_ticket:
+                try:
+                    bound = client.bind_next_start_ticket(box_ticket)
+                    if hasattr(bound, "__await__"):
+                        await bound
+                except AttributeError:
+                    pass
+                except Exception:
+                    pass
             async with client.tool_lock:
                 box: dict[str, Any] = {}
                 try:
@@ -7993,6 +8014,29 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                             port=port,
                         )
                     )
+                if (
+                    target is not None
+                    and takeover
+                    and not box_ticket
+                ):
+                    try:
+                        fresh = await client.session_status()
+                    except Exception:
+                        fresh = None
+                    if isinstance(fresh, dict):
+                        box = _box_from_status(fresh)
+                    queue_now = box.get("queue")
+                    if isinstance(queue_now, list) and queue_now:
+                        return annotated(
+                            _failed_active_run_result(
+                                project=project,
+                                mode=mode,
+                                box=box,
+                                started=started,
+                                caller_session=caller_session,
+                                port=port,
+                            )
+                        )
                 if target is not None and takeover:
                     try:
                         stop_result = await dayz_test_tool.execute_dayz_test_stop(
